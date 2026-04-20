@@ -120,15 +120,29 @@ spec:
             timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           livenessProbe:
+            {{- if or .Values.server.disableTls .Values.server.disableGatewayAuth }}
+            httpGet:
+              path: /healthz
+              port: grpc
+              scheme: {{ if .Values.server.disableTls }}HTTP{{ else }}HTTPS{{ end }}
+            {{- else }}
             tcpSocket:
               port: grpc
+            {{- end }}
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
+            {{- if or .Values.server.disableTls .Values.server.disableGatewayAuth }}
+            httpGet:
+              path: /readyz
+              port: grpc
+              scheme: {{ if .Values.server.disableTls }}HTTP{{ else }}HTTPS{{ end }}
+            {{- else }}
             tcpSocket:
               port: grpc
+            {{- end }}
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}

@@ -90,7 +90,7 @@ pub struct ServerState {
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::InvalidData
     )
 }
 

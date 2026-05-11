@@ -322,6 +322,11 @@ impl KubernetesComputeDriver {
             client_tls_secret_name: &self.config.client_tls_secret_name,
             host_gateway_ip: &self.config.host_gateway_ip,
             enable_user_namespaces: self.config.enable_user_namespaces,
+            spec_log_level: sandbox
+                .spec
+                .as_ref()
+                .map(|s| s.log_level.as_str())
+                .unwrap_or_default(),
         };
         obj.data = sandbox_to_k8s_spec(sandbox.spec.as_ref(), &params);
         let api = self.api();
@@ -943,6 +948,7 @@ struct SandboxPodParams<'a> {
     client_tls_secret_name: &'a str,
     host_gateway_ip: &'a str,
     enable_user_namespaces: bool,
+    spec_log_level: &'a str,
 }
 
 fn sandbox_to_k8s_spec(
@@ -963,9 +969,6 @@ fn sandbox_to_k8s_spec(
     let inject_workspace = !user_has_vct;
 
     if let Some(spec) = spec {
-        if !spec.log_level.is_empty() {
-            root.insert("logLevel".to_string(), serde_json::json!(spec.log_level));
-        }
         if !spec.environment.is_empty() {
             root.insert(
                 "environment".to_string(),
@@ -1101,6 +1104,7 @@ fn sandbox_template_to_k8s(
         params.ssh_handshake_secret,
         params.ssh_handshake_skew_secs,
         !params.client_tls_secret_name.is_empty(),
+        params.spec_log_level,
     );
 
     container.insert("env".to_string(), serde_json::Value::Array(env));
@@ -1255,6 +1259,7 @@ fn build_env_list(
     ssh_handshake_secret: &str,
     ssh_handshake_skew_secs: u64,
     tls_enabled: bool,
+    spec_log_level: &str,
 ) -> Vec<serde_json::Value> {
     let mut env = existing_env.cloned().unwrap_or_default();
     apply_env_map(&mut env, template_environment);
@@ -1268,6 +1273,7 @@ fn build_env_list(
         ssh_handshake_secret,
         ssh_handshake_skew_secs,
         tls_enabled,
+        spec_log_level,
     );
     env
 }
@@ -1293,6 +1299,7 @@ fn apply_required_env(
     ssh_handshake_secret: &str,
     ssh_handshake_skew_secs: u64,
     tls_enabled: bool,
+    spec_log_level: &str,
 ) {
     upsert_env(env, "OPENSHELL_SANDBOX_ID", sandbox_id);
     upsert_env(env, "OPENSHELL_SANDBOX", sandbox_name);
@@ -1300,6 +1307,9 @@ fn apply_required_env(
     upsert_env(env, "OPENSHELL_SANDBOX_COMMAND", "sleep infinity");
     if !ssh_socket_path.is_empty() {
         upsert_env(env, "OPENSHELL_SSH_SOCKET_PATH", ssh_socket_path);
+    }
+    if !spec_log_level.is_empty() {
+        upsert_env(env, "OPENSHELL_LOG_LEVEL", spec_log_level);
     }
     upsert_env(env, "OPENSHELL_SSH_HANDSHAKE_SECRET", ssh_handshake_secret);
     upsert_env(
@@ -1472,6 +1482,7 @@ mod tests {
             "my-secret-value",
             300,
             true,
+            "",
         );
 
         let secret_entry = env
@@ -1624,6 +1635,7 @@ mod tests {
             "secret",
             300,
             true, // tls_enabled
+            "",
         );
 
         // Extract the TLS-related env vars
@@ -2178,5 +2190,95 @@ mod tests {
         };
 
         assert_eq!(platform_config_bool(&template, "a_string"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Log level propagation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn log_level_propagates_as_env_var() {
+        let mut env = Vec::new();
+        apply_required_env(
+            &mut env,
+            "sandbox-1",
+            "my-sandbox",
+            "https://endpoint:8080",
+            "0.0.0.0:2222",
+            "my-secret-value",
+            300,
+            false,
+            "debug",
+        );
+
+        let log_level_entry = env
+            .iter()
+            .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("OPENSHELL_LOG_LEVEL"))
+            .expect("OPENSHELL_LOG_LEVEL must be present in env");
+        assert_eq!(
+            log_level_entry["value"].as_str(),
+            Some("debug"),
+            "log_level should be set to 'debug'"
+        );
+    }
+
+    #[test]
+    fn log_level_not_set_when_empty() {
+        let mut env = Vec::new();
+        apply_required_env(
+            &mut env,
+            "sandbox-1",
+            "my-sandbox",
+            "https://endpoint:8080",
+            "0.0.0.0:2222",
+            "my-secret-value",
+            300,
+            false,
+            "",
+        );
+
+        assert!(
+            env.iter()
+                .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("OPENSHELL_LOG_LEVEL"))
+                .is_none(),
+            "OPENSHELL_LOG_LEVEL must NOT be present when spec log_level is empty"
+        );
+    }
+
+    #[test]
+    fn log_level_includes_all_required_env_vars() {
+        let mut env = Vec::new();
+        apply_required_env(
+            &mut env,
+            "sandbox-1",
+            "my-sandbox",
+            "https://endpoint:8080",
+            "0.0.0.0:2222",
+            "my-secret-value",
+            300,
+            false,
+            "warn",
+        );
+
+        let get_env = |name: &str| -> Option<String> {
+            env.iter()
+                .find(|e| e.get("name").and_then(|v| v.as_str()) == Some(name))
+                .and_then(|e| e.get("value").and_then(|v| v.as_str()).map(String::from))
+        };
+
+        assert_eq!(
+            get_env("OPENSHELL_SANDBOX_ID"),
+            Some("sandbox-1".to_string())
+        );
+        assert_eq!(get_env("OPENSHELL_SANDBOX"), Some("my-sandbox".to_string()));
+        assert_eq!(
+            get_env("OPENSHELL_ENDPOINT"),
+            Some("https://endpoint:8080".to_string())
+        );
+        assert_eq!(
+            get_env("OPENSHELL_SANDBOX_COMMAND"),
+            Some("sleep infinity".to_string())
+        );
+        assert_eq!(get_env("OPENSHELL_LOG_LEVEL"), Some("warn".to_string()));
     }
 }

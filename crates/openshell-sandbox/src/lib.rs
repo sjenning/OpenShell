@@ -7,8 +7,10 @@
 
 mod activity_aggregator;
 mod denial_aggregator;
+#[cfg(target_os = "linux")]
 mod google_cloud_metadata;
 mod mechanistic_mapper;
+#[cfg(target_os = "linux")]
 mod metadata_server;
 
 use miette::Result;
@@ -65,6 +67,7 @@ use openshell_supervisor_network::opa::OpaEngine;
 pub use openshell_supervisor_process::process::{ProcessHandle, ProcessStatus};
 use openshell_supervisor_process::skills;
 use tokio::sync::mpsc::UnboundedSender;
+#[cfg(target_os = "linux")]
 use tokio::time::timeout;
 
 /// Run a command in the sandbox.

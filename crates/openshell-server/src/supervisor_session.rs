@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{Ascii, MetadataValue};
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -632,7 +632,11 @@ impl tonic::service::Interceptor for PeerAuthInterceptor {
     }
 }
 
-async fn build_peer_channel(endpoint: &str) -> Result<Channel, Status> {
+async fn build_peer_channel(
+    endpoint: &str,
+    ca_pem: Option<Vec<u8>>,
+    server_name: Option<&str>,
+) -> Result<Channel, Status> {
     let mut ep = Endpoint::from_shared(endpoint.to_string())
         .map_err(|err| Status::internal(format!("invalid gateway peer endpoint: {err}")))?
         .connect_timeout(Duration::from_secs(10))
@@ -642,8 +646,16 @@ async fn build_peer_channel(endpoint: &str) -> Result<Channel, Status> {
         .http2_adaptive_window(true);
 
     if endpoint.starts_with("https://") {
+        let mut tls = if let Some(pem) = ca_pem {
+            ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+        } else {
+            ClientTlsConfig::new().with_native_roots()
+        };
+        if let Some(name) = server_name {
+            tls = tls.domain_name(name);
+        }
         ep = ep
-            .tls_config(ClientTlsConfig::new().with_native_roots())
+            .tls_config(tls)
             .map_err(|err| Status::internal(format!("failed to configure peer TLS: {err}")))?;
     }
 
@@ -790,7 +802,14 @@ async fn connect_peer_relay(
         .ok_or_else(|| {
             Status::failed_precondition("gateway peer ServiceAccount token is not configured")
         })?;
-    let channel = build_peer_channel(owner_peer_endpoint).await?;
+    let tls_cfg = state.config.tls.as_ref();
+    let ca_pem = tls_cfg
+        .and_then(|t| t.client_ca_path.as_ref())
+        .map(|p| std::fs::read(p))
+        .transpose()
+        .map_err(|err| Status::internal(format!("failed to read peer CA certificate: {err}")))?;
+    let server_name = tls_cfg.and_then(|t| t.peer_server_name.as_deref());
+    let channel = build_peer_channel(owner_peer_endpoint, ca_pem, server_name).await?;
     let interceptor = PeerAuthInterceptor::new(&token, &state.replica_id)?;
     let mut client = open_shell_client::OpenShellClient::with_interceptor(channel, interceptor);
 

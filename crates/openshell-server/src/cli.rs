@@ -292,6 +292,7 @@ async fn run_from_args(mut args: RunArgs, matches: ArgMatches) -> Result<()> {
             key_path,
             require_client_auth: has_client_ca && !has_oidc,
             client_ca_path: args.tls_client_ca.clone(),
+            peer_server_name: None,
         })
     };
 

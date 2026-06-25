@@ -426,6 +426,14 @@ pub struct TlsConfig {
     /// When `false`, client certificates are accepted but not required.
     #[serde(default)]
     pub require_client_auth: bool,
+
+    /// TLS server name used for SNI and certificate verification when the
+    /// gateway connects to a peer gateway by IP address. The value must match
+    /// a DNS SAN on the peer's server certificate. When `None`, the hostname
+    /// is taken from the peer endpoint URL, which fails if it is an IP address
+    /// not listed as a SAN.
+    #[serde(default)]
+    pub peer_server_name: Option<String>,
 }
 
 /// OIDC (`OpenID` Connect) configuration for JWT-based authentication.

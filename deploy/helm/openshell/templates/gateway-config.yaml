@@ -74,6 +74,7 @@ data:
     cert_path             = "/etc/openshell-tls/server/tls.crt"
     key_path              = "/etc/openshell-tls/server/tls.key"
     client_ca_path        = "/etc/openshell-tls/client-ca/ca.crt"
+    peer_server_name      = {{ printf "%s.%s.svc.cluster.local" (include "openshell.fullname" .) .Release.Namespace | quote }}
     {{- end }}
 
     {{- if .Values.server.auth.allowUnauthenticatedUsers }}

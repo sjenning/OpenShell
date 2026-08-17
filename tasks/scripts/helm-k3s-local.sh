@@ -144,9 +144,9 @@ apply_base_manifests() {
   local base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
   echo "Applying agent-sandbox manifest (${AGENT_SANDBOX_VERSION})..."
   local local_manifest="sandbox.yaml"
-  if [[ "${AGENT_SANDBOX_VERSION}" == "v0.4.6" ]]; then
-    local_manifest="manifest.yaml"
-  fi
+  case "${AGENT_SANDBOX_VERSION}" in
+    v0.[0-4].*|v0.5.0|v0.5.1) local_manifest="manifest.yaml" ;;
+  esac
   kubectl --kubeconfig="${KUBECONFIG_TARGET}" apply -f "${base}/${local_manifest}"
 }
 

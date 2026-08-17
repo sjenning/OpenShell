@@ -679,9 +679,9 @@ fi
 echo "Installing agent-sandbox CRDs and controller (${AGENT_SANDBOX_VERSION})..."
 _agent_sandbox_base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
 _agent_sandbox_manifest="sandbox.yaml"
-if [[ "${AGENT_SANDBOX_VERSION}" == "v0.4.6" ]]; then
-  _agent_sandbox_manifest="manifest.yaml"
-fi
+case "${AGENT_SANDBOX_VERSION}" in
+  v0.[0-4].*|v0.5.0|v0.5.1) _agent_sandbox_manifest="manifest.yaml" ;;
+esac
 kctl apply -f "${_agent_sandbox_base}/${_agent_sandbox_manifest}"
 wait_for_agent_sandbox_crd
 kctl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=300s

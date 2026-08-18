@@ -61,7 +61,7 @@ source "${ROOT}/e2e/support/gateway-common.sh"
 # Upstream agent-sandbox release. The Kubernetes driver supports the v1beta1
 # Sandbox API introduced in v0.5.0 and falls back to v1alpha1 for v0.4.6
 # clusters. Override this env var to exercise the v1alpha1 controller release.
-AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.0}"
+AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.4}"
 
 e2e_preserve_mise_dirs
 e2e_align_docker_host_with_cli_context
@@ -678,7 +678,11 @@ fi
 # every gateway K8s call 404s and CreateSandbox never produces a Pod.
 echo "Installing agent-sandbox CRDs and controller (${AGENT_SANDBOX_VERSION})..."
 _agent_sandbox_base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
-kctl apply -f "${_agent_sandbox_base}/manifest.yaml"
+case "${AGENT_SANDBOX_VERSION}" in
+  v0.4.*|v0.5.0|v0.5.1) _agent_sandbox_manifest="manifest.yaml" ;;
+  *) _agent_sandbox_manifest="sandbox.yaml" ;;
+esac
+kctl apply -f "${_agent_sandbox_base}/${_agent_sandbox_manifest}"
 wait_for_agent_sandbox_crd
 kctl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=300s
 

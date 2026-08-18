@@ -5059,6 +5059,31 @@ mod tests {
     }
 
     #[test]
+    fn derive_phase_ignores_suspended_false_condition() {
+        let status = DriverSandboxStatus {
+            conditions: vec![
+                DriverCondition {
+                    r#type: "Suspended".to_string(),
+                    status: "False".to_string(),
+                    reason: "SandboxRunning".to_string(),
+                    message: "Sandbox is not suspended".to_string(),
+                    last_transition_time: String::new(),
+                },
+                DriverCondition {
+                    r#type: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: "DependenciesReady".to_string(),
+                    message: "Pod is Ready; Service Exists".to_string(),
+                    last_transition_time: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(derive_phase(Some(&status)), SandboxPhase::Ready);
+    }
+
+    #[test]
     fn derive_phase_returns_ready_for_ready_true() {
         let status = DriverSandboxStatus {
             conditions: vec![DriverCondition {

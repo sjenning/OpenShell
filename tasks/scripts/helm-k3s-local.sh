@@ -36,7 +36,7 @@ PRELOAD_SANDBOX_IMAGE="${HELM_K3S_PRELOAD_SANDBOX_IMAGE-${DEFAULT_SANDBOX_PRELOA
 # The Kubernetes driver supports the v1beta1 Sandbox API introduced in v0.5.0
 # and falls back to v1alpha1 for v0.4.6 clusters. Override this env var to
 # exercise the v1alpha1 controller release.
-AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.0}"
+AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.4}"
 
 default_kubeconfig="${ROOT}/kubeconfig"
 if [[ -n "${HELM_K3S_KUBECONFIG:-}" ]]; then
@@ -142,8 +142,13 @@ merge_kubeconfig() {
 apply_base_manifests() {
   require_kubectl
   local base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
+  local manifest
+  case "${AGENT_SANDBOX_VERSION}" in
+    v0.4.*|v0.5.0|v0.5.1) manifest="manifest.yaml" ;;
+    *) manifest="sandbox.yaml" ;;
+  esac
   echo "Applying agent-sandbox manifest (${AGENT_SANDBOX_VERSION})..."
-  kubectl --kubeconfig="${KUBECONFIG_TARGET}" apply -f "${base}/manifest.yaml"
+  kubectl --kubeconfig="${KUBECONFIG_TARGET}" apply -f "${base}/${manifest}"
 }
 
 configure_ghcr_credentials() {

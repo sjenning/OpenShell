@@ -17,7 +17,7 @@ use miette::{IntoDiagnostic, Result};
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, Scope, TokenResponse, TokenUrl,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use openshell_bootstrap::oidc_token::OidcTokenBundle;
 use openshell_sdk::oidc::RefreshTokenInput;
@@ -119,6 +119,37 @@ fn build_ci_scopes(scopes: Option<&str>) -> Vec<Scope> {
     s.split_whitespace()
         .map(|scope| Scope::new(scope.to_string()))
         .collect()
+}
+
+fn device_authorization_params<'a>(
+    client_id: &'a str,
+    scopes: &'a str,
+    audience: Option<&'a str>,
+    pkce_challenge: &'a PkceCodeChallenge,
+) -> Vec<(&'static str, &'a str)> {
+    let mut params = vec![
+        ("client_id", client_id),
+        ("scope", scopes),
+        ("code_challenge", pkce_challenge.as_str()),
+        ("code_challenge_method", pkce_challenge.method().as_str()),
+    ];
+    if let Some(audience) = audience {
+        params.push(("audience", audience));
+    }
+    params
+}
+
+fn device_token_params<'a>(
+    client_id: &'a str,
+    device_code: &'a str,
+    pkce_verifier: &'a PkceCodeVerifier,
+) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ("device_code", device_code),
+        ("client_id", client_id),
+        ("code_verifier", pkce_verifier.secret()),
+    ]
 }
 
 /// Run the OIDC Authorization Code + PKCE browser flow.
@@ -279,15 +310,9 @@ pub async fn oidc_device_code_flow(
         .map(|s| s.to_string())
         .collect::<Vec<_>>()
         .join(" ");
-
-    let mut form_params = vec![("client_id", client_id), ("scope", &scopes_param)];
-
-    // Add audience if present
-    let audience_str;
-    if let Some(aud) = audience {
-        audience_str = aud.to_string();
-        form_params.push(("audience", &audience_str));
-    }
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    let form_params =
+        device_authorization_params(client_id, &scopes_param, audience, &pkce_challenge);
 
     let device_auth_resp = http
         .post(device_auth_endpoint)
@@ -336,11 +361,7 @@ pub async fn oidc_device_code_flow(
 
         tokio::time::sleep(poll_interval).await;
 
-        let token_params = vec![
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("device_code", &device_auth.device_code),
-            ("client_id", client_id),
-        ];
+        let token_params = device_token_params(client_id, &device_auth.device_code, &pkce_verifier);
 
         let poll_resp = http
             .post(&discovery.token_endpoint)
@@ -731,6 +752,47 @@ mod tests {
     fn build_ci_scopes_empty_on_none() {
         let scopes = build_ci_scopes(None);
         assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn device_authorization_params_include_s256_pkce() {
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let params = device_authorization_params(
+            "test-client",
+            "openid profile",
+            Some("test-audience"),
+            &challenge,
+        )
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(params.get("client_id"), Some(&"test-client"));
+        assert_eq!(params.get("scope"), Some(&"openid profile"));
+        assert_eq!(params.get("audience"), Some(&"test-audience"));
+        assert_eq!(params.get("code_challenge_method"), Some(&"S256"));
+        assert_eq!(
+            params.get("code_challenge"),
+            Some(&PkceCodeChallenge::from_code_verifier_sha256(&verifier).as_str())
+        );
+    }
+
+    #[test]
+    fn device_token_params_include_pkce_verifier() {
+        let (_, verifier) = PkceCodeChallenge::new_random_sha256();
+        let params = device_token_params("test-client", "device-code", &verifier)
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            params.get("grant_type"),
+            Some(&"urn:ietf:params:oauth:grant-type:device_code")
+        );
+        assert_eq!(params.get("device_code"), Some(&"device-code"));
+        assert_eq!(params.get("client_id"), Some(&"test-client"));
+        assert_eq!(
+            params.get("code_verifier"),
+            Some(&verifier.secret().as_str())
+        );
     }
 
     #[test]

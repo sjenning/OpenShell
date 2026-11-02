@@ -265,8 +265,10 @@ sweep adapters enumerate durable grants, perform maintenance, and publish change
   Adapters separate configuration from secret material and translate semantic
   outputs into pinned profile environment keys. The registry preserves failure
   recovery classifications and parks malformed responses. Custom Rust minters
-  use `custom:<name>`; public profile selection and remote services are not yet
-  implemented.
+  use `custom:<name>`. Public profiles and configure requests accept exact
+  built-in `strategy_name` selectors; a specified enum must agree. Status exposes
+  canonical names for legacy grants. Unregistered custom names are rejected;
+  custom registration and remote services are not yet implemented.
 - Existing generation/CAS fencing remains active for deletion and
   reconfiguration. An ambiguous rotating-token exchange is parked for recovery
   rather than automatically consuming the grant again.

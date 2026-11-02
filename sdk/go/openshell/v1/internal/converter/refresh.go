@@ -80,6 +80,7 @@ func RefreshStatusFromProto(s *pb.ProviderCredentialRefreshStatus) *types.Refres
 		ProviderID:           s.GetProviderId(),
 		CredentialKey:        s.GetCredentialKey(),
 		Strategy:             RefreshStrategyFromProto(s.GetStrategy()),
+		StrategyName:         s.GetStrategyName(),
 		Status:               s.GetStatus(),
 		ExpiresAt:            TimeFromProto(s.GetExpirationTime()),
 		NextRefreshAt:        TimeFromProto(s.GetNextRefreshTime()),
@@ -105,6 +106,7 @@ func RefreshConfigToProto(c *types.RefreshConfig) *pb.ConfigureProviderRefreshRe
 		Provider:           c.Provider,
 		CredentialKey:      c.CredentialKey,
 		Strategy:           RefreshStrategyToProto(c.Strategy),
+		StrategyName:       c.StrategyName,
 		Material:           CopyStringMap(c.Material),
 		SecretMaterialKeys: CopyStringSlice(c.SecretMaterialKeys),
 	}

@@ -519,6 +519,8 @@ Profile YAML can declare these refresh strategies:
 | `google_service_account_jwt` | The gateway signs a Google service account JWT and exchanges it for an access token. |
 | `aws_sts_assume_role` | The gateway calls `sts:AssumeRole` and mints `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in one operation. |
 
+You can use `refresh.strategy_name` instead of `refresh.strategy` with an exact name from the table, such as `oauth2_refresh_token`. If you supply both, they must select the same strategy. The `ConfigureProviderRefresh` API supports the same `strategy_name` field, and refresh status returns the canonical name even for existing enum-configured grants. Unregistered names, including `custom:<name>`, are rejected; remote custom minters are not yet available.
+
 `openshell provider refresh configure` accepts only gateway-mintable strategies: `oauth2-refresh-token`, `oauth2-client-credentials`, `google-service-account-jwt`, and `aws-sts-assume-role`. Use `openshell provider update` for `static` and `external` refresh patterns.
 
 Gateway-managed refresh strategies use these material keys:

@@ -59,8 +59,10 @@ type RefreshStatus struct {
 	ProviderID    string
 	CredentialKey string
 	Strategy      RefreshStrategy
-	Status        string
-	ExpiresAt     time.Time
+	// StrategyName is the canonical registered issuer strategy name.
+	StrategyName string
+	Status       string
+	ExpiresAt    time.Time
 	// NextRefreshAt is zero when no automatic refresh is scheduled. Use
 	// RecoveryAction to distinguish a parked refresh from an unset timestamp.
 	NextRefreshAt        time.Time
@@ -75,9 +77,11 @@ type RefreshStatus struct {
 // RefreshConfig holds configuration parameters for gateway-owned credential
 // refresh on a provider credential.
 type RefreshConfig struct {
-	Provider           string
-	CredentialKey      string
-	Strategy           RefreshStrategy
+	Provider      string
+	CredentialKey string
+	Strategy      RefreshStrategy
+	// StrategyName can replace an empty Strategy or match its registered name.
+	StrategyName       string
 	Material           map[string]string
 	SecretMaterialKeys []string
 	ExpiresAt          *time.Time

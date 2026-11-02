@@ -30,6 +30,9 @@ pub fn resolve_refresh_strategy(
 }
 
 #[cfg(test)]
+mod profile_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -128,9 +128,12 @@ adapter must reload and recheck it under the distributed lease. Tombstones and
 pending cleanup remain eligible for maintenance even when a mint is parked.
 
 Durable grant serialization, grant enumeration/maintenance, and provider-record
-publication still live in gateway adapters. Moving those into the issuer, adding the public
-`strategy_name` field, exposing custom
-minters through profiles/configuration, durable reconnectable change streams,
+publication still live in gateway adapters. Public profile and configure
+`strategy_name` fields now support named built-ins with enum/name conflict checks;
+status projects canonical names for legacy grants. New grants persist known names
+using the existing durable enum; existing grants need no migration. Unregistered custom names
+fail closed. Moving durable adapters into the issuer, exposing registered custom
+minters through configuration, durable reconnectable change streams,
 and remote transport remain separate implementation work. The Rust registry
 supports custom implementations; it does not yet enable remote minter services.
 

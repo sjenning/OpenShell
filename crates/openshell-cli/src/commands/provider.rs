@@ -1282,6 +1282,7 @@ pub async fn provider_create_with_options(options: ProviderCreateOptions<'_>) ->
                 provider: provider_name.clone(),
                 credential_key: adc_credential_key.clone(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
+                strategy_name: String::new(),
                 material,
                 secret_material_keys: vec![
                     "client_secret".to_string(),
@@ -1996,6 +1997,7 @@ pub async fn provider_refresh_config(
             provider: input.name.to_string(),
             credential_key: input.credential_key.to_string(),
             strategy: strategy as i32,
+            strategy_name: String::new(),
             material,
             secret_material_keys,
             expiration_time: input
@@ -3463,6 +3465,7 @@ binaries: [/usr/bin/curl]
         assert!(header.contains("LAST_ERROR"));
 
         let row = refresh_status_row(&ProviderCredentialRefreshStatus {
+            strategy_name: String::new(),
             provider: "my-graph".to_string(),
             provider_id: "provider-id".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),

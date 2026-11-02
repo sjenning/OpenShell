@@ -324,6 +324,10 @@ pub fn refresh_status_from_state(
         provider_id: state.provider_id.clone(),
         credential_key: state.credential_key.clone(),
         strategy: state.strategy,
+        strategy_name: match ProviderCredentialRefreshStrategy::try_from(state.strategy) {
+            Ok(ProviderCredentialRefreshStrategy::Unspecified) | Err(_) => String::new(),
+            Ok(strategy) => refresh_strategy_name(strategy as i32).to_string(),
+        },
         status: state.status.clone(),
         expiration_time: if refresh_has_expiration(state) {
             openshell_core::time::timestamp_from_millis(state.expires_at_ms).ok()

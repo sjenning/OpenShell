@@ -2507,6 +2507,9 @@ message ProviderCredentialRefresh {
   reserved 4, 5;
   reserved "refresh_before_seconds", "max_lifetime_seconds";
   ProviderCredentialRefreshStrategy strategy = 1;
+  // Exact registered strategy name. May replace an unspecified enum or match a
+  // specified enum; conflicting selectors are rejected. Empty uses the enum.
+  string strategy_name = 8;
   string token_url = 2;
   repeated string scopes = 3;
   google.protobuf.Duration refresh_before = 104;
@@ -2522,6 +2525,8 @@ message ProviderCredentialRefreshStatus {
   string provider_id = 2;
   string credential_key = 3;
   ProviderCredentialRefreshStrategy strategy = 4;
+  // Canonical strategy name, including for legacy enum-configured grants.
+  string strategy_name = 14;
   string status = 5;
   google.protobuf.Timestamp expiration_time = 106;
   // Next automatic refresh time. Absence means no automatic retry is scheduled;
@@ -2566,6 +2571,10 @@ message ConfigureProviderRefreshRequest {
   string provider = 1;
   string credential_key = 2;
   ProviderCredentialRefreshStrategy strategy = 3;
+  // Exact registered strategy name. May replace an unspecified enum or match a
+  // specified enum; conflicting selectors are rejected. Empty uses the enum.
+  // Only embedded built-ins are currently registered; custom names fail closed.
+  string strategy_name = 9;
   map<string, string> material = 4 [(openshell.options.v1.secret) = true];
   // Additional material names the caller requests be stored as secrets. Every
   // name must be present in material. The server also classifies secrets from

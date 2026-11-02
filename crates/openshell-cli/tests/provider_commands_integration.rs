@@ -1261,6 +1261,7 @@ impl OpenShell for TestOpenShell {
             .get(&request.provider)
             .ok_or_else(|| Status::not_found("provider not found"))?;
         let status = ProviderCredentialRefreshStatus {
+            strategy_name: String::new(),
             provider: request.provider.clone(),
             provider_id: provider.object_id().to_string(),
             credential_key: request.credential_key.clone(),

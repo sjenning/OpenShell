@@ -67,8 +67,10 @@ type ProfileCredential struct {
 // ProfileCredentialRefresh declares how a profile credential is refreshed.
 type ProfileCredentialRefresh struct {
 	Strategy RefreshStrategy
-	TokenURL string
-	Scopes   []string
+	// StrategyName is an exact registered name, not a legacy enum alias.
+	StrategyName string
+	TokenURL     string
+	Scopes       []string
 	// RefreshBefore retains the exact protobuf duration, including presence and nanoseconds.
 	RefreshBefore *ProfileDuration
 	// MaxLifetime retains the exact protobuf duration, including presence and nanoseconds.

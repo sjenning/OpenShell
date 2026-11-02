@@ -3462,10 +3462,13 @@ fn validate_strategy_profile_binding(
             "strategy '{strategy_name}' requires a provider profile that declares this refresh on credential {expected_primary}"
         ))
     })?;
-    if refresh_defaults.strategy != strategy {
+    let declared_strategy = refresh_defaults
+        .effective_strategy()
+        .map_err(Status::failed_precondition)?;
+    if declared_strategy != strategy {
         return Err(Status::failed_precondition(format!(
             "provider profile declares strategy '{}' for {credential_key}, not '{strategy_name}'",
-            crate::provider_refresh::refresh_strategy_name(refresh_defaults.strategy as i32)
+            crate::provider_refresh::refresh_strategy_name(declared_strategy as i32)
         )));
     }
     if credential_key != expected_primary {
@@ -4890,8 +4893,9 @@ pub(super) async fn handle_configure_provider_refresh(
             "credential_key must be a valid environment variable name",
         ));
     }
-    let strategy = openshell_providers::resolve_refresh_strategy(request.strategy, "")
-        .map_err(Status::invalid_argument)?;
+    let strategy =
+        openshell_providers::resolve_refresh_strategy(request.strategy, &request.strategy_name)
+            .map_err(Status::invalid_argument)?;
     if strategy == ProviderCredentialRefreshStrategy::Unspecified {
         return Err(Status::invalid_argument("refresh strategy is required"));
     }
@@ -5562,6 +5566,7 @@ fn telemetry_provider_profile(provider_type: &str) -> TelemetryProviderProfile {
 #[cfg(test)]
 mod tests {
     mod reference_versions;
+    mod strategy_names;
 
     use super::*;
     use crate::auth::identity::{Identity, IdentityProvider};
@@ -7205,6 +7210,7 @@ mod tests {
             path_template: String::new(),
             refresh: Some(ProviderCredentialRefresh {
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
+                strategy_name: String::new(),
                 token_url: "https://auth.example.com/token".to_string(),
                 scopes: Vec::new(),
                 refresh_before: Some(prost_types::Duration {
@@ -8380,6 +8386,7 @@ mod tests {
         let response = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -8486,6 +8493,7 @@ mod tests {
                     ("client_secret".to_string(), "client-secret".to_string()),
                 ]),
                 secret_material_keys: vec!["client_secret".to_string()],
+                strategy_name: String::new(),
                 expiration_time: openshell_core::time::timestamp_from_millis(0).ok(),
                 workspace_scope: Some(openshell_core::proto::workspace_selector(
                     "default".to_string(),
@@ -8616,6 +8624,7 @@ mod tests {
         .await
         .unwrap();
         let request = |client_secret: &str| ConfigureProviderRefreshRequest {
+            strategy_name: String::new(),
             request_id: String::new(),
             provider: "configure-conflict".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -8739,6 +8748,7 @@ mod tests {
             first_state.credentials.clone(),
         ));
         let request = |client_secret: &str| ConfigureProviderRefreshRequest {
+            strategy_name: String::new(),
             request_id: String::new(),
             provider: "configure-create-race".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -8874,6 +8884,7 @@ mod tests {
         handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "provider-a".to_string(),
                 credential_key: "REFRESH_TOKEN".to_string(),
@@ -9019,6 +9030,7 @@ mod tests {
         let response = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "vertex-sa".to_string(),
                 credential_key: "GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN".to_string(),
@@ -9097,6 +9109,7 @@ mod tests {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
+                strategy_name: String::new(),
                 material: HashMap::from([
                     ("tenant_id".to_string(), "tenant".to_string()),
                     ("client_id".to_string(), "client-id".to_string()),
@@ -9208,6 +9221,7 @@ mod tests {
         handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-delete".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -9460,6 +9474,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "refreshing-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -9543,6 +9558,7 @@ mod tests {
         handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "first-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -9565,6 +9581,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "second-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -9627,6 +9644,7 @@ mod tests {
         let endpoint_override = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -9655,6 +9673,7 @@ mod tests {
         let missing_material = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -9716,6 +9735,7 @@ mod tests {
                     provider: "msgraph".to_string(),
                     credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                     strategy: strategy as i32,
+                    strategy_name: String::new(),
                     material: HashMap::new(),
                     secret_material_keys: Vec::new(),
                     expiration_time: None,
@@ -11646,6 +11666,7 @@ mod tests {
                             refresh: Some(ProviderCredentialRefresh {
                                 strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken
                                     as i32,
+                                strategy_name: String::new(),
                                 token_url: "https://login.example/token".to_string(),
                                 scopes: vec!["https://example.test/.default".to_string()],
                                 refresh_before: Some(prost_types::Duration {
@@ -12408,6 +12429,7 @@ mod tests {
         .await
         .unwrap();
         let configure = || ConfigureProviderRefreshRequest {
+            strategy_name: String::new(),
             request_id: String::new(),
             provider: "stable-refresh".to_string(),
             credential_key: "ACCESS_TOKEN".to_string(),
@@ -14887,6 +14909,7 @@ mod tests {
         let response = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "my-aws-v2".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -14946,6 +14969,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-endpoint-override".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15026,6 +15050,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-partial-source".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15082,6 +15107,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-lone-session".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15141,6 +15167,7 @@ mod tests {
         handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-outputs".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15222,6 +15249,7 @@ mod tests {
         handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-update-guard".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15319,6 +15347,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "generic-no-profile".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15374,6 +15403,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "aws-wrong-key".to_string(),
                 credential_key: "AWS_SECRET_ACCESS_KEY".to_string(),
@@ -15555,6 +15585,7 @@ mod tests {
         let err = handle_configure_provider_refresh(
             &state,
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: "new-aws-provider".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
@@ -15633,6 +15664,7 @@ mod tests {
 
         let configure = |provider: &str| {
             authed_request(ConfigureProviderRefreshRequest {
+                strategy_name: String::new(),
                 request_id: String::new(),
                 provider: provider.to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),

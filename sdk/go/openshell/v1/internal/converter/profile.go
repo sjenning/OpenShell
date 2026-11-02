@@ -192,7 +192,7 @@ func profileCredentialRefreshFromProto(r *pb.ProviderCredentialRefresh) *types.P
 		return nil
 	}
 	result := &types.ProfileCredentialRefresh{
-		Strategy: RefreshStrategyFromProto(r.GetStrategy()), TokenURL: r.GetTokenUrl(),
+		Strategy: RefreshStrategyFromProto(r.GetStrategy()), StrategyName: r.GetStrategyName(), TokenURL: r.GetTokenUrl(),
 		Scopes: CopyStringSlice(r.GetScopes()), RefreshBefore: profileDurationFromProto(r.RefreshBefore),
 		MaxLifetime: profileDurationFromProto(r.MaxLifetime),
 	}
@@ -210,7 +210,7 @@ func profileCredentialRefreshToProto(r *types.ProfileCredentialRefresh) *pb.Prov
 		return nil
 	}
 	result := &pb.ProviderCredentialRefresh{
-		Strategy: RefreshStrategyToProto(r.Strategy), TokenUrl: r.TokenURL,
+		Strategy: RefreshStrategyToProto(r.Strategy), StrategyName: r.StrategyName, TokenUrl: r.TokenURL,
 		Scopes: CopyStringSlice(r.Scopes), RefreshBefore: profileDurationToProto(r.RefreshBefore),
 		MaxLifetime: profileDurationToProto(r.MaxLifetime),
 	}

@@ -177,10 +177,14 @@ mod tests {
     // selections absent; storage.v1 remains frozen. Public field 3 retains its
     // image wire identity, now with explicit presence. Compute configuration
     // updates use a separate capability/service and add one classified RPC.
+    // Exact strategy names add public request/status fields and field 8 to
+    // ProviderCredentialRefresh, which is shared with durable profiles. Legacy
+    // profiles decode with an empty name; named built-in profile exports also
+    // populate the existing enum. No stored grant field or wire number changes.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "33e32bb6cb2251b3e75c6425555502e6c2fd675b640094437ef06856a46866e3";
+        "9ada6347ddd6477eb9ebc25780ec733f33133dc620fcf28cddae0ffe86233f03";
     const DURABLE_SCHEMA_SHA256: &str =
-        "cb15f8f79a855064a43fe8c6cd908bf07eca6604e2bf8ab7d2de0ef33e97da4e";
+        "b23837ce3fbea5d85f7dd51e004b48406a3be5fe2aac2e7e25d0315ae8796f34";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =
         "c0c3ea17f105aaa6d843c466fd4240451c2105dce7675384935d4aaecdac8abf";
     // Encoded with the schema that omitted stable_placeholder. Keep these

@@ -10009,8 +10009,11 @@ func (x *ProviderCredentialRefreshOutput) GetCredential() string {
 }
 
 type ProviderCredentialRefresh struct {
-	state             protoimpl.MessageState               `protogen:"open.v1"`
-	Strategy          ProviderCredentialRefreshStrategy    `protobuf:"varint,1,opt,name=strategy,proto3,enum=openshell.v1.ProviderCredentialRefreshStrategy" json:"strategy,omitempty"`
+	state    protoimpl.MessageState            `protogen:"open.v1"`
+	Strategy ProviderCredentialRefreshStrategy `protobuf:"varint,1,opt,name=strategy,proto3,enum=openshell.v1.ProviderCredentialRefreshStrategy" json:"strategy,omitempty"`
+	// Exact registered strategy name. May replace an unspecified enum or match a
+	// specified enum; conflicting selectors are rejected. Empty uses the enum.
+	StrategyName      string                               `protobuf:"bytes,8,opt,name=strategy_name,json=strategyName,proto3" json:"strategy_name,omitempty"`
 	TokenUrl          string                               `protobuf:"bytes,2,opt,name=token_url,json=tokenUrl,proto3" json:"token_url,omitempty"`
 	Scopes            []string                             `protobuf:"bytes,3,rep,name=scopes,proto3" json:"scopes,omitempty"`
 	RefreshBefore     *durationpb.Duration                 `protobuf:"bytes,104,opt,name=refresh_before,json=refreshBefore,proto3" json:"refresh_before,omitempty"`
@@ -10058,6 +10061,13 @@ func (x *ProviderCredentialRefresh) GetStrategy() ProviderCredentialRefreshStrat
 	return ProviderCredentialRefreshStrategy_PROVIDER_CREDENTIAL_REFRESH_STRATEGY_UNSPECIFIED
 }
 
+func (x *ProviderCredentialRefresh) GetStrategyName() string {
+	if x != nil {
+		return x.StrategyName
+	}
+	return ""
+}
+
 func (x *ProviderCredentialRefresh) GetTokenUrl() string {
 	if x != nil {
 		return x.TokenUrl
@@ -10101,13 +10111,15 @@ func (x *ProviderCredentialRefresh) GetAdditionalOutputs() []*ProviderCredential
 }
 
 type ProviderCredentialRefreshStatus struct {
-	state          protoimpl.MessageState            `protogen:"open.v1"`
-	Provider       string                            `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
-	ProviderId     string                            `protobuf:"bytes,2,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
-	CredentialKey  string                            `protobuf:"bytes,3,opt,name=credential_key,json=credentialKey,proto3" json:"credential_key,omitempty"`
-	Strategy       ProviderCredentialRefreshStrategy `protobuf:"varint,4,opt,name=strategy,proto3,enum=openshell.v1.ProviderCredentialRefreshStrategy" json:"strategy,omitempty"`
-	Status         string                            `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
-	ExpirationTime *timestamppb.Timestamp            `protobuf:"bytes,106,opt,name=expiration_time,json=expirationTime,proto3" json:"expiration_time,omitempty"`
+	state         protoimpl.MessageState            `protogen:"open.v1"`
+	Provider      string                            `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	ProviderId    string                            `protobuf:"bytes,2,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
+	CredentialKey string                            `protobuf:"bytes,3,opt,name=credential_key,json=credentialKey,proto3" json:"credential_key,omitempty"`
+	Strategy      ProviderCredentialRefreshStrategy `protobuf:"varint,4,opt,name=strategy,proto3,enum=openshell.v1.ProviderCredentialRefreshStrategy" json:"strategy,omitempty"`
+	// Canonical strategy name, including for legacy enum-configured grants.
+	StrategyName   string                 `protobuf:"bytes,14,opt,name=strategy_name,json=strategyName,proto3" json:"strategy_name,omitempty"`
+	Status         string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	ExpirationTime *timestamppb.Timestamp `protobuf:"bytes,106,opt,name=expiration_time,json=expirationTime,proto3" json:"expiration_time,omitempty"`
 	// Next automatic refresh time. Absence means no automatic retry is scheduled;
 	// use recovery_action to determine the required recovery workflow.
 	NextRefreshTime *timestamppb.Timestamp                  `protobuf:"bytes,107,opt,name=next_refresh_time,json=nextRefreshTime,proto3" json:"next_refresh_time,omitempty"`
@@ -10183,6 +10195,13 @@ func (x *ProviderCredentialRefreshStatus) GetStrategy() ProviderCredentialRefres
 		return x.Strategy
 	}
 	return ProviderCredentialRefreshStrategy_PROVIDER_CREDENTIAL_REFRESH_STRATEGY_UNSPECIFIED
+}
+
+func (x *ProviderCredentialRefreshStatus) GetStrategyName() string {
+	if x != nil {
+		return x.StrategyName
+	}
+	return ""
 }
 
 func (x *ProviderCredentialRefreshStatus) GetStatus() string {
@@ -10406,7 +10425,11 @@ type ConfigureProviderRefreshRequest struct {
 	Provider       string                            `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
 	CredentialKey  string                            `protobuf:"bytes,2,opt,name=credential_key,json=credentialKey,proto3" json:"credential_key,omitempty"`
 	Strategy       ProviderCredentialRefreshStrategy `protobuf:"varint,3,opt,name=strategy,proto3,enum=openshell.v1.ProviderCredentialRefreshStrategy" json:"strategy,omitempty"`
-	Material       map[string]string                 `protobuf:"bytes,4,rep,name=material,proto3" json:"material,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Exact registered strategy name. May replace an unspecified enum or match a
+	// specified enum; conflicting selectors are rejected. Empty uses the enum.
+	// Only embedded built-ins are currently registered; custom names fail closed.
+	StrategyName string            `protobuf:"bytes,9,opt,name=strategy_name,json=strategyName,proto3" json:"strategy_name,omitempty"`
+	Material     map[string]string `protobuf:"bytes,4,rep,name=material,proto3" json:"material,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Additional material names the caller requests be stored as secrets. Every
 	// name must be present in material. The server also classifies secrets from
 	// the authoritative provider profile and refresh strategy.
@@ -10475,6 +10498,13 @@ func (x *ConfigureProviderRefreshRequest) GetStrategy() ProviderCredentialRefres
 		return x.Strategy
 	}
 	return ProviderCredentialRefreshStrategy_PROVIDER_CREDENTIAL_REFRESH_STRATEGY_UNSPECIFIED
+}
+
+func (x *ConfigureProviderRefreshRequest) GetStrategyName() string {
+	if x != nil {
+		return x.StrategyName
+	}
+	return ""
 }
 
 func (x *ConfigureProviderRefreshRequest) GetMaterial() map[string]string {
@@ -20442,21 +20472,23 @@ const file_openshell_proto_rawDesc = "" +
 	"\x06output\x18\x01 \x01(\tR\x06output\x12\x1e\n" +
 	"\n" +
 	"credential\x18\x02 \x01(\tR\n" +
-	"credential\"\x82\x04\n" +
+	"credential\"\xa7\x04\n" +
 	"\x19ProviderCredentialRefresh\x12K\n" +
-	"\bstrategy\x18\x01 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12\x1b\n" +
+	"\bstrategy\x18\x01 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12#\n" +
+	"\rstrategy_name\x18\b \x01(\tR\fstrategyName\x12\x1b\n" +
 	"\ttoken_url\x18\x02 \x01(\tR\btokenUrl\x12\x16\n" +
 	"\x06scopes\x18\x03 \x03(\tR\x06scopes\x12@\n" +
 	"\x0erefresh_before\x18h \x01(\v2\x19.google.protobuf.DurationR\rrefreshBefore\x12<\n" +
 	"\fmax_lifetime\x18i \x01(\v2\x19.google.protobuf.DurationR\vmaxLifetime\x12K\n" +
 	"\bmaterial\x18\x06 \x03(\v2/.openshell.v1.ProviderCredentialRefreshMaterialR\bmaterial\x12\\\n" +
-	"\x12additional_outputs\x18\a \x03(\v2-.openshell.v1.ProviderCredentialRefreshOutputR\x11additionalOutputsJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06R\x16refresh_before_secondsR\x14max_lifetime_seconds\"\xbc\x06\n" +
+	"\x12additional_outputs\x18\a \x03(\v2-.openshell.v1.ProviderCredentialRefreshOutputR\x11additionalOutputsJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06R\x16refresh_before_secondsR\x14max_lifetime_seconds\"\xe1\x06\n" +
 	"\x1fProviderCredentialRefreshStatus\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x1f\n" +
 	"\vprovider_id\x18\x02 \x01(\tR\n" +
 	"providerId\x12%\n" +
 	"\x0ecredential_key\x18\x03 \x01(\tR\rcredentialKey\x12K\n" +
-	"\bstrategy\x18\x04 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12\x16\n" +
+	"\bstrategy\x18\x04 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12#\n" +
+	"\rstrategy_name\x18\x0e \x01(\tR\fstrategyName\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12C\n" +
 	"\x0fexpiration_time\x18j \x01(\v2\x1a.google.protobuf.TimestampR\x0eexpirationTime\x12F\n" +
 	"\x11next_refresh_time\x18k \x01(\v2\x1a.google.protobuf.TimestampR\x0fnextRefreshTime\x12F\n" +
@@ -20475,12 +20507,13 @@ const file_openshell_proto_rawDesc = "" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12%\n" +
 	"\x0ecredential_key\x18\x02 \x01(\tR\rcredentialKey\"s\n" +
 	" GetProviderRefreshStatusResponse\x12O\n" +
-	"\vcredentials\x18\x01 \x03(\v2-.openshell.v1.ProviderCredentialRefreshStatusR\vcredentials\"\xcc\x04\n" +
+	"\vcredentials\x18\x01 \x03(\v2-.openshell.v1.ProviderCredentialRefreshStatusR\vcredentials\"\xf1\x04\n" +
 	"\x1fConfigureProviderRefreshRequest\x12R\n" +
 	"\x0fworkspace_scope\x18\a \x01(\v2).openshell.datamodel.v1.WorkspaceSelectorR\x0eworkspaceScope\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12%\n" +
 	"\x0ecredential_key\x18\x02 \x01(\tR\rcredentialKey\x12K\n" +
-	"\bstrategy\x18\x03 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12]\n" +
+	"\bstrategy\x18\x03 \x01(\x0e2/.openshell.v1.ProviderCredentialRefreshStrategyR\bstrategy\x12#\n" +
+	"\rstrategy_name\x18\t \x01(\tR\fstrategyName\x12]\n" +
 	"\bmaterial\x18\x04 \x03(\v2;.openshell.v1.ConfigureProviderRefreshRequest.MaterialEntryB\x04\x88\xb5\x18\x01R\bmaterial\x120\n" +
 	"\x14secret_material_keys\x18\x05 \x03(\tR\x12secretMaterialKeys\x12C\n" +
 	"\x0fexpiration_time\x18j \x01(\v2\x1a.google.protobuf.TimestampR\x0eexpirationTime\x12\x1d\n" +

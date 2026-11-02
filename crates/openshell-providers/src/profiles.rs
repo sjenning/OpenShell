@@ -249,9 +249,12 @@ pub struct CredentialRefreshProfile {
     #[serde(
         default = "default_refresh_strategy",
         deserialize_with = "deserialize_refresh_strategy",
-        serialize_with = "serialize_refresh_strategy"
+        serialize_with = "serialize_refresh_strategy",
+        skip_serializing_if = "is_unspecified_refresh_strategy"
     )]
     pub strategy: ProviderCredentialRefreshStrategy,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub strategy_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token_url: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -287,7 +290,11 @@ pub struct CredentialRefreshProfile {
 
 impl PartialEq for CredentialRefreshProfile {
     fn eq(&self, other: &Self) -> bool {
-        self.strategy == other.strategy
+        let same_strategy = match (self.effective_strategy(), other.effective_strategy()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => self.strategy == other.strategy && self.strategy_name == other.strategy_name,
+        };
+        same_strategy
             && self.token_url == other.token_url
             && self.scopes == other.scopes
             && self.refresh_before_seconds == other.refresh_before_seconds
@@ -971,7 +978,8 @@ impl ProviderTypeProfile {
 
         self.credentials.iter().find(|cred| {
             cred.refresh.as_ref().is_some_and(|refresh| {
-                refresh.strategy == ProviderCredentialRefreshStrategy::Oauth2RefreshToken
+                refresh.effective_strategy()
+                    == Ok(ProviderCredentialRefreshStrategy::Oauth2RefreshToken)
                     && ADC_MATERIAL_KEYS
                         .iter()
                         .all(|key| refresh.material.iter().any(|m| m.name == *key))
@@ -1142,7 +1150,13 @@ impl CredentialProfile {
 impl CredentialRefreshProfile {
     #[must_use]
     pub fn is_gateway_mintable(&self) -> bool {
-        is_gateway_mintable_strategy(self.strategy)
+        self.effective_strategy()
+            .is_ok_and(is_gateway_mintable_strategy)
+    }
+
+    /// Resolve the legacy enum and exact registered-name selectors.
+    pub fn effective_strategy(&self) -> Result<ProviderCredentialRefreshStrategy, String> {
+        resolve_refresh_strategy(self.strategy as i32, &self.strategy_name)
     }
 }
 
@@ -1278,6 +1292,12 @@ fn is_zero(value: &u32) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_i64(value: &i64) -> bool {
     *value == 0
+}
+
+// Serde skip predicates take a reference, even for Copy fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_unspecified_refresh_strategy(strategy: &ProviderCredentialRefreshStrategy) -> bool {
+    matches!(strategy, ProviderCredentialRefreshStrategy::Unspecified)
 }
 
 fn default_refresh_strategy() -> ProviderCredentialRefreshStrategy {
@@ -1452,9 +1472,16 @@ pub fn provider_token_grant_type_to_yaml(
 }
 
 fn credential_refresh_from_proto(refresh: &ProviderCredentialRefresh) -> CredentialRefreshProfile {
+    let strategy = ProviderCredentialRefreshStrategy::try_from(refresh.strategy).ok();
     CredentialRefreshProfile {
-        strategy: ProviderCredentialRefreshStrategy::try_from(refresh.strategy)
-            .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified),
+        strategy: strategy.unwrap_or(ProviderCredentialRefreshStrategy::Unspecified),
+        // Unknown enum values must not become valid name-only selectors after
+        // conversion. Leave them unspecified so profile validation rejects them.
+        strategy_name: if strategy.is_some() {
+            refresh.strategy_name.clone()
+        } else {
+            String::new()
+        },
         token_url: refresh.token_url.clone(),
         scopes: refresh.scopes.clone(),
         refresh_before_seconds: 0,
@@ -1497,7 +1524,8 @@ fn validate_profile_duration(value: &prost_types::Duration) -> Result<(), String
 
 fn credential_refresh_to_proto(refresh: &CredentialRefreshProfile) -> ProviderCredentialRefresh {
     ProviderCredentialRefresh {
-        strategy: refresh.strategy as i32,
+        strategy: refresh.effective_strategy().unwrap_or(refresh.strategy) as i32,
+        strategy_name: refresh.strategy_name.clone(),
         token_url: refresh.token_url.clone(),
         scopes: refresh.scopes.clone(),
         refresh_before: profile_duration_to_proto(
@@ -2424,7 +2452,19 @@ pub fn validate_profile_set(
             }
 
             if let Some(refresh) = credential.refresh.as_ref() {
-                if refresh.strategy == ProviderCredentialRefreshStrategy::Unspecified {
+                let strategy = match refresh.effective_strategy() {
+                    Ok(strategy) => strategy,
+                    Err(error) => {
+                        diagnostics.push(ProfileValidationDiagnostic::error(
+                            source,
+                            profile_id,
+                            "credentials.refresh.strategy_name",
+                            error,
+                        ));
+                        ProviderCredentialRefreshStrategy::Unspecified
+                    }
+                };
+                if strategy == ProviderCredentialRefreshStrategy::Unspecified {
                     diagnostics.push(ProfileValidationDiagnostic::error(
                         source,
                         profile_id,
@@ -2524,8 +2564,8 @@ pub fn validate_profile_set(
                     }
                 }
 
-                let strategy_name = provider_refresh_strategy_to_yaml(refresh.strategy);
-                let (required_outputs, optional_outputs) = strategy_output_spec(refresh.strategy);
+                let strategy_name = provider_refresh_strategy_to_yaml(strategy);
+                let (required_outputs, optional_outputs) = strategy_output_spec(strategy);
                 let known_outputs: HashSet<&str> = required_outputs
                     .iter()
                     .chain(optional_outputs.iter())
@@ -2613,7 +2653,7 @@ pub fn validate_profile_set(
                         continue;
                     }
                     let resolved = sibling.env_vars[0].as_str();
-                    if let Some(expected) = strategy_output_env_key(refresh.strategy, output_id)
+                    if let Some(expected) = strategy_output_env_key(strategy, output_id)
                         && resolved != expected
                     {
                         diagnostics.push(ProfileValidationDiagnostic::error(
@@ -2640,7 +2680,7 @@ pub fn validate_profile_set(
                     }
                 }
 
-                if let Some(expected_primary) = strategy_primary_env_key(refresh.strategy)
+                if let Some(expected_primary) = strategy_primary_env_key(strategy)
                     && (credential.env_vars.len() != 1
                         || credential.env_vars[0] != expected_primary)
                 {

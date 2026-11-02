@@ -167,6 +167,23 @@ A provisioning timeout can be repaired by Stop after its original driver work
 settles and cleanup completes. Stop exposes Stopped without discarding the timeout
 diagnosis or storage. This lifecycle behavior also applies when updates are disabled.
 
+## Internal secret boundary
+
+Provider credentials and refresh material use `CredentialRuntime`. Sandbox SSH
+host keys and shared-supervisor launch material use `InternalSecretStore`, a
+narrow interface with explicit object ownership and store, resolve, and delete
+operations. Internal consumers do not construct provider records or call provider
+delivery APIs. New writes always stage a fresh candidate before the owning
+controller publishes its handle with CAS.
+
+This is boundary-only groundwork for the credential issuer RFC. Both interfaces
+still share the configured embedded credential drivers and their process
+lifetimes. Existing SSH and launch-material handles remain readable and deletable
+without migration. No remote issuer, separate internal storage backend, versioned
+references, or refresh-engine migration is implemented yet. When remote provider
+credentials are added, internal secrets must retain a local backend rather than
+following the remote provider source.
+
 ## Operator credential export
 
 `GetProviderCredentials` exports selected profile-declared runtime environment

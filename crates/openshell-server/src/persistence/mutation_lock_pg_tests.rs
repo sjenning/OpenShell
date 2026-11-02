@@ -159,7 +159,9 @@ async fn postgres_concurrent_sandbox_creates_with_ssh_identity_do_not_exhaust_lo
 
     let identities = crate::ssh_identity::SshIdentityStore::new(
         store.clone(),
-        CredentialRuntime::from_config_with_store(&config, store.clone()).unwrap(),
+        CredentialRuntime::from_config_with_store(&config, store.clone())
+            .unwrap()
+            .internal_secrets(),
     );
     let mut fingerprints = HashSet::new();
     for mut sandbox in created {

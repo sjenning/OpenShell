@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Gateway credential-driver runtime scaffolding.
+//! Gateway credential-driver selection and resolution.
 //!
-//! This module owns gateway-level credential-driver selection and resolution
-//! dispatch. Concrete production backends and remote UDS transport plug in here
-//! in later implementation slices.
+//! Provider credentials (including refresh material) use `CredentialRuntime`.
+//! Gateway-owned SSH keys and supervisor launch material use the narrower
+//! `InternalSecretStore` interface. Both share the configured local drivers in
+//! embedded mode; internal consumers do not depend on provider delivery APIs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[cfg(unix)]
@@ -139,11 +140,222 @@ pub struct RefreshMaterialScope<'a> {
 pub struct CredentialRuntime {
     registry: CredentialDriverRegistry,
     drivers: BTreeMap<String, Arc<dyn CredentialDriver>>,
-    _driver_processes: Vec<Arc<ManagedCredentialDriverProcess>>,
+    driver_processes: Vec<Arc<ManagedCredentialDriverProcess>>,
     negotiated_extensions: Vec<NegotiatedExtension>,
 }
 
+/// Gateway-owned secret storage, separate from provider credential delivery.
+///
+/// This interface deliberately has no provider refresh or snapshot operations.
+/// It shares the embedded driver's lifetime and handles with the provider
+/// runtime, preserving existing SSH identities and launch records. A remote
+/// provider source must not replace this local backend.
+#[derive(Debug, Clone)]
+pub struct InternalSecretStore {
+    registry: CredentialDriverRegistry,
+    drivers: BTreeMap<String, Arc<dyn CredentialDriver>>,
+    // Keep UDS subprocesses alive even if the provider runtime is dropped.
+    _driver_processes: Vec<Arc<ManagedCredentialDriverProcess>>,
+}
+
+/// Durable ownership of an internal secret. Pass the owning gateway object's
+/// workspace, display name, and ID unchanged to preserve backend ownership checks.
+#[derive(Debug, Clone, Copy)]
+pub struct InternalSecretOwner<'a> {
+    pub name: &'a str,
+    pub workspace: &'a str,
+    pub id: &'a str,
+}
+
+impl InternalSecretStore {
+    fn driver(&self, name: &str) -> Result<&Arc<dyn CredentialDriver>, Status> {
+        self.drivers.get(name).ok_or_else(|| {
+            Status::failed_precondition(format!("internal secret driver '{name}' is not connected"))
+        })
+    }
+
+    pub(crate) async fn store(
+        &self,
+        owner: InternalSecretOwner<'_>,
+        object_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<HashMap<String, CredentialHandle>, Status> {
+        if values.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let driver_name = self.registry.storage_owner_name();
+        let driver = self.driver(&driver_name)?;
+        let driver_name = &driver_name;
+        let writes = values.iter().map(|(key, value)| async move {
+            // Always stage a fresh candidate; internal callers cannot overwrite
+            // the published identity before winning its owning object's CAS.
+            let mut handle = driver
+                .store_credential(StoreCredentialRequest {
+                    provider: owner.name.to_string(),
+                    credential_key: key.clone(),
+                    value: value.clone(),
+                    existing_handle: None,
+                    workspace: owner.workspace.to_string(),
+                    provider_id: owner.id.to_string(),
+                    object_id: object_id.to_string(),
+                })
+                .await?;
+            handle.driver.clone_from(driver_name);
+            if handle.handle.trim().is_empty() {
+                return Err(Status::internal(
+                    "internal secret driver returned an empty handle",
+                ));
+            }
+            Ok((key.clone(), handle))
+        });
+        let mut handles = HashMap::new();
+        let mut first_error = None;
+        for result in futures::future::join_all(writes).await {
+            match result {
+                Ok((key, handle)) => {
+                    handles.insert(key, handle);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            if let Err(cleanup_error) = self.delete(owner, &handles).await {
+                warn!(error = %cleanup_error, "failed to clean up partially stored internal secrets");
+            }
+            return Err(error);
+        }
+        Ok(handles)
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        owner: InternalSecretOwner<'_>,
+        handles: &HashMap<String, CredentialHandle>,
+    ) -> Result<HashMap<String, String>, Status> {
+        let mut batches: BTreeMap<String, Vec<ResolveCredentialRequest>> = BTreeMap::new();
+        for (key, handle) in handles {
+            let driver_name = self.registry.driver_for_handle(key, handle)?;
+            let mut handle = handle.clone();
+            handle.driver.clone_from(&driver_name);
+            batches
+                .entry(driver_name)
+                .or_default()
+                .push(ResolveCredentialRequest {
+                    request_id: key.clone(),
+                    provider: owner.name.to_string(),
+                    credential_key: key.clone(),
+                    handle: Some(handle),
+                    workspace: owner.workspace.to_string(),
+                    provider_id: owner.id.to_string(),
+                });
+        }
+        let mut values = HashMap::new();
+        for (driver_name, requests) in batches {
+            let mut pending: HashSet<_> = requests
+                .iter()
+                .map(|request| request.request_id.clone())
+                .collect();
+            for response in self
+                .driver(&driver_name)?
+                .resolve_credentials(requests)
+                .await?
+            {
+                if !pending.remove(&response.request_id) {
+                    return Err(Status::internal(
+                        "internal secret driver returned an unknown or duplicate request_id",
+                    ));
+                }
+                // Internal secrets have no provider-level expiration. Preserve
+                // the driver's expiration validation from the original path.
+                let expiration = response
+                    .expiration_time
+                    .as_ref()
+                    .map(openshell_core::time::timestamp_to_millis)
+                    .transpose()
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                if expiration.is_some_and(|expiration| expiration <= 0) {
+                    continue;
+                }
+                values.insert(response.request_id, response.value);
+            }
+            if !pending.is_empty() {
+                return Err(Status::internal(
+                    "internal secret driver omitted a response",
+                ));
+            }
+        }
+        Ok(values)
+    }
+
+    pub(crate) async fn delete(
+        &self,
+        owner: InternalSecretOwner<'_>,
+        handles: &HashMap<String, CredentialHandle>,
+    ) -> Result<(), Status> {
+        let deletions = handles.iter().map(|(key, handle)| async move {
+            let driver_name = self.registry.driver_for_handle(key, handle)?;
+            self.driver(&driver_name)?
+                .delete_credential(DeleteCredentialRequest {
+                    provider: owner.name.to_string(),
+                    credential_key: key.clone(),
+                    handle: Some(handle.clone()),
+                    workspace: owner.workspace.to_string(),
+                    provider_id: owner.id.to_string(),
+                })
+                .await
+        });
+        // Attempt every deletion and retain the first error so ownership rows
+        // remain available for the caller's durable cleanup retry.
+        let mut first_error = None;
+        for result in futures::future::join_all(deletions).await {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stored_credential_count(&self) -> Option<usize> {
+        self.driver(&self.registry.storage_owner_name())
+            .ok()?
+            .stored_credential_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_delete(&self) {
+        self.driver(&self.registry.storage_owner_name())
+            .unwrap()
+            .fail_next_delete();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_next_store(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.driver(&self.registry.storage_owner_name())
+            .unwrap()
+            .gate_next_store()
+            .expect("test credential driver supports store gating")
+    }
+}
+
 impl CredentialRuntime {
+    /// Capture the local embedded backend for gateway-internal consumers.
+    /// Keep this separate from any future remote provider credential source.
+    pub(crate) fn internal_secrets(&self) -> InternalSecretStore {
+        InternalSecretStore {
+            registry: self.registry.clone(),
+            drivers: self.drivers.clone(),
+            _driver_processes: self.driver_processes.clone(),
+        }
+    }
+
     pub fn from_config(config: &Config) -> CoreResult<Self> {
         Self::from_config_with_optional_store(config, None)
     }
@@ -180,7 +392,7 @@ impl CredentialRuntime {
         Ok(Self {
             registry,
             drivers,
-            _driver_processes: Vec::new(),
+            driver_processes: Vec::new(),
             negotiated_extensions,
         })
     }
@@ -249,7 +461,7 @@ impl CredentialRuntime {
         Ok(Self {
             registry,
             drivers,
-            _driver_processes: driver_processes,
+            driver_processes,
             negotiated_extensions,
         })
     }
@@ -2063,6 +2275,10 @@ impl CredentialDriver for TestStaticCredentialDriver {
 }
 
 #[cfg(test)]
+#[path = "credentials_internal_tests.rs"]
+mod internal_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
@@ -2240,6 +2456,121 @@ mod tests {
         let err = CredentialDriverRegistry::from_config(&config).unwrap_err();
 
         assert!(err.to_string().contains("at most one"));
+    }
+
+    #[tokio::test]
+    async fn internal_secrets_preserve_legacy_handles() {
+        let store = Arc::new(crate::persistence::test_store().await);
+        let runtime = CredentialRuntime::from_config_with_store(&Config::new(None), store).unwrap();
+        let owner = InternalSecretOwner {
+            name: "sandbox-ssh-test-sandbox",
+            workspace: "test-workspace",
+            id: "test-sandbox",
+        };
+        let values = HashMap::from([(
+            "SSH_HOST_PRIVATE_KEY".to_string(),
+            "private-key".to_string(),
+        )]);
+        // This is the pre-split write path. Existing durable identity records
+        // must remain readable and deletable without changing their handles.
+        let handles = runtime
+            .store_provider_credentials_with_object_id(
+                owner.name,
+                owner.workspace,
+                owner.id,
+                "legacy-candidate",
+                &values,
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let internal = runtime.internal_secrets();
+        assert_eq!(internal.resolve(owner, &handles).await.unwrap(), values);
+        internal.delete(owner, &handles).await.unwrap();
+        assert_eq!(
+            internal.resolve(owner, &handles).await.unwrap_err().code(),
+            Code::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_secrets_stage_distinct_candidates_and_keep_backend_alive() {
+        let runtime = CredentialRuntime::from_config(
+            &Config::new(None).with_credential_drivers(["test-static"]),
+        )
+        .unwrap();
+        let internal = runtime.internal_secrets();
+        drop(runtime);
+        let owner = InternalSecretOwner {
+            name: "sandbox-ssh-test-sandbox",
+            workspace: "test-workspace",
+            id: "test-sandbox",
+        };
+        let first_values = HashMap::from([("key".to_string(), "winner".to_string())]);
+        let second_values = HashMap::from([("key".to_string(), "loser".to_string())]);
+        let first = internal.store(owner, "first", &first_values).await.unwrap();
+        let second = internal
+            .store(owner, "second", &second_values)
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(internal.stored_credential_count(), Some(2));
+        internal.delete(owner, &second).await.unwrap();
+        assert_eq!(internal.resolve(owner, &first).await.unwrap(), first_values);
+        internal.delete(owner, &first).await.unwrap();
+        assert_eq!(internal.stored_credential_count(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn internal_secrets_clean_up_partial_stores() {
+        let runtime = CredentialRuntime::from_config(
+            &Config::new(None).with_credential_drivers(["test-static"]),
+        )
+        .unwrap();
+        let internal = runtime.internal_secrets();
+        let owner = InternalSecretOwner {
+            name: "internal-owner",
+            workspace: "test-workspace",
+            id: "test-owner",
+        };
+        runtime.fail_next_store();
+        let error = internal
+            .store(
+                owner,
+                "candidate",
+                &HashMap::from([
+                    ("first".to_string(), "first-value".to_string()),
+                    ("second".to_string(), "second-value".to_string()),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(internal.stored_credential_count(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn internal_secrets_preserve_retryable_deletion() {
+        let runtime = CredentialRuntime::from_config(
+            &Config::new(None).with_credential_drivers(["test-static"]),
+        )
+        .unwrap();
+        let internal = runtime.internal_secrets();
+        let owner = InternalSecretOwner {
+            name: "supervisor-launch",
+            workspace: "test-workspace",
+            id: "test-assignment",
+        };
+        let values = HashMap::from([("launch".to_string(), "material".to_string())]);
+        let handles = internal.store(owner, "candidate", &values).await.unwrap();
+        internal.fail_next_delete();
+        assert_eq!(
+            internal.delete(owner, &handles).await.unwrap_err().code(),
+            Code::Unavailable
+        );
+        assert_eq!(internal.resolve(owner, &handles).await.unwrap(), values);
+        internal.delete(owner, &handles).await.unwrap();
+        assert_eq!(internal.stored_credential_count(), Some(0));
     }
 
     #[tokio::test]

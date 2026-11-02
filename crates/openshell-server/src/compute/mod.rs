@@ -1085,7 +1085,7 @@ impl ComputeRuntime {
             .ssh_identities
             .set(crate::ssh_identity::SshIdentityStore::new(
                 self.store.clone(),
-                credentials,
+                credentials.internal_secrets(),
             ));
     }
 

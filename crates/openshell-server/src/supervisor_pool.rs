@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use openshell_core::ObjectWorkspace as _;
 use openshell_core::jwt::{SandboxId, SupervisorTakeover};
-use openshell_core::proto::datamodel::v1::{CredentialHandle, ObjectMeta, Provider};
+use openshell_core::proto::datamodel::v1::CredentialHandle;
 use openshell_core::proto::{Sandbox, SandboxPhase};
 use openshell_core::time::now_ms;
 use openshell_supervisor_control::pool_timing::RECORD_WRITE_BOUND;
@@ -71,7 +71,7 @@ use crate::auth::sandbox_jwt::SandboxSessionJwtAuthority;
 use crate::auth::sandbox_session::{
     PersistedSandboxIdentity, TakeoverIdentity, advance_identity_for_takeover,
 };
-use crate::credentials::CredentialRuntime;
+use crate::credentials::{CredentialRuntime, InternalSecretOwner, InternalSecretStore};
 use crate::gateway_ring::GatewayRing;
 use crate::persistence::{
     AtomicWrite, ObjectCursor, ObjectRecord, PersistenceError, Store, WriteCondition,
@@ -387,8 +387,8 @@ pub struct SupervisorPool {
     store: Arc<Store>,
     controller: SupervisorHostController,
     authority: Arc<SandboxSessionJwtAuthority>,
-    /// Keeps the pool's launch material.
-    credentials: CredentialRuntime,
+    /// Keeps the pool's launch material in the local internal-secret store.
+    credentials: InternalSecretStore,
     replica_id: String,
     member_ttl: Duration,
     /// How often the records of served members are refreshed.
@@ -688,7 +688,7 @@ impl SupervisorPool {
             store,
             controller,
             authority,
-            credentials,
+            credentials: credentials.internal_secrets(),
             replica_id,
             member_ttl: MEMBER_TTL,
             member_refresh: openshell_supervisor_control::pool_timing::MEMBER_REFRESH_INTERVAL,
@@ -1359,13 +1359,14 @@ impl SupervisorPool {
         let (name, workspace, owner_id) = material_owner(payload);
         let handles = self
             .credentials
-            .store_provider_credentials_with_object_id(
-                &name,
-                workspace,
-                owner_id,
+            .store(
+                InternalSecretOwner {
+                    name: &name,
+                    workspace,
+                    id: owner_id,
+                },
                 &Uuid::new_v4().to_string(),
                 &HashMap::from([(LAUNCH_MATERIAL_KEY.to_string(), value.to_string())]),
-                &HashMap::new(),
             )
             .await
             .map_err(|status| {
@@ -1384,19 +1385,16 @@ impl SupervisorPool {
         let handle = CredentialHandle::decode(payload.material_handle.as_slice())
             .map_err(|_| "invalid launch material credential handle".to_string())?;
         let (name, workspace, owner_id) = material_owner(payload);
-        let owner = Provider {
-            metadata: Some(ObjectMeta {
-                id: owner_id.to_string(),
-                name,
-                workspace: workspace.to_string(),
-                ..Default::default()
-            }),
-            credential_handles: HashMap::from([(LAUNCH_MATERIAL_KEY.to_string(), handle)]),
-            ..Default::default()
-        };
         let mut resolved = self
             .credentials
-            .resolve_provider_handles(&owner, 0)
+            .resolve(
+                InternalSecretOwner {
+                    name: &name,
+                    workspace,
+                    id: owner_id,
+                },
+                &HashMap::from([(LAUNCH_MATERIAL_KEY.to_string(), handle)]),
+            )
             .await
             .map_err(|status| {
                 format!(
@@ -1405,7 +1403,6 @@ impl SupervisorPool {
                 )
             })?;
         resolved
-            .values
             .remove(LAUNCH_MATERIAL_KEY)
             .map(String::into_bytes)
             .ok_or_else(|| "sandbox instance launch material is unavailable".to_string())
@@ -1418,10 +1415,12 @@ impl SupervisorPool {
     ) -> Result<(), String> {
         let (name, workspace, owner_id) = material_owner(payload);
         self.credentials
-            .delete_provider_credential_handles(
-                &name,
-                workspace,
-                owner_id,
+            .delete(
+                InternalSecretOwner {
+                    name: &name,
+                    workspace,
+                    id: owner_id,
+                },
                 &HashMap::from([(LAUNCH_MATERIAL_KEY.to_string(), handle)]),
             )
             .await

@@ -74,9 +74,21 @@ pre-mint uncertainty marker and reuses it as the completed-mint receipt after
 publication. This does not provide upstream exactly-once delivery: built-in
 protocols do not yet send the ID to upstream providers.
 
-This is a partial refresh-engine extraction. Durable grant state, scheduling,
-built-in protocol implementations, and provider-record publication still live
-in the gateway. Moving those into the issuer, publishing refresh outputs through
+`RefreshEngine` now owns the attempt lifecycle behind `TokenMinter`,
+`RefreshStateStore`, and `RefreshSink`. It takes local exclusion and a distributed
+lease, prepares a durable attempt, resolves material, invokes the minter, commits
+outputs, then notifies the sink. A coalesced attempt does not mint or notify.
+Mint failures are recorded before they return; publication failures retain the
+store adapter's recovery rather than being overwritten by a generic mint error.
+
+The gateway store adapter retains the existing epoch/revision fencing, retry
+eligibility checks, rotated-token staging, and publication protocol. The sink
+invalidates provider delivery through the existing embedded fanout. This callback
+is not a durable change stream and can duplicate callers' existing invalidations.
+
+The orchestration is extracted, but durable grant serialization, the periodic
+scheduler, built-in protocol implementations, and provider-record publication
+still live in gateway adapters. Moving those into the issuer, publishing refresh outputs through
 stable references, adding the public `strategy_name` field, exposing custom
 minters through profiles/configuration, durable reconnectable change streams,
 and remote transport remain separate implementation work. The Rust registry

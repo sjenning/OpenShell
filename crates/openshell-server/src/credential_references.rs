@@ -149,7 +149,7 @@ pub fn spawn_reference_notifications(state: &Arc<crate::ServerState>) {
 }
 
 impl CredentialRuntime {
-    fn notify_reference_change(&self, scope: RefreshMaterialScope<'_>) {
+    pub(crate) fn notify_reference_change(&self, scope: RefreshMaterialScope<'_>) {
         let _ = self
             .reference_changes
             .send((scope.workspace.to_string(), scope.provider_name.to_string()));

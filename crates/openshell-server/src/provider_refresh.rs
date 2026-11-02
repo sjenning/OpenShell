@@ -5,9 +5,11 @@
 
 #![allow(clippy::result_large_err)]
 
+mod engine;
 mod minters;
 
-use minters::{ATTEMPT_ANNOTATION, mint_credential};
+use minters::ATTEMPT_ANNOTATION;
+use openshell_credential_issuer::engine::RefreshTrigger;
 use openshell_credential_issuer::refresh::RefreshCoordinator;
 
 use crate::credentials::RefreshMaterialScope;
@@ -923,12 +925,6 @@ async fn cleanup_pending_secret_deletions_coordinated(
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RefreshTrigger {
-    Automatic,
-    ExplicitRotation,
-}
-
 /// Automatic callers must honor the live failure schedule, not the eligibility
 /// observed before they queued. Configuration/investigation failures can still
 /// be retried by the worker once due; reauthorization stays parked.
@@ -1003,133 +999,189 @@ async fn refresh_from_snapshot_with_trigger(
     snapshot: StoredProviderCredentialRefreshState,
     trigger: RefreshTrigger,
 ) -> Result<StoredProviderCredentialRefreshState, Status> {
-    let key = refresh_state_name(&snapshot.provider_id, &snapshot.credential_key);
-    let store = store.clone();
-    let credentials = credentials.clone();
-    let compute = compute.cloned();
-    REFRESH_COORDINATOR.run(&key, Box::pin(async move {
-        let _distributed = store
-            .acquire_refresh_guard(&snapshot.provider_id, &snapshot.credential_key)
-            .await
-            .map_err(|_| Status::unavailable("credential refresh coordination unavailable"))?;
-        let latest = get_refresh_state(
-            &store,
-            snapshot.object_workspace(),
-            &snapshot.provider_id,
-            &snapshot.credential_key,
-        )
-        .await?
-        .ok_or_else(|| Status::aborted("provider refresh was deleted"))?;
-        if latest.object_id() != snapshot.object_id()
-            || effective_authorization_epoch(&latest)? != effective_authorization_epoch(&snapshot)?
-        {
-            return Err(Status::aborted("provider refresh was reconfigured"));
-        }
-        if latest
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.deletion_time.is_some())
-        {
-            return Err(Status::failed_precondition(
-                "provider refresh is being deleted",
-            ));
-        }
-        // A row-version change can be cleanup or other bookkeeping, not a
-        // successful exchange. Only a new committed mint can satisfy a waiter.
-        if latest.status == "refreshed"
-            && completed_mint(&latest).is_some()
-            && completed_mint(&latest) != completed_mint(&snapshot)
-        {
-            return Ok(latest);
-        }
-        let provider = store
-            .get_message_by_name::<Provider>(snapshot.object_workspace(), &snapshot.provider_name)
-            .await
-            .map_err(|_| Status::internal("fetch provider failed"))?
-            .ok_or_else(|| Status::not_found("provider not found"))?;
-        if provider.object_id() != snapshot.provider_id {
-            return Err(Status::aborted("provider was replaced"));
-        }
-        if matches!(
-            latest.status.as_str(),
-            "refresh_in_progress" | "refresh_committing"
-        ) {
-            return Err(Status::failed_precondition(
-                "previous credential mint has an uncertain outcome; reconfigure the refresh grant",
-            ));
-        }
-        if trigger == RefreshTrigger::Automatic {
-            ensure_automatic_refresh_ready(&latest, current_time_ms())?;
-        }
-        refresh_provider_credential_locked(
-            &store,
-            snapshot.object_workspace(),
-            &credentials,
-            compute.as_ref(),
-            &snapshot.provider_name,
-            &snapshot.credential_key,
-        )
+    engine::new_engine(store, credentials, compute)
+        .refresh(snapshot, trigger)
         .await
-    }))
-    .await
 }
 
-async fn refresh_provider_credential_locked(
+async fn commit_minted_refresh(
     store: &Store,
-    workspace: &str,
     credentials: &crate::credentials::CredentialRuntime,
     compute: Option<&crate::compute::ComputeRuntime>,
-    provider_name: &str,
-    credential_key: &str,
+    attempt: engine::PreparedRefresh,
+    minted: MintedCredential,
 ) -> Result<StoredProviderCredentialRefreshState, Status> {
-    let provider = store
-        .get_message_by_name::<Provider>(workspace, provider_name)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    let Some(state) =
-        get_refresh_state(store, workspace, provider.object_id(), credential_key).await?
-    else {
-        return Err(Status::not_found("provider refresh state not found"));
-    };
-    if state
-        .metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.deletion_time.is_some())
-    {
-        return Err(Status::failed_precondition(
-            "provider refresh is being deleted",
-        ));
-    }
-    let mut state = state;
-    validate_secret_material_references(&state)?;
-    // Generation of the refresh at the start of the rotation. Terminal persists
-    // match on it so a concurrent delete or rotation is detected rather than
-    // clobbered, and a deleted refresh is never recreated (CWE-362).
-    let expected_version = state
-        .metadata
-        .as_ref()
-        .map_or(0, |meta| meta.resource_version);
-    let expected_version = match cleanup_pending_secret_deletions(
-        store,
-        Some(credentials),
-        &mut state,
+    let engine::PreparedRefresh {
+        mut state,
+        provider,
         expected_version,
-    )
-    .await
+        attempt_id,
+    } = attempt;
+    let workspace = provider.object_workspace();
+    let credential_key = state.credential_key.clone();
+    let now_ms = current_time_ms();
+    let mut staged_refresh_token_handles = HashMap::new();
+    if let Some(ref refresh_token) = minted.refresh_token {
+        if !state
+            .secret_material_keys
+            .iter()
+            .any(|key| key == "refresh_token")
+        {
+            state.secret_material_keys.push("refresh_token".to_string());
+        }
+        let material = HashMap::from([("refresh_token".to_string(), refresh_token.clone())]);
+        let staging_id = format!(
+            "{}-refresh-material-{}",
+            state.object_id(),
+            uuid::Uuid::new_v4()
+        );
+        staged_refresh_token_handles = match credentials
+            .store_refresh_material_with_object_id(
+                refresh_material_scope(&state),
+                &staging_id,
+                &material,
+                &HashMap::new(),
+            )
+            .await
+        {
+            Ok(handles) => handles,
+            Err(store_err) => {
+                let failure = RefreshFailure::reauthorize(
+                    Status::failed_precondition(format!(
+                        "the OAuth provider rotated the refresh token, but the replacement could not be stored; the grant must be re-authorized: {}",
+                        store_err.message()
+                    )),
+                    "oauth_rotated_refresh_token_store_failed",
+                    None,
+                );
+                persist_refresh_failure_state(store, &mut state, expected_version, &failure)
+                    .await?;
+                return Err(failure.into_status());
+            }
+        };
+        let Some(handle) = staged_refresh_token_handles.get("refresh_token").cloned() else {
+            let failure = RefreshFailure::reauthorize(
+                Status::failed_precondition(
+                    "the OAuth provider rotated the refresh token, but the credential driver returned no replacement handle; the grant must be re-authorized",
+                ),
+                "oauth_rotated_refresh_token_handle_missing",
+                None,
+            );
+            cleanup_staged_refresh_material_handles(
+                credentials,
+                &state,
+                &staged_refresh_token_handles,
+            )
+            .await;
+            persist_refresh_failure_state(store, &mut state, expected_version, &failure).await?;
+            return Err(failure.into_status());
+        };
+        if let Some(previous) = state
+            .secret_material_handles
+            .insert("refresh_token".to_string(), handle)
+        {
+            enqueue_pending_secret_deletion(&mut state, "refresh_token", previous);
+        }
+        state.material.remove("refresh_token");
+    }
+    state.expires_at_ms = minted.expires_at_ms;
+    set_refresh_expiration_presence(&mut state, true);
+    state.next_refresh_at_ms =
+        next_refresh_at_ms(minted.expires_at_ms, state.refresh_before.as_ref());
+    state.last_refresh_at_ms = now_ms;
+    let completed_next_refresh_at_ms = state.next_refresh_at_ms;
+    state.status = "refresh_committing".to_string();
+    state.next_refresh_at_ms = i64::MAX;
+    state.last_error.clear();
+    state.recovery_action = ProviderCredentialRefreshRecoveryAction::Unspecified as i32;
+    state.failure_code.clear();
+    state.provider_error_subtype.clear();
+    state.last_error_at_ms = 0;
+
+    // Claim the refresh generation with a version-matched write BEFORE
+    // touching the provider. It succeeds only if the refresh still holds
+    // the generation we started from; if it was deleted, recreated, or a
+    // concurrent rotation won, it returns `None` and we leave both the
+    // refresh state and the provider unchanged — no credentials minted
+    // from a stale generation are written, and a deleted refresh is not
+    // resurrected (CWE-362). This makes generation ownership the gate on
+    // the provider credential write.
+    let new_version = match persist_refresh_state_if_current(store, &state, expected_version).await
     {
-        Ok(new_version) => new_version,
-        Err(err) => {
+        Ok(Some(new_version)) => new_version,
+        Ok(None) => {
+            if !staged_refresh_token_handles.is_empty() {
+                cleanup_staged_refresh_material_handles(
+                    credentials,
+                    &state,
+                    &staged_refresh_token_handles,
+                )
+                .await;
+            }
             warn!(
                 provider = %state.provider_name,
                 credential_key = %state.credential_key,
-                error = %err,
-                "provider refresh material cleanup failed; continuing with live refresh"
+                strategy = %refresh_strategy_name(state.strategy),
+                "provider credential refresh deleted or superseded during rotation; discarding minted credentials"
             );
-            expected_version
+            return Err(Status::aborted(
+                "provider refresh was deleted or superseded during rotation",
+            ));
+        }
+        Err(err) => {
+            // The replacement refresh token is already in credential
+            // storage. Retry the same CAS with error/backoff state so a
+            // transient database failure does not discard the only
+            // upstream-valid grant. If that also fails, leave the
+            // staged object intact for operator recovery rather than
+            // deleting an irreplaceable rotated token.
+            persist_retryable_refresh_error_state(store, &mut state, expected_version, &err)
+                .await?;
+            return Err(err);
         }
     };
 
+    // Generation is ours; write the minted credentials into the provider.
+    if let Err(err) = apply_minted_credential(
+        store,
+        workspace,
+        Some(credentials),
+        compute,
+        &provider,
+        &credential_key,
+        &minted,
+    )
+    .await
+    {
+        // Reflect the failure on the state we just wrote; skip silently
+        // if it was deleted concurrently (it is not recreated).
+        let failure = RefreshFailure::from_status(&err);
+        persist_refresh_failure_state(store, &mut state, new_version, &failure).await?;
+        warn!(
+            provider = %state.provider_name,
+            credential_key = %state.credential_key,
+            strategy = %refresh_strategy_name(state.strategy),
+            status = %state.status,
+            next_refresh_at_ms = state.next_refresh_at_ms,
+            seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
+            error = %err,
+            "provider credential refresh errored"
+        );
+        return Err(err);
+    }
+    // A success snapshot must not become visible before its provider
+    // handles are committed. Park incomplete commits rather than minting
+    // again after a crash or lost database session.
+    state.status = "refreshed".to_string();
+    state.next_refresh_at_ms = completed_next_refresh_at_ms;
+    if let Some(metadata) = state.metadata.as_mut() {
+        metadata
+            .annotations
+            .insert(COMPLETED_MINT_ANNOTATION.to_string(), attempt_id);
+    }
+    let new_version = persist_refresh_state_if_current(store, &state, new_version)
+        .await?
+        .ok_or_else(|| Status::aborted("provider refresh changed during credential commit"))?;
     info!(
         provider = %state.provider_name,
         credential_key = %state.credential_key,
@@ -1137,259 +1189,22 @@ async fn refresh_provider_credential_locked(
         status = %state.status,
         expires_at_ms = state.expires_at_ms,
         next_refresh_at_ms = state.next_refresh_at_ms,
-        "provider credential refresh started"
+        seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
+        "provider credential refresh completed"
     );
-
-    // Persist uncertainty BEFORE contacting the issuer. A crashed process or a
-    // lost advisory-lock session cannot lead another replica to reuse the grant.
-    state.status = "refresh_in_progress".to_string();
-    state.next_refresh_at_ms = i64::MAX;
-    state.recovery_action = ProviderCredentialRefreshRecoveryAction::Investigate as i32;
-    let attempt_id = uuid::Uuid::new_v4().to_string();
-    state
-        .metadata
-        .as_mut()
-        .ok_or_else(|| Status::failed_precondition("refresh state metadata missing"))?
-        .annotations
-        .insert(ATTEMPT_ANNOTATION.to_string(), attempt_id.clone());
-    let expected_version = persist_refresh_state_if_current(store, &state, expected_version)
-        .await?
-        .ok_or_else(|| Status::aborted("provider refresh changed before minting"))?;
-    let mint_result = match resolve_refresh_material(Some(credentials), &state).await {
-        Ok(transient_state) => mint_credential(&transient_state).await,
-        Err(err) => Err(err.into()),
-    };
-    match mint_result {
-        Ok(minted) => {
-            let now_ms = current_time_ms();
-            let mut staged_refresh_token_handles = HashMap::new();
-            if let Some(ref refresh_token) = minted.refresh_token {
-                if !state
-                    .secret_material_keys
-                    .iter()
-                    .any(|key| key == "refresh_token")
-                {
-                    state.secret_material_keys.push("refresh_token".to_string());
-                }
-                let material =
-                    HashMap::from([("refresh_token".to_string(), refresh_token.clone())]);
-                let staging_id = format!(
-                    "{}-refresh-material-{}",
-                    state.object_id(),
-                    uuid::Uuid::new_v4()
-                );
-                staged_refresh_token_handles = match credentials
-                    .store_refresh_material_with_object_id(
-                        refresh_material_scope(&state),
-                        &staging_id,
-                        &material,
-                        &HashMap::new(),
-                    )
-                    .await
-                {
-                    Ok(handles) => handles,
-                    Err(store_err) => {
-                        let failure = RefreshFailure::reauthorize(
-                            Status::failed_precondition(format!(
-                                "the OAuth provider rotated the refresh token, but the replacement could not be stored; the grant must be re-authorized: {}",
-                                store_err.message()
-                            )),
-                            "oauth_rotated_refresh_token_store_failed",
-                            None,
-                        );
-                        persist_refresh_failure_state(
-                            store,
-                            &mut state,
-                            expected_version,
-                            &failure,
-                        )
-                        .await?;
-                        return Err(failure.into_status());
-                    }
-                };
-                let Some(handle) = staged_refresh_token_handles.get("refresh_token").cloned()
-                else {
-                    let failure = RefreshFailure::reauthorize(
-                        Status::failed_precondition(
-                            "the OAuth provider rotated the refresh token, but the credential driver returned no replacement handle; the grant must be re-authorized",
-                        ),
-                        "oauth_rotated_refresh_token_handle_missing",
-                        None,
-                    );
-                    cleanup_staged_refresh_material_handles(
-                        credentials,
-                        &state,
-                        &staged_refresh_token_handles,
-                    )
-                    .await;
-                    persist_refresh_failure_state(store, &mut state, expected_version, &failure)
-                        .await?;
-                    return Err(failure.into_status());
-                };
-                if let Some(previous) = state
-                    .secret_material_handles
-                    .insert("refresh_token".to_string(), handle)
-                {
-                    enqueue_pending_secret_deletion(&mut state, "refresh_token", previous);
-                }
-                state.material.remove("refresh_token");
-            }
-            state.expires_at_ms = minted.expires_at_ms;
-            set_refresh_expiration_presence(&mut state, true);
-            state.next_refresh_at_ms =
-                next_refresh_at_ms(minted.expires_at_ms, state.refresh_before.as_ref());
-            state.last_refresh_at_ms = now_ms;
-            let completed_next_refresh_at_ms = state.next_refresh_at_ms;
-            state.status = "refresh_committing".to_string();
-            state.next_refresh_at_ms = i64::MAX;
-            state.last_error.clear();
-            state.recovery_action = ProviderCredentialRefreshRecoveryAction::Unspecified as i32;
-            state.failure_code.clear();
-            state.provider_error_subtype.clear();
-            state.last_error_at_ms = 0;
-
-            // Claim the refresh generation with a version-matched write BEFORE
-            // touching the provider. It succeeds only if the refresh still holds
-            // the generation we started from; if it was deleted, recreated, or a
-            // concurrent rotation won, it returns `None` and we leave both the
-            // refresh state and the provider unchanged — no credentials minted
-            // from a stale generation are written, and a deleted refresh is not
-            // resurrected (CWE-362). This makes generation ownership the gate on
-            // the provider credential write.
-            let new_version = match persist_refresh_state_if_current(
-                store,
-                &state,
-                expected_version,
-            )
-            .await
-            {
-                Ok(Some(new_version)) => new_version,
-                Ok(None) => {
-                    if !staged_refresh_token_handles.is_empty() {
-                        cleanup_staged_refresh_material_handles(
-                            credentials,
-                            &state,
-                            &staged_refresh_token_handles,
-                        )
-                        .await;
-                    }
-                    warn!(
-                        provider = %state.provider_name,
-                        credential_key = %state.credential_key,
-                        strategy = %refresh_strategy_name(state.strategy),
-                        "provider credential refresh deleted or superseded during rotation; discarding minted credentials"
-                    );
-                    return Err(Status::aborted(
-                        "provider refresh was deleted or superseded during rotation",
-                    ));
-                }
-                Err(err) => {
-                    // The replacement refresh token is already in credential
-                    // storage. Retry the same CAS with error/backoff state so a
-                    // transient database failure does not discard the only
-                    // upstream-valid grant. If that also fails, leave the
-                    // staged object intact for operator recovery rather than
-                    // deleting an irreplaceable rotated token.
-                    persist_retryable_refresh_error_state(
-                        store,
-                        &mut state,
-                        expected_version,
-                        &err,
-                    )
-                    .await?;
-                    return Err(err);
-                }
-            };
-
-            // Generation is ours; write the minted credentials into the provider.
-            if let Err(err) = apply_minted_credential(
-                store,
-                workspace,
-                Some(credentials),
-                compute,
-                &provider,
-                credential_key,
-                &minted,
-            )
-            .await
-            {
-                // Reflect the failure on the state we just wrote; skip silently
-                // if it was deleted concurrently (it is not recreated).
-                let failure = RefreshFailure::from_status(&err);
-                persist_refresh_failure_state(store, &mut state, new_version, &failure).await?;
-                warn!(
-                    provider = %state.provider_name,
-                    credential_key = %state.credential_key,
-                    strategy = %refresh_strategy_name(state.strategy),
-                    status = %state.status,
-                    next_refresh_at_ms = state.next_refresh_at_ms,
-                    seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
-                    error = %err,
-                    "provider credential refresh errored"
-                );
-                return Err(err);
-            }
-            // A success snapshot must not become visible before its provider
-            // handles are committed. Park incomplete commits rather than minting
-            // again after a crash or lost database session.
-            state.status = "refreshed".to_string();
-            state.next_refresh_at_ms = completed_next_refresh_at_ms;
-            if let Some(metadata) = state.metadata.as_mut() {
-                metadata
-                    .annotations
-                    .insert(COMPLETED_MINT_ANNOTATION.to_string(), attempt_id);
-            }
-            let new_version = persist_refresh_state_if_current(store, &state, new_version)
-                .await?
-                .ok_or_else(|| {
-                    Status::aborted("provider refresh changed during credential commit")
-                })?;
-            info!(
-                provider = %state.provider_name,
-                credential_key = %state.credential_key,
-                strategy = %refresh_strategy_name(state.strategy),
-                status = %state.status,
-                expires_at_ms = state.expires_at_ms,
-                next_refresh_at_ms = state.next_refresh_at_ms,
-                seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
-                "provider credential refresh completed"
-            );
-            if !state.pending_secret_deletions.is_empty()
-                && let Err(err) = cleanup_pending_secret_deletions(
-                    store,
-                    Some(credentials),
-                    &mut state,
-                    new_version,
-                )
+    if !state.pending_secret_deletions.is_empty()
+        && let Err(err) =
+            cleanup_pending_secret_deletions(store, Some(credentials), &mut state, new_version)
                 .await
-            {
-                warn!(
-                    provider = %state.provider_name,
-                    credential_key = %state.credential_key,
-                    error = %err,
-                    "failed to clean up replaced refresh material; retrying on the next sweep"
-                );
-            }
-            Ok(state)
-        }
-        Err(failure) => {
-            let now_ms = current_time_ms();
-            persist_refresh_failure_state(store, &mut state, expected_version, &failure).await?;
-            warn!(
-                provider = %state.provider_name,
-                credential_key = %state.credential_key,
-                strategy = %refresh_strategy_name(state.strategy),
-                status = %state.status,
-                next_refresh_at_ms = state.next_refresh_at_ms,
-                seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
-                recovery_action = ?failure.recovery_action,
-                failure_code = failure.failure_code,
-                error = %failure.status,
-                "provider credential refresh errored"
-            );
-            Err(failure.into_status())
-        }
+    {
+        warn!(
+            provider = %state.provider_name,
+            credential_key = %state.credential_key,
+            error = %err,
+            "failed to clean up replaced refresh material; retrying on the next sweep"
+        );
     }
+    Ok(state)
 }
 
 async fn cleanup_staged_refresh_material_handles(

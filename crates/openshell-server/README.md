@@ -194,8 +194,10 @@ Both configuration snapshots hash captured credential versions; provider deliver
 rejects a resolution whose version changed after capture. Rotation within a
 reference therefore changes the environment revision without changing provider
 records or placeholder identities. The refresh worker uses shared issuer
-coordination and a stateless minter registry, but still owns scheduling, durable
-grant state, built-in protocol implementations, and provider-record publication.
+coordination and a stateless minter registry. `RefreshEngine` owns attempt
+orchestration behind minter, refresh-state-store, and post-commit sink traits;
+gateway adapters still own periodic scheduling, durable grant serialization,
+built-in protocol implementations, and provider-record publication.
 Moving those into the issuer and adding remote transport and the standalone
 service remain future work.
 
@@ -226,7 +228,7 @@ closed without falling back to inline values.
 ## Refresh coordination
 
 Explicit rotation, background refresh, and operator refresh-on-read share the
-same `openshell-credential-issuer::refresh::RefreshCoordinator`:
+same issuer `RefreshEngine` and `RefreshCoordinator`:
 
 - A process-local weak keyed mutex coalesces waiters without retaining deleted
   providers indefinitely.

@@ -122,7 +122,7 @@ impl TokenMinter for BuiltinMinter {
     }
 }
 
-pub(super) static MINTERS: LazyLock<MinterRegistry> = LazyLock::new(|| {
+pub(super) static MINTERS: LazyLock<Arc<MinterRegistry>> = LazyLock::new(|| {
     let mut registry = MinterRegistry::default();
     for builtin in [
         BuiltinMinter {
@@ -173,19 +173,21 @@ pub(super) static MINTERS: LazyLock<MinterRegistry> = LazyLock::new(|| {
             .register_builtin(Arc::new(builtin))
             .expect("built-in minter descriptors are valid and unique");
     }
-    registry
+    Arc::new(registry)
 });
 
-pub(super) async fn mint_credential(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    mint_with_registry(&MINTERS, state).await
-}
-
+#[cfg(test)]
 async fn mint_with_registry(
     registry: &MinterRegistry,
     state: &StoredProviderCredentialRefreshState,
 ) -> Result<MintedCredential, RefreshFailure> {
+    let response = registry.mint(mint_request(state)?).await?;
+    map_response(state, response)
+}
+
+pub(super) fn mint_request(
+    state: &StoredProviderCredentialRefreshState,
+) -> Result<MintRequest, RefreshFailure> {
     let strategy = ProviderCredentialRefreshStrategy::try_from(state.strategy)
         .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
     let mut config = state.material.clone();
@@ -212,14 +214,20 @@ async fn mint_with_registry(
         .and_then(|metadata| metadata.annotations.get(ATTEMPT_ANNOTATION))
         .cloned()
         .ok_or_else(|| Status::failed_precondition("refresh attempt was not recorded"))?;
-    let mut minted = registry
-        .mint(MintRequest {
-            strategy: refresh_strategy_name(state.strategy).to_string(),
-            config,
-            secret_material,
-            attempt_id,
-        })
-        .await?;
+    Ok(MintRequest {
+        strategy: refresh_strategy_name(state.strategy).to_string(),
+        config,
+        secret_material,
+        attempt_id,
+    })
+}
+
+pub(super) fn map_response(
+    state: &StoredProviderCredentialRefreshState,
+    mut minted: MintResponse,
+) -> Result<MintedCredential, RefreshFailure> {
+    let strategy = ProviderCredentialRefreshStrategy::try_from(state.strategy)
+        .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
     // Translate the legacy profile ABI only here. Minters return semantic IDs,
     // never environment keys or credential reference identities.
     let primary = if strategy == ProviderCredentialRefreshStrategy::AwsStsAssumeRole {

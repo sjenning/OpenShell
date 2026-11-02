@@ -4890,8 +4890,8 @@ pub(super) async fn handle_configure_provider_refresh(
             "credential_key must be a valid environment variable name",
         ));
     }
-    let strategy = ProviderCredentialRefreshStrategy::try_from(request.strategy)
-        .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
+    let strategy = openshell_providers::resolve_refresh_strategy(request.strategy, "")
+        .map_err(Status::invalid_argument)?;
     if strategy == ProviderCredentialRefreshStrategy::Unspecified {
         return Err(Status::invalid_argument("refresh strategy is required"));
     }

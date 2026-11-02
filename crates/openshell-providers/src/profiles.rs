@@ -1149,8 +1149,8 @@ impl CredentialRefreshProfile {
 /// Whether the gateway can mint credentials for this refresh strategy (as
 /// opposed to strategies resolved elsewhere, e.g. `Static`/`External`).
 ///
-/// Single source of truth shared with `openshell-server`; keep in sync with the
-/// dispatch in `provider_refresh::mint_credential`.
+/// Keep in sync with the embedded issuer registry. Gateway tests assert parity
+/// between profile eligibility and registered built-in descriptors.
 #[must_use]
 pub fn is_gateway_mintable_strategy(strategy: ProviderCredentialRefreshStrategy) -> bool {
     matches!(
@@ -1394,6 +1394,9 @@ pub fn provider_profile_category_to_yaml(category: ProviderProfileCategory) -> &
         ProviderProfileCategory::Other | ProviderProfileCategory::Unspecified => "other",
     }
 }
+
+mod strategy;
+pub use strategy::resolve_refresh_strategy;
 
 #[must_use]
 pub fn provider_refresh_strategy_from_yaml(raw: &str) -> Option<ProviderCredentialRefreshStrategy> {

@@ -251,6 +251,11 @@ placeholders. A later `provider refresh configure` call is an explicit
 reauthorization boundary: it revokes the previous handle, and processes holding
 that handle fail closed until restarted.
 
+For credential-driver-backed outputs, rotation advances credential versions
+without changing the provider's resource version. Inspect refresh status and
+sandbox provider readiness rather than watching that resource version for a
+change. Provider get/list responses show current credential expiration.
+
 While gateway-managed refresh is configured, `provider update --credential`
 cannot replace or delete the refresh-owned primary credential or any co-minted
 output. Use `provider refresh rotate`, reconfigure refresh, or delete refresh

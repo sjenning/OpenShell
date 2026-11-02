@@ -287,12 +287,13 @@ pub(super) async fn get_provider_record(
         return Err(Status::invalid_argument("name is required"));
     }
 
-    store
+    let mut provider = store
         .get_message_by_name::<Provider>(workspace, name)
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))
-        .map(redact_provider_credentials)
+        .ok_or_else(|| Status::not_found("provider not found"))?;
+    crate::credentials::references::project_expiration_times(store, &mut provider).await?;
+    Ok(redact_provider_credentials(provider))
 }
 
 #[cfg(test)]
@@ -307,10 +308,12 @@ pub(super) async fn list_provider_records(
         .await
         .map_err(|e| Status::internal(format!("list providers failed: {e}")))?;
 
-    Ok(providers
-        .into_iter()
-        .map(redact_provider_credentials)
-        .collect())
+    let mut projected = Vec::with_capacity(providers.len());
+    for mut provider in providers {
+        crate::credentials::references::project_expiration_times(store, &mut provider).await?;
+        projected.push(redact_provider_credentials(provider));
+    }
+    Ok(projected)
 }
 
 #[cfg(test)]
@@ -2866,11 +2869,15 @@ pub(super) async fn handle_list_providers(
         .list_message_page::<Provider>(query, after.as_ref(), pagination.page_size())
         .await
         .map_err(|e| Status::internal(format!("list providers failed: {e}")))?;
-    let providers = page
-        .messages
-        .into_iter()
-        .map(redact_provider_credentials)
-        .collect();
+    let mut providers = Vec::with_capacity(page.messages.len());
+    for mut provider in page.messages {
+        crate::credentials::references::project_expiration_times(
+            state.store.as_ref(),
+            &mut provider,
+        )
+        .await?;
+        providers.push(redact_provider_credentials(provider));
+    }
     let next_page_token = pagination.next_object_token(page.next_cursor.as_ref());
     Ok(Response::new(ListProvidersResponse {
         providers,
@@ -4350,7 +4357,7 @@ async fn exchange_provider_subject_token_inner(
         ));
     }
 
-    let provider = state
+    let mut provider = state
         .store
         .get_message_by_name::<Provider>(&workspace, &req.provider)
         .await
@@ -4402,6 +4409,9 @@ async fn exchange_provider_subject_token_inner(
             tonic::Code::FailedPrecondition,
         ));
     }
+    crate::credentials::references::project_expiration_times(state.store.as_ref(), &mut provider)
+        .await
+        .map_err(token_grant_dependency_status)?;
     // Validate configuration before identity acquisition, cache lookup or any
     // token exchange; invalid configuration must never trigger an outbound grant.
     let (cache_ttl, subject_token_expires_at_ms) = validate_intermediate_grant_configuration(
@@ -4409,9 +4419,31 @@ async fn exchange_provider_subject_token_inner(
         &provider,
         &subject_token.credential,
     )?;
+    let subject_versions =
+        crate::credentials::references::versions(state.store.as_ref(), &provider)
+            .await
+            .map_err(token_grant_dependency_status)?;
+    let subject_version = subject_versions
+        .get(&subject_token.credential)
+        .copied()
+        .unwrap_or(1);
     let stored_subject_token =
         resolve_subject_token_credential(&state.credentials, &provider, &subject_token.credential)
             .await?;
+    let resolved_versions =
+        crate::credentials::references::versions(state.store.as_ref(), &provider)
+            .await
+            .map_err(token_grant_dependency_status)?;
+    if resolved_versions
+        .get(&subject_token.credential)
+        .copied()
+        .unwrap_or(1)
+        != subject_version
+    {
+        return Err(token_grant_dependency_status(Status::aborted(
+            "subject credential version changed during resolution",
+        )));
+    }
 
     let jwt_svid_audience =
         effective_jwt_svid_audience(&token_grant.token_endpoint, &token_grant.jwt_svid_audience);
@@ -4429,6 +4461,7 @@ async fn exchange_provider_subject_token_inner(
         provider: &provider,
         dynamic_credential: &req.credential_key,
         subject_credential: &subject_token.credential,
+        subject_credential_version: subject_version,
         token_endpoint: &token_grant.token_endpoint,
         client_assertion_type: effective_client_assertion_type(&token_grant.client_assertion_type),
         subject_token_type: effective_token_type(&subject_token.subject_token_type),
@@ -4568,6 +4601,7 @@ struct IntermediateTokenCacheKeyInput<'a> {
     provider: &'a Provider,
     dynamic_credential: &'a str,
     subject_credential: &'a str,
+    subject_credential_version: u64,
     token_endpoint: &'a str,
     client_assertion_type: &'a str,
     subject_token_type: &'a str,
@@ -4591,11 +4625,12 @@ fn intermediate_token_cache_key(input: IntermediateTokenCacheKeyInput<'_>) -> St
         .as_ref()
         .map_or(0, |metadata| metadata.resource_version);
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         provider_id,
         provider_resource_version,
         input.dynamic_credential,
         input.subject_credential,
+        input.subject_credential_version,
         input.token_endpoint,
         input.client_assertion_type,
         input.subject_token_type,
@@ -5155,6 +5190,7 @@ pub(super) async fn handle_configure_provider_refresh(
             );
         }
     }
+    crate::provider_refresh::reset_mint_receipts(&mut state_record);
     crate::provider_refresh::set_refresh_expiration_presence(&mut state_record, has_expiration);
     let material_staging_id = format!(
         "{}-refresh-config-{}",
@@ -5525,6 +5561,8 @@ fn telemetry_provider_profile(provider_type: &str) -> TelemetryProviderProfile {
 
 #[cfg(test)]
 mod tests {
+    mod reference_versions;
+
     use super::*;
     use crate::auth::identity::{Identity, IdentityProvider};
     use crate::auth::principal::{Principal, UserPrincipal};

@@ -34,6 +34,7 @@ pub(super) struct PreparedRefresh {
     pub provider: Provider,
     pub expected_version: u64,
     pub attempt_id: String,
+    pub output_versions: Option<std::collections::HashMap<String, u64>>,
 }
 
 struct GatewayRefreshSink(crate::credentials::CredentialRuntime);
@@ -134,6 +135,16 @@ impl RefreshStateStore for GatewayRefreshStore {
             ensure_automatic_refresh_ready(&state, current_time_ms())?;
         }
         validate_secret_material_references(&state)?;
+        let keys = std::iter::once(state.credential_key.clone())
+            .chain(state.additional_output_keys.values().cloned())
+            .collect::<Vec<_>>();
+        let output_versions = if completed_mint(&state).is_some() {
+            self.credentials
+                .capture_refresh_reference_versions(&provider, &keys)
+                .await?
+        } else {
+            None
+        };
         let mut expected_version = state
             .metadata
             .as_ref()
@@ -175,6 +186,7 @@ impl RefreshStateStore for GatewayRefreshStore {
             provider,
             expected_version,
             attempt_id,
+            output_versions,
         }))
     }
 

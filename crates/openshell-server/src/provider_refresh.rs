@@ -7,6 +7,7 @@
 
 mod engine;
 mod minters;
+mod publication;
 
 use minters::ATTEMPT_ANNOTATION;
 use openshell_credential_issuer::engine::RefreshTrigger;
@@ -869,6 +870,15 @@ fn refresh_lock(
     ))
 }
 
+/// Reconfiguration starts a new authorization epoch. Its first successful mint
+/// must allocate new references instead of rotating the previous epoch's set.
+pub fn reset_mint_receipts(state: &mut StoredProviderCredentialRefreshState) {
+    if let Some(metadata) = state.metadata.as_mut() {
+        metadata.annotations.remove(COMPLETED_MINT_ANNOTATION);
+        metadata.annotations.remove(ATTEMPT_ANNOTATION);
+    }
+}
+
 fn completed_mint(state: &StoredProviderCredentialRefreshState) -> Option<&str> {
     state
         .metadata
@@ -1016,6 +1026,7 @@ async fn commit_minted_refresh(
         provider,
         expected_version,
         attempt_id,
+        output_versions,
     } = attempt;
     let workspace = provider.object_workspace();
     let credential_key = state.credential_key.clone();
@@ -1141,7 +1152,39 @@ async fn commit_minted_refresh(
         }
     };
 
-    // Generation is ours; write the minted credentials into the provider.
+    if let Some(expected_versions) = output_versions {
+        let mut completion = state.clone();
+        completion.status = "refreshed".to_string();
+        completion.next_refresh_at_ms = completed_next_refresh_at_ms;
+        completion
+            .metadata
+            .as_mut()
+            .expect("prepared refresh metadata")
+            .annotations
+            .insert(COMPLETED_MINT_ANNOTATION.to_string(), attempt_id);
+        match publication::publish(
+            store,
+            credentials,
+            compute,
+            &provider,
+            &expected_versions,
+            (&completion, new_version),
+            &minted,
+        )
+        .await
+        {
+            Ok(version) => {
+                return finish_committed_refresh(store, credentials, completion, version).await;
+            }
+            Err(error) => {
+                let failure = RefreshFailure::from_status(&error);
+                persist_refresh_failure_state(store, &mut state, new_version, &failure).await?;
+                return Err(error);
+            }
+        }
+    }
+
+    // First mint or legacy inline credentials: establish provider references.
     if let Err(err) = apply_minted_credential(
         store,
         workspace,
@@ -1182,6 +1225,18 @@ async fn commit_minted_refresh(
     let new_version = persist_refresh_state_if_current(store, &state, new_version)
         .await?
         .ok_or_else(|| Status::aborted("provider refresh changed during credential commit"))?;
+    finish_committed_refresh(store, credentials, state, new_version).await
+}
+
+async fn finish_committed_refresh(
+    store: &Store,
+    credentials: &crate::credentials::CredentialRuntime,
+    mut state: StoredProviderCredentialRefreshState,
+    new_version: u64,
+) -> Result<StoredProviderCredentialRefreshState, Status> {
+    if let Some(metadata) = state.metadata.as_mut() {
+        metadata.resource_version = new_version;
+    }
     info!(
         provider = %state.provider_name,
         credential_key = %state.credential_key,
@@ -1189,7 +1244,7 @@ async fn commit_minted_refresh(
         status = %state.status,
         expires_at_ms = state.expires_at_ms,
         next_refresh_at_ms = state.next_refresh_at_ms,
-        seconds_until_refresh = seconds_until_ms(now_ms, state.next_refresh_at_ms),
+        seconds_until_refresh = seconds_until_ms(current_time_ms(), state.next_refresh_at_ms),
         "provider credential refresh completed"
     );
     if !state.pending_secret_deletions.is_empty()
@@ -2221,6 +2276,8 @@ fn changed_provider(state: &StoredProviderCredentialRefreshState) -> (String, St
 
 #[cfg(test)]
 mod tests {
+    mod reference_publication;
+
     use super::{
         MAX_OAUTH_ERROR_RESPONSE_BYTES, NewRefreshStateConfig, OAuthGrantKind, RefreshFailure,
         RefreshRetrySchedule, Status, classify_oauth_token_error,

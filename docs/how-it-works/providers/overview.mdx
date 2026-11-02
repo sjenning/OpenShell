@@ -274,8 +274,14 @@ not change them, so set labels during creation.
 Provider refresh stores non-injectable refresh material separately from the
 provider's current credential values. The gateway can mint OAuth2 refresh-token
 tokens, OAuth2 client credentials tokens, Google service account JWT tokens, and
-AWS STS temporary credentials, then write the current access token back to the
-provider record for sandbox injection.
+AWS STS temporary credentials for sandbox injection.
+
+For credential-driver-backed outputs, refresh advances established reference
+versions without changing the provider's resource version or sandbox placeholder
+identities. OpenShell publishes a refresh's complete output set together or
+leaves the previous set unchanged. Provider get/list responses show the current
+credential expiration; use refresh status and sandbox readiness, not a provider
+resource-version change, to observe rotation.
 
 Configure refresh metadata for one injectable credential key:
 
@@ -317,9 +323,8 @@ openshell provider refresh rotate my-graph --credential-key MS_GRAPH_ACCESS_TOKE
 
 ### AWS STS
 
-The gateway calls `sts:AssumeRole` and writes three short-lived credentials
-(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) to the
-provider record atomically.
+The gateway calls `sts:AssumeRole` and publishes three short-lived credentials
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) atomically.
 The `aws` and `aws-s3` profiles declare `AWS_SECRET_ACCESS_KEY` and
 `AWS_SESSION_TOKEN` as `additional_outputs` of the `AWS_ACCESS_KEY_ID` refresh,
 so all three credentials are gateway-minted. Create the provider with

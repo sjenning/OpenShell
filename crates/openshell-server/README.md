@@ -197,9 +197,14 @@ records or placeholder identities. The refresh worker uses shared issuer
 coordination and a stateless minter registry. `RefreshEngine` owns attempt
 orchestration behind minter, refresh-state-store, and post-commit sink traits;
 gateway adapters still own periodic scheduling, durable grant serialization,
-built-in protocol implementations, and provider-record publication.
-Moving those into the issuer and adding remote transport and the standalone
-service remain future work.
+built-in protocol implementations, and publication adapters. Established
+handle-backed grants publish fresh reference versions and their completed-mint
+receipt in one transaction without modifying provider records. The transaction
+checks the provider's resource version and every captured output version. First
+mint and legacy inline outputs still use provider-record publication to establish
+references. Reconfiguration clears old mint receipts so its first mint allocates
+new references for the new authorization epoch. Moving the remaining adapters into the issuer and adding remote
+transport and the standalone service remain future work.
 
 ## Operator credential export
 
@@ -247,6 +252,10 @@ same issuer `RefreshEngine` and `RefreshCoordinator`:
   worker retries or a separately requested manual rotation.
 - Detached refresh tasks complete despite request cancellation, preserving
   replacement refresh tokens returned by the issuer.
+- Established output sets capture reference versions before minting. Publication
+  atomically commits all versions and the grant receipt, including AWS's three
+  outputs. Provider references and their resource version remain unchanged;
+  get/list responses project current expiration from reference metadata.
 - All four built-in strategies use the shared `TokenMinter` contract and registry.
   Adapters separate configuration from secret material and translate semantic
   outputs into pinned profile environment keys. The registry preserves failure

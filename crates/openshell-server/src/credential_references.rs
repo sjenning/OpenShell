@@ -17,7 +17,10 @@ use crate::persistence::ObjectType as _;
 #[path = "credential_references/tests.rs"]
 mod tests;
 
-const OBJECT_TYPE: &str = "credential_reference_v1";
+#[path = "credential_references/publication.rs"]
+mod publication;
+
+pub const OBJECT_TYPE: &str = "credential_reference_v1";
 
 #[derive(Debug)]
 struct DatabaseReferences(Arc<Store>);
@@ -147,6 +150,41 @@ pub async fn versions(store: &Store, provider: &Provider) -> Result<HashMap<Stri
         versions.insert(key.clone(), state.map_or(1, |state| state.version));
     }
     Ok(versions)
+}
+
+/// Hydrate public expiration metadata without rewriting the provider spec.
+/// Later issuer versions supersede legacy provider-authored expiration fields.
+pub async fn project_expiration_times(
+    store: &Store,
+    provider: &mut Provider,
+) -> Result<(), Status> {
+    let registry = new_registry(Arc::new(store.clone()));
+    for (key, handle) in &provider.credential_handles {
+        if let Some(state) = registry
+            .inspect(
+                &reference_key(handle)?,
+                &owner(provider_scope(provider, key)),
+            )
+            .await?
+            && state.version > 1
+        {
+            match state.expiration_time_ms.filter(|_| !state.revoked) {
+                Some(expiration) => {
+                    let timestamp = openshell_core::time::timestamp_from_millis(expiration)
+                        .map_err(|_| {
+                            Status::data_loss("invalid credential reference expiration")
+                        })?;
+                    provider
+                        .credential_expiration_times
+                        .insert(key.clone(), timestamp);
+                }
+                None => {
+                    provider.credential_expiration_times.remove(key);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Deliver embedded version commits through the existing provider fanout,

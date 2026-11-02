@@ -31,8 +31,12 @@ storage-revision-fenced writes. A refresh store can include those writes, its
 grant receipt, and provider-owner checks in one native transaction. Gateway
 persistence provides non-mutating `AtomicWrite::Check` preconditions: PostgreSQL
 locks the checked row until commit; SQLite uses an immediate write transaction.
-Neither check advances the owner's version or changes its timestamps. These
-primitives do not yet switch the gateway refresh publication path to references.
+Neither check advances the owner's version or changes its timestamps.
+Established handle-backed refresh grants now use this transaction to publish all
+output versions and the completed-mint receipt together. First mint and legacy
+inline outputs still establish their references through the provider-record path.
+Reconfiguration clears prior mint receipts; the new authorization epoch's first
+mint allocates fresh references rather than rotating the old epoch's set.
 
 `ReferenceStateStore` implements durable create-only and compare-and-swap writes.
 The gateway adapter stores these records in its object database. PostgreSQL and
@@ -53,7 +57,10 @@ notifications feed the existing provider fanout, including peer gateways. A loca
 notification overflow invalidates all connected sessions. The provider snapshot verifies
 that resolved versions match its captured inputs; a concurrent rotation returns
 `ABORTED` rather than pairing a new value with an old revision. Versions within
-an epoch do not change workload placeholder identity.
+an epoch do not change workload placeholder identity. Provider get/list responses
+project current expiration metadata without resolving secret values. Intermediate
+subject-token cache keys include the subject reference version, and subject
+resolution fences that version before an exchange.
 
 The driver adapter stages a new backing handle before its reference CAS. Retired
 handle cleanup is retried on later replacement or deletion; pending cleanup
@@ -94,15 +101,20 @@ outputs, then notifies the sink. A coalesced attempt does not mint or notify.
 Mint failures are recorded before they return; publication failures retain the
 store adapter's recovery rather than being overwritten by a generic mint error.
 
-The gateway store adapter retains the existing epoch/revision fencing, retry
-eligibility checks, rotated-token staging, and publication protocol. The sink
+The gateway store adapter retains epoch/revision fencing, retry eligibility
+checks, and rotated-token staging. It captures output versions before minting,
+then stages fresh backings and atomically publishes the whole output set with
+its completed-mint receipt and a provider-version precondition. A changed owner,
+grant, or output rejects the set without publishing siblings. Lost commit
+acknowledgements require the exact completed attempt receipt to establish success;
+otherwise possibly committed candidates remain intact. The sink
 invalidates provider delivery through the existing embedded fanout. This callback
 is not a durable change stream and can duplicate callers' existing invalidations.
 
 The orchestration is extracted, but durable grant serialization, the periodic
 scheduler, built-in protocol implementations, and provider-record publication
-still live in gateway adapters. Moving those into the issuer, publishing refresh outputs through
-stable references, adding the public `strategy_name` field, exposing custom
+still live in gateway adapters. Moving those into the issuer, adding the public
+`strategy_name` field, exposing custom
 minters through profiles/configuration, durable reconnectable change streams,
 and remote transport remain separate implementation work. The Rust registry
 supports custom implementations; it does not yet enable remote minter services.

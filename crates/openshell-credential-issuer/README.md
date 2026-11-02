@@ -120,8 +120,15 @@ otherwise possibly committed candidates remain intact. The sink
 invalidates provider delivery through the existing embedded fanout. This callback
 is not a durable change stream and can duplicate callers' existing invalidations.
 
-The orchestration is extracted, but durable grant serialization, the periodic
-scheduler and provider-record publication still live in gateway adapters. Moving those into the issuer, adding the public
+`scheduler` owns due-work selection, retry deadlines, lead-time rounding, and
+live automatic retry eligibility. Its periodic sweep driver starts immediately,
+serializes sweeps, delays missed ticks instead of bursting, and survives sweep
+errors. A non-secret `GrantSchedule` is only a scheduling projection: the store
+adapter must reload and recheck it under the distributed lease. Tombstones and
+pending cleanup remain eligible for maintenance even when a mint is parked.
+
+Durable grant serialization, grant enumeration/maintenance, and provider-record
+publication still live in gateway adapters. Moving those into the issuer, adding the public
 `strategy_name` field, exposing custom
 minters through profiles/configuration, durable reconnectable change streams,
 and remote transport remain separate implementation work. The Rust registry

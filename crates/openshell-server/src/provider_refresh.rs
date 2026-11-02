@@ -11,7 +11,9 @@ mod publication;
 
 use minters::ATTEMPT_ANNOTATION;
 use openshell_credential_issuer::engine::RefreshTrigger;
+use openshell_credential_issuer::minter::{RecoveryAction, RetrySchedule as RefreshRetrySchedule};
 use openshell_credential_issuer::refresh::RefreshCoordinator;
+use openshell_credential_issuer::scheduler::{self, GrantSchedule, RefreshSweep};
 
 use crate::credentials::RefreshMaterialScope;
 use crate::persistence::{
@@ -34,12 +36,9 @@ use crate::storage_proto::{
     StoredRefreshMaterialDeletion,
 };
 
-const DEFAULT_REFRESH_BEFORE_SECONDS: i64 = 300;
 const EXPIRATION_PRESENT_ANNOTATION: &str = "openshell.nvidia.com/refresh-expiration-present";
 const COMPLETED_MINT_ANNOTATION: &str = "openshell.nvidia.com/refresh-completed-mint";
 const DEFAULT_MAX_LIFETIME_SECONDS: i64 = 3600;
-const REFRESH_ERROR_RETRY_SECONDS: i64 = 60;
-const REFRESH_CONFIGURATION_RETRY_SECONDS: i64 = 60 * 60;
 
 pub fn refresh_material_scope(
     state: &StoredProviderCredentialRefreshState,
@@ -481,13 +480,6 @@ struct RefreshFailure {
     retry_schedule: RefreshRetrySchedule,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RefreshRetrySchedule {
-    Short,
-    Configuration,
-    Parked,
-}
-
 impl RefreshFailure {
     fn retryable(status: Status, failure_code: &'static str) -> Self {
         Self {
@@ -565,19 +557,10 @@ pub fn next_refresh_at_ms(
     expires_at_ms: i64,
     refresh_before: Option<&prost_types::Duration>,
 ) -> i64 {
-    let refresh_before = refresh_before
-        .and_then(|value| openshell_core::time::duration_to_std(value).ok())
-        .unwrap_or_else(|| {
-            Duration::from_secs(u64::try_from(DEFAULT_REFRESH_BEFORE_SECONDS).unwrap_or(u64::MAX))
-        });
-    let refresh_before_ms = refresh_before.as_millis().saturating_add(u128::from(
-        !refresh_before.subsec_nanos().is_multiple_of(1_000_000),
-    ));
-    let refresh_before_ms = i64::try_from(refresh_before_ms).unwrap_or(i64::MAX);
-    if expires_at_ms > 0 {
-        return expires_at_ms.saturating_sub(refresh_before_ms);
-    }
-    0
+    scheduler::next_refresh_at_ms(
+        expires_at_ms,
+        refresh_before.and_then(|value| openshell_core::time::duration_to_std(value).ok()),
+    )
 }
 
 // OAuth/JWT expiry fields use whole seconds. Round an exact positive profile
@@ -757,15 +740,7 @@ async fn persist_refresh_failure_state(
         .unwrap_or_default()
         .to_string();
     state.last_error_at_ms = now_ms;
-    state.next_refresh_at_ms = match failure.retry_schedule {
-        RefreshRetrySchedule::Short => {
-            now_ms.saturating_add(REFRESH_ERROR_RETRY_SECONDS.saturating_mul(1000))
-        }
-        RefreshRetrySchedule::Configuration => {
-            now_ms.saturating_add(REFRESH_CONFIGURATION_RETRY_SECONDS.saturating_mul(1000))
-        }
-        RefreshRetrySchedule::Parked => i64::MAX,
-    };
+    state.next_refresh_at_ms = scheduler::retry_at_ms(now_ms, failure.retry_schedule);
     let new_version = persist_refresh_state_if_current(store, state, expected_version)
         .await?
         .ok_or_else(|| {
@@ -887,19 +862,7 @@ fn ensure_automatic_refresh_ready(
     state: &StoredProviderCredentialRefreshState,
     now_ms: i64,
 ) -> Result<(), Status> {
-    if state.recovery_action == ProviderCredentialRefreshRecoveryAction::Reauthorize as i32 {
-        return Err(Status::failed_precondition(
-            "credential refresh requires recovery",
-        ));
-    }
-    if state.recovery_action != ProviderCredentialRefreshRecoveryAction::Unspecified as i32
-        && state.next_refresh_at_ms > now_ms
-    {
-        return Err(Status::unavailable(
-            "credential refresh is in retry backoff",
-        ));
-    }
-    Ok(())
+    refresh_schedule(state).ensure_automatic_ready(now_ms)
 }
 
 /// Cancellation-safe entry point for a separately requested manual rotation.
@@ -1486,36 +1449,33 @@ pub fn spawn_refresh_worker(state: std::sync::Arc<crate::ServerState>, interval:
         interval_seconds = interval.as_secs(),
         "provider credential refresh worker started"
     );
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            match Box::pin(run_refresh_worker_tick(
-                state.store.as_ref(),
-                Some(&state.credentials),
-                Some(&state.compute),
-            ))
-            .await
-            {
-                Ok(providers) => {
-                    for (workspace, provider_name) in providers {
-                        crate::config_delivery::publish_provider(
-                            &state,
-                            &workspace,
-                            &provider_name,
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!(error = %err, "provider credential refresh worker tick failed");
-                }
-            }
-        }
-    });
+    drop(
+        scheduler::spawn(std::sync::Arc::new(GatewayRefreshSweep { state }), interval)
+            .expect("gateway refresh interval must be positive"),
+    );
 }
 
-/// Returns the `(workspace, provider)` pairs whose provider records changed.
+struct GatewayRefreshSweep {
+    state: std::sync::Arc<crate::ServerState>,
+}
+
+#[async_trait::async_trait]
+impl RefreshSweep for GatewayRefreshSweep {
+    async fn sweep(&self) -> Result<(), Status> {
+        let providers = Box::pin(run_refresh_worker_tick(
+            self.state.store.as_ref(),
+            Some(&self.state.credentials),
+            Some(&self.state.compute),
+        ))
+        .await?;
+        for (workspace, provider_name) in providers {
+            crate::config_delivery::publish_provider(&self.state, &workspace, &provider_name);
+        }
+        Ok(())
+    }
+}
+
+/// Returns `(workspace, provider)` pairs whose credential state may have changed.
 async fn run_refresh_worker_tick(
     store: &Store,
     credentials: Option<&crate::credentials::CredentialRuntime>,
@@ -1527,7 +1487,7 @@ async fn run_refresh_worker_tick(
     let watched_count = states.len();
     let due_count = states
         .iter()
-        .filter(|state| state.next_refresh_at_ms <= 0 || state.next_refresh_at_ms <= now_ms)
+        .filter(|state| refresh_schedule(state).due(now_ms))
         .count();
     let rotation_requested_count = states
         .iter()
@@ -1556,14 +1516,34 @@ async fn run_refresh_worker_tick(
 }
 
 fn refresh_state_has_work(state: &StoredProviderCredentialRefreshState, now_ms: i64) -> bool {
-    state
-        .metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.deletion_time.is_some())
-        || !state.pending_secret_deletions.is_empty()
-        || state.next_refresh_at_ms <= 0
-        || state.next_refresh_at_ms <= now_ms
-        || state.status == "rotation_requested"
+    refresh_schedule(state).has_work(now_ms)
+}
+
+fn refresh_schedule(state: &StoredProviderCredentialRefreshState) -> GrantSchedule {
+    let recovery_action =
+        match ProviderCredentialRefreshRecoveryAction::try_from(state.recovery_action) {
+            Ok(ProviderCredentialRefreshRecoveryAction::Unspecified) => None,
+            Ok(ProviderCredentialRefreshRecoveryAction::Retry) => Some(RecoveryAction::Retry),
+            Ok(ProviderCredentialRefreshRecoveryAction::Reauthorize) => {
+                Some(RecoveryAction::Reauthorize)
+            }
+            Ok(ProviderCredentialRefreshRecoveryAction::FixConfiguration) => {
+                Some(RecoveryAction::FixConfiguration)
+            }
+            Ok(ProviderCredentialRefreshRecoveryAction::Investigate) | Err(_) => {
+                Some(RecoveryAction::Investigate)
+            }
+        };
+    GrantSchedule {
+        next_refresh_at_ms: state.next_refresh_at_ms,
+        recovery_action,
+        rotation_requested: state.status == "rotation_requested",
+        deleting: state
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.deletion_time.is_some()),
+        pending_cleanup: !state.pending_secret_deletions.is_empty(),
+    }
 }
 
 async fn refresh_states(
@@ -1631,7 +1611,8 @@ async fn refresh_states(
             );
             continue;
         }
-        let due = state.next_refresh_at_ms <= 0 || state.next_refresh_at_ms <= now_ms;
+        let schedule = refresh_schedule(&state);
+        let due = schedule.due(now_ms);
         let rotation_requested = state.status == "rotation_requested";
         info!(
             provider = %state.provider_name,
@@ -1647,9 +1628,9 @@ async fn refresh_states(
             rotation_requested,
             "provider credential refresh watch"
         );
-        if !due && !rotation_requested {
+        let Some(trigger) = schedule.trigger(now_ms) else {
             continue;
-        }
+        };
         let Some(credentials) = credentials else {
             warn!(
                 provider = %state.provider_name,
@@ -1665,11 +1646,6 @@ async fn refresh_states(
             status = %state.status,
             "refreshing provider credential"
         );
-        let trigger = if rotation_requested {
-            RefreshTrigger::ExplicitRotation
-        } else {
-            RefreshTrigger::Automatic
-        };
         if let Err(err) =
             refresh_from_snapshot_with_trigger(store, credentials, compute, state.clone(), trigger)
                 .await
@@ -1756,6 +1732,34 @@ mod tests {
     fn test_credentials() -> CredentialRuntime {
         CredentialRuntime::from_config(&Config::new(None).with_credential_drivers(["test-static"]))
             .expect("test credential runtime")
+    }
+
+    #[test]
+    fn scheduling_projection_preserves_unknown_recovery_backoff_and_maintenance() {
+        let mut state = StoredProviderCredentialRefreshState {
+            recovery_action: i32::MAX,
+            next_refresh_at_ms: 101,
+            ..Default::default()
+        };
+        assert_eq!(
+            ensure_automatic_refresh_ready(&state, 100)
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        ensure_automatic_refresh_ready(&state, 101).unwrap();
+        state
+            .pending_secret_deletions
+            .push(crate::storage_proto::StoredRefreshMaterialDeletion::default());
+        assert!(super::refresh_state_has_work(&state, 100));
+        assert!(super::refresh_schedule(&state).trigger(100).is_none());
+        state.status = "rotation_requested".to_string();
+        state.metadata = Some(ObjectMeta {
+            deletion_time: Some(ts(1)),
+            ..Default::default()
+        });
+        assert!(super::refresh_state_has_work(&state, 100));
+        assert!(super::refresh_schedule(&state).trigger(100).is_none());
     }
 
     #[test]

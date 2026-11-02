@@ -5,11 +5,11 @@
 
 use super::{
     MintedCredential, ProviderCredentialRefreshRecoveryAction, ProviderCredentialRefreshStrategy,
-    RefreshFailure, RefreshRetrySchedule, Status, StoredProviderCredentialRefreshState,
-    max_lifetime_seconds, refresh_scopes, refresh_strategy_name, strategy_secret_material_keys,
+    RefreshFailure, Status, StoredProviderCredentialRefreshState, max_lifetime_seconds,
+    refresh_scopes, refresh_strategy_name, strategy_secret_material_keys,
 };
 use openshell_credential_issuer::minter::{
-    MintFailure, MintRequest, MintResponse, MinterRegistry, RecoveryAction, RetrySchedule,
+    MintFailure, MintRequest, MintResponse, MinterRegistry, RecoveryAction,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -121,11 +121,7 @@ impl From<RefreshFailure> for MintFailure {
             },
             failure_code: failure.failure_code,
             provider_error_subtype: failure.provider_error_subtype,
-            retry_schedule: match failure.retry_schedule {
-                RefreshRetrySchedule::Short => RetrySchedule::Short,
-                RefreshRetrySchedule::Configuration => RetrySchedule::Configuration,
-                RefreshRetrySchedule::Parked => RetrySchedule::Parked,
-            },
+            retry_schedule: failure.retry_schedule,
         }
     }
 }
@@ -144,11 +140,7 @@ impl From<MintFailure> for RefreshFailure {
             },
             failure_code: failure.failure_code,
             provider_error_subtype: failure.provider_error_subtype,
-            retry_schedule: match failure.retry_schedule {
-                RetrySchedule::Short => RefreshRetrySchedule::Short,
-                RetrySchedule::Configuration => RefreshRetrySchedule::Configuration,
-                RetrySchedule::Parked => RefreshRetrySchedule::Parked,
-            },
+            retry_schedule: failure.retry_schedule,
         }
     }
 }

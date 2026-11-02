@@ -9,6 +9,7 @@ pub mod builtins;
 pub mod engine;
 pub mod minter;
 pub mod refresh;
+pub mod scheduler;
 
 use std::sync::Arc;
 

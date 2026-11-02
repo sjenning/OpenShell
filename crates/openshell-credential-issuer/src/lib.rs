@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Embedded issuer reference state. Values remain in credential drivers; this
-//! crate owns stable identities, versions, revocation, and cleanup ownership.
+//! crate owns stable identities, versions, revocation, cleanup ownership, local
+//! refresh coordination, and the stateless minter contract.
+
+pub mod minter;
+pub mod refresh;
 
 use std::sync::Arc;
 

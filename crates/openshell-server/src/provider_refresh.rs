@@ -5,6 +5,11 @@
 
 #![allow(clippy::result_large_err)]
 
+mod minters;
+
+use minters::{ATTEMPT_ANNOTATION, mint_credential};
+use openshell_credential_issuer::refresh::RefreshCoordinator;
+
 use crate::credentials::RefreshMaterialScope;
 use crate::persistence::{
     ObjectListQuery, ObjectType, PersistenceError, Store, WriteCondition, current_time_ms,
@@ -664,7 +669,9 @@ pub fn refresh_strategy_name(strategy: i32) -> &'static str {
     }
 }
 
-pub use openshell_providers::is_gateway_mintable_strategy;
+pub fn is_gateway_mintable_strategy(strategy: ProviderCredentialRefreshStrategy) -> bool {
+    minters::MINTERS.supports(refresh_strategy_name(strategy as i32))
+}
 
 /// Secret source-material fields that are security-sensitive by strategy even
 /// when a direct API caller omits `secret_material_keys`.
@@ -846,28 +853,18 @@ fn validate_secret_material_references(
     )))
 }
 
-// Local waiters do not consume PostgreSQL sessions while another local mint owns
-// the credential. Weak entries avoid retaining every provider ever refreshed.
-static REFRESH_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-static REFRESH_EXECUTORS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-static REFRESH_ADMISSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+// Local exclusion, bounded admission, and cancellation safety are shared issuer
+// machinery. Distributed fencing and durable recovery remain in this adapter.
+static REFRESH_COORDINATOR: std::sync::LazyLock<RefreshCoordinator> =
+    std::sync::LazyLock::new(RefreshCoordinator::default);
 
 fn refresh_lock(
     state: &StoredProviderCredentialRefreshState,
 ) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, Status> {
-    let key = refresh_state_name(&state.provider_id, &state.credential_key);
-    let mut locks = REFRESH_LOCKS
-        .lock()
-        .map_err(|_| Status::internal("refresh coordination unavailable"))?;
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    let lock = locks
-        .get(&key)
-        .and_then(std::sync::Weak::upgrade)
-        .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
-    locks.insert(key, std::sync::Arc::downgrade(&lock));
-    Ok(lock)
+    REFRESH_COORDINATOR.lock_for(&refresh_state_name(
+        &state.provider_id,
+        &state.credential_key,
+    ))
 }
 
 fn completed_mint(state: &StoredProviderCredentialRefreshState) -> Option<&str> {
@@ -1006,24 +1003,11 @@ async fn refresh_from_snapshot_with_trigger(
     snapshot: StoredProviderCredentialRefreshState,
     trigger: RefreshTrigger,
 ) -> Result<StoredProviderCredentialRefreshState, Status> {
-    let admission = REFRESH_ADMISSIONS
-        .try_acquire()
-        .map_err(|_| Status::resource_exhausted("credential refresh queue is full"))?;
-    let lock = refresh_lock(&snapshot)?;
+    let key = refresh_state_name(&snapshot.provider_id, &snapshot.credential_key);
     let store = store.clone();
     let credentials = credentials.clone();
     let compute = compute.cloned();
-    // A disconnected RPC must not cancel minting after an upstream rotates its
-    // refresh token. Spawn before any externally observable refresh side effect.
-    tokio::spawn(async move {
-        let _admission = admission;
-        let _local = tokio::time::timeout(Duration::from_secs(40), lock.lock_owned())
-            .await
-            .map_err(|_| Status::unavailable("credential refresh is busy"))?;
-        let _permit = tokio::time::timeout(Duration::from_secs(40), REFRESH_EXECUTORS.acquire())
-            .await
-            .map_err(|_| Status::resource_exhausted("credential refresh workers are busy"))?
-            .map_err(|_| Status::unavailable("credential refresh workers stopped"))?;
+    REFRESH_COORDINATOR.run(&key, Box::pin(async move {
         let _distributed = store
             .acquire_refresh_guard(&snapshot.provider_id, &snapshot.credential_key)
             .await
@@ -1086,9 +1070,8 @@ async fn refresh_from_snapshot_with_trigger(
             &snapshot.credential_key,
         )
         .await
-    })
+    }))
     .await
-    .map_err(|_| Status::internal("credential refresh worker failed"))?
 }
 
 async fn refresh_provider_credential_locked(
@@ -1162,6 +1145,13 @@ async fn refresh_provider_credential_locked(
     state.status = "refresh_in_progress".to_string();
     state.next_refresh_at_ms = i64::MAX;
     state.recovery_action = ProviderCredentialRefreshRecoveryAction::Investigate as i32;
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    state
+        .metadata
+        .as_mut()
+        .ok_or_else(|| Status::failed_precondition("refresh state metadata missing"))?
+        .annotations
+        .insert(ATTEMPT_ANNOTATION.to_string(), attempt_id.clone());
     let expected_version = persist_refresh_state_if_current(store, &state, expected_version)
         .await?
         .ok_or_else(|| Status::aborted("provider refresh changed before minting"))?;
@@ -1345,10 +1335,9 @@ async fn refresh_provider_credential_locked(
             state.status = "refreshed".to_string();
             state.next_refresh_at_ms = completed_next_refresh_at_ms;
             if let Some(metadata) = state.metadata.as_mut() {
-                metadata.annotations.insert(
-                    COMPLETED_MINT_ANNOTATION.to_string(),
-                    uuid::Uuid::new_v4().to_string(),
-                );
+                metadata
+                    .annotations
+                    .insert(COMPLETED_MINT_ANNOTATION.to_string(), attempt_id);
             }
             let new_version = persist_refresh_state_if_current(store, &state, new_version)
                 .await?
@@ -1631,33 +1620,6 @@ async fn cleanup_staged_refresh_handles(
             error = %cleanup_err,
             "failed to clean up staged provider credentials after refresh failure"
         );
-    }
-}
-
-async fn mint_credential(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    let strategy = ProviderCredentialRefreshStrategy::try_from(state.strategy)
-        .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
-    match strategy {
-        ProviderCredentialRefreshStrategy::Oauth2RefreshToken => {
-            mint_oauth2_refresh_token(state).await
-        }
-        ProviderCredentialRefreshStrategy::Oauth2ClientCredentials => {
-            mint_oauth2_client_credentials(state).await
-        }
-        ProviderCredentialRefreshStrategy::GoogleServiceAccountJwt => {
-            mint_google_service_account_jwt(state).await
-        }
-        ProviderCredentialRefreshStrategy::AwsStsAssumeRole => {
-            mint_aws_sts_assume_role(state).await
-        }
-        ProviderCredentialRefreshStrategy::External
-        | ProviderCredentialRefreshStrategy::Static
-        | ProviderCredentialRefreshStrategy::Unspecified => Err(Status::failed_precondition(
-            format!("refresh strategy '{strategy:?}' cannot be minted by the gateway"),
-        )
-        .into()),
     }
 }
 
@@ -3135,6 +3097,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(refreshed.authorization_epoch, authorization_epoch);
+        let annotations = &refreshed.metadata.as_ref().unwrap().annotations;
+        assert_eq!(
+            annotations[super::ATTEMPT_ANNOTATION],
+            annotations[super::COMPLETED_MINT_ANNOTATION]
+        );
         assert_eq!(refreshed.status, "refreshed");
         assert!(refreshed.expires_at_ms > 0);
         assert!(refreshed.next_refresh_at_ms > 0);
@@ -5135,6 +5102,16 @@ mod tests {
             {
                 return;
             }
+            let during_mint =
+                get_refresh_state(&store, "default", &provider_id, "AWS_ACCESS_KEY_ID")
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(during_mint.status, "refresh_in_progress");
+            assert_eq!(during_mint.next_refresh_at_ms, i64::MAX);
+            let attempt =
+                &during_mint.metadata.as_ref().unwrap().annotations[super::ATTEMPT_ANNOTATION];
+            assert!(uuid::Uuid::parse_str(attempt).is_ok());
             delete_refresh_state_with_credentials(
                 &store,
                 &credentials,

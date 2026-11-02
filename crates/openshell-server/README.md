@@ -193,9 +193,11 @@ Retired handles remain durably owned until cleanup succeeds.
 Both configuration snapshots hash captured credential versions; provider delivery
 rejects a resolution whose version changed after capture. Rotation within a
 reference therefore changes the environment revision without changing provider
-records or placeholder identities. The refresh worker still uses the existing
-provider-record commit path; extracting refresh scheduling and minters, remote
-transport, and the standalone service remain future work.
+records or placeholder identities. The refresh worker uses shared issuer
+coordination and a stateless minter registry, but still owns scheduling, durable
+grant state, built-in protocol implementations, and provider-record publication.
+Moving those into the issuer and adding remote transport and the standalone
+service remain future work.
 
 ## Operator credential export
 
@@ -224,7 +226,7 @@ closed without falling back to inline values.
 ## Refresh coordination
 
 Explicit rotation, background refresh, and operator refresh-on-read share the
-same refresh coordination:
+same `openshell-credential-issuer::refresh::RefreshCoordinator`:
 
 - A process-local weak keyed mutex coalesces waiters without retaining deleted
   providers indefinitely.
@@ -232,10 +234,10 @@ same refresh coordination:
 - PostgreSQL deployments also take a dedicated per-provider/per-credential
   advisory lock; SQLite uses the local mutex. Worker secret cleanup takes the
   same locks and reloads state before changing its resource version.
-- A durable `refresh_in_progress` marker precedes upstream minting. A
+- A durable `refresh_in_progress` marker and attempt UUID precede upstream minting. A
   `refresh_committing` marker protects the interval between grant persistence
   and provider-handle persistence. Only a completed provider commit publishes
-  `refreshed` state, with a unique completed-mint identity in metadata
+  `refreshed` state, with that attempt UUID as the completed-mint identity in metadata
   annotations. Waiters coalesce against that identity, not bookkeeping changes
   to the resource version.
 - Automatic callers recheck live recovery and retry deadlines under both locks.
@@ -243,6 +245,12 @@ same refresh coordination:
   worker retries or a separately requested manual rotation.
 - Detached refresh tasks complete despite request cancellation, preserving
   replacement refresh tokens returned by the issuer.
+- All four built-in strategies use the shared `TokenMinter` contract and registry.
+  Adapters separate configuration from secret material and translate semantic
+  outputs into pinned profile environment keys. The registry preserves failure
+  recovery classifications and parks malformed responses. Custom Rust minters
+  use `custom:<name>`; public profile selection and remote services are not yet
+  implemented.
 - Existing generation/CAS fencing remains active for deletion and
   reconfiguration. An ambiguous rotating-token exchange is parked for recovery
   rather than automatically consuming the grant again.

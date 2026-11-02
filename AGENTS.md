@@ -48,7 +48,7 @@ Do not rely on this file for a full inventory. The detailed public and contribut
 | `crates/openshell-driver-kubernetes-secrets/` | Kubernetes Secrets credential driver | In-process `CredentialDriver` backend for OpenShell-managed K8s Secret storage |
 | `crates/openshell-driver-vault/` | Vault credential driver | In-process `CredentialDriver` backend for Vault-compatible KV storage |
 | `crates/openshell-driver-db-credstore/` | Database credential driver | In-process `CredentialDriver` backend for gateway database credential storage |
-| `crates/openshell-credential-issuer/` | Embedded credential issuer | Stable credential references, versions, revocation, and durable handle cleanup ownership |
+| `crates/openshell-credential-issuer/` | Embedded credential issuer | Stable credential references, versions, revocation, refresh coordination, and stateless minter contracts |
 | `crates/openshell-driver-kubernetes/` | Kubernetes compute driver | In-process `ComputeDriver` backend for K8s sandbox pods |
 | `crates/openshell-driver-docker/` | Docker compute driver | In-process `ComputeDriver` backend for local Docker sandbox containers |
 | `crates/openshell-driver-podman/` | Podman compute driver | In-process `ComputeDriver` backend for local Podman sandbox containers |

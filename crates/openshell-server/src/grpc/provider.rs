@@ -98,6 +98,8 @@ pub(super) struct ProviderEnvironmentRecord {
     pub resource_version: u64,
     pub provider: Provider,
     pub refresh_states: Vec<StoredProviderCredentialRefreshState>,
+    /// Metadata-only issuer versions captured with these provider inputs.
+    pub credential_versions: HashMap<String, u64>,
 }
 
 impl ProviderEnvironment {
@@ -1044,12 +1046,14 @@ async fn load_provider_environment_record(
         .map_err(|e| Status::internal(format!("failed to decode provider '{name}': {e}")))?;
     let refresh_states =
         crate::provider_refresh::list_refresh_states_for_provider(store, &record.id).await?;
+    let credential_versions = crate::credentials::references::versions(store, &provider).await?;
     Ok(Some(ProviderEnvironmentRecord {
         name: name.to_string(),
         object_id: record.id,
         resource_version: record.resource_version,
         provider,
         refresh_states,
+        credential_versions,
     }))
 }
 
@@ -1357,6 +1361,15 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
         let resolved_refs = credentials
             .resolve_provider_handles(provider, now_ms)
             .await?;
+        for key in provider.credential_handles.keys() {
+            if resolved_refs.versions.get(key).copied()
+                != Some(record.credential_versions.get(key).copied().unwrap_or(1))
+            {
+                return Err(Status::aborted(
+                    "provider credential version changed during snapshot build",
+                ));
+            }
+        }
         // Expired handles are removed by the credential runtime before values
         // reach this loop. Preserve omission evidence without exposing handles.
         if provider.credential_handles.keys().any(|key| {
@@ -12173,6 +12186,7 @@ mod tests {
             resource_version: 1,
             provider: Provider::default(),
             refresh_states: Vec::new(),
+            credential_versions: HashMap::new(),
         };
         let endpoints = vec![StaticCredentialEndpointBinding {
             host: "api.example.com".to_string(),

@@ -1930,6 +1930,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issuer_version_commit_pushes_a_new_value_without_a_provider_record_update() {
+        let state = push_state().await;
+        crate::credentials::references::spawn_reference_notifications(&state);
+        let (mut harness, record) = driver_backed_session(&state).await;
+        let before = record.provider_environment().unwrap();
+        let provider = state
+            .store
+            .get_message::<Provider>("provider")
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_before = state
+            .store
+            .get("provider", "provider")
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .credentials
+            .rotate_provider_reference(
+                crate::credentials::references::provider_scope(&provider, "GITHUB_TOKEN"),
+                &provider.credential_handles["GITHUB_TOKEN"],
+                1,
+                "issuer-rotated-token",
+                None,
+            )
+            .await
+            .unwrap();
+        let update = next_update(&mut harness, Duration::from_secs(5))
+            .await
+            .expect("issuer notification pushes a new snapshot");
+        let after = sent_config(&update).provider_environment.unwrap();
+        assert_ne!(before.provider_env_revision, after.provider_env_revision);
+        assert!(
+            after
+                .values
+                .iter()
+                .any(|value| value.name == "GITHUB_TOKEN" && value.value == "issuer-rotated-token")
+        );
+        let stored_after = state
+            .store
+            .get("provider", "provider")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_before.payload, stored_after.payload);
+        assert_eq!(
+            stored_before.resource_version,
+            stored_after.resource_version
+        );
+    }
+
+    #[tokio::test]
     async fn provider_failure_delivers_the_configuration_with_an_unresolved_environment() {
         let state = push_state().await;
         let (mut harness, record) = driver_backed_session(&state).await;

@@ -14,6 +14,8 @@ mod config_inputs;
 mod endpoint_status;
 mod provisioning_clock;
 #[cfg(test)]
+mod reference_tests;
+#[cfg(test)]
 mod token_grant_owners_tests;
 pub use config_inputs::{SandboxConfigInputs, load_sandbox_config_inputs};
 pub use provisioning_clock::configuration_change;
@@ -3323,6 +3325,10 @@ async fn compute_provider_env_revision_with_catalog_and_policy_bindings(
                     crate::provider_refresh::list_refresh_states_for_provider(store, &record.id)
                         .await?;
                 hash_provider_refresh_states(&refresh_states, &mut hasher)?;
+                hash_credential_versions(
+                    &crate::credentials::references::versions(store, &provider).await?,
+                    &mut hasher,
+                );
                 hasher.update(provider.r#type.as_bytes());
                 hash_provider_profile_revision(
                     catalog,
@@ -3388,6 +3394,7 @@ fn compute_provider_env_revision_from_records_and_policy_bindings(
 
         let provider = &record.provider;
         hash_provider_refresh_states(&record.refresh_states, &mut hasher)?;
+        hash_credential_versions(&record.credential_versions, &mut hasher);
         hasher.update(provider.r#type.as_bytes());
         hash_provider_profile_revision(
             catalog,
@@ -3424,6 +3431,17 @@ fn compute_provider_env_revision_from_records_and_policy_bindings(
     Ok(u64::from_le_bytes(digest[..8].try_into().map_err(
         |_| Status::internal("provider env revision digest too short"),
     )?))
+}
+
+fn hash_credential_versions(versions: &HashMap<String, u64>, hasher: &mut Sha256) {
+    let mut keys = versions.keys().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        hasher.update(b"credential-reference-version-v1");
+        hasher.update((key.len() as u64).to_le_bytes());
+        hasher.update(key.as_bytes());
+        hasher.update(versions[key].to_le_bytes());
+    }
 }
 
 fn hash_provider_refresh_states(

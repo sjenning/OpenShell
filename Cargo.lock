@@ -4471,6 +4471,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openshell-credential-issuer"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "openshell-crypto"
 version = "0.0.0"
 dependencies = [
@@ -5122,6 +5132,7 @@ dependencies = [
  "notify",
  "openshell-bootstrap",
  "openshell-core",
+ "openshell-credential-issuer",
  "openshell-crypto",
  "openshell-driver-db-credstore",
  "openshell-driver-kubernetes-secrets",

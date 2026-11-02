@@ -176,13 +176,26 @@ operations. Internal consumers do not construct provider records or call provide
 delivery APIs. New writes always stage a fresh candidate before the owning
 controller publishes its handle with CAS.
 
-This is boundary-only groundwork for the credential issuer RFC. Both interfaces
-still share the configured embedded credential drivers and their process
-lifetimes. Existing SSH and launch-material handles remain readable and deletable
-without migration. No remote issuer, separate internal storage backend, versioned
-references, or refresh-engine migration is implemented yet. When remote provider
-credentials are added, internal secrets must retain a local backend rather than
-following the remote provider source.
+Both interfaces share the configured embedded credential drivers and their
+process lifetimes. Existing SSH and launch-material handles remain readable and
+deletable without migration. Internal secrets bypass issuer reference state.
+When remote provider credentials are added, internal secrets must retain a local
+backend rather than following the remote provider source.
+
+Provider credentials use the embedded
+[`openshell-credential-issuer`](../openshell-credential-issuer/README.md) reference
+registry. Startup adopts legacy handles at version 1 without rewriting provider
+records. Value replacements use fresh backing handles and a version CAS, while
+operator reconfiguration continues to allocate a new authorization epoch.
+Revocation tombstones fence stale references even when backend deletion fails.
+Retired handles remain durably owned until cleanup succeeds.
+
+Both configuration snapshots hash captured credential versions; provider delivery
+rejects a resolution whose version changed after capture. Rotation within a
+reference therefore changes the environment revision without changing provider
+records or placeholder identities. The refresh worker still uses the existing
+provider-record commit path; extracting refresh scheduling and minters, remote
+transport, and the standalone service remain future work.
 
 ## Operator credential export
 

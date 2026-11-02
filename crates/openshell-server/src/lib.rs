@@ -697,6 +697,16 @@ pub(crate) async fn run_server(
     )
     .await?;
 
+    credentials
+        .migrate_provider_references(&store)
+        .await
+        .map_err(|error| {
+            Error::config(format!(
+                "credential reference migration failed: {}",
+                error.code()
+            ))
+        })?;
+
     let oidc_cache = if let Some(ref oidc) = config.oidc {
         // Validate RBAC configuration before starting.
         let policy = auth::authz::AuthzPolicy {
@@ -952,6 +962,7 @@ pub(crate) async fn run_server(
     }
 
     let state = Arc::new(state);
+    credentials::references::spawn_reference_notifications(&state);
 
     // Install the recorder before the endpoint-status startup reconciliation so
     // the lock waits and timeouts recorded there are exported. Its listener

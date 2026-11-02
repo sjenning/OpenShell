@@ -56,6 +56,10 @@ use tracing::warn;
 
 use crate::persistence::{PersistenceError, Store, WriteCondition};
 use crate::storage_proto::StoredRefreshMaterialDeletion;
+use prost::Message as _;
+
+#[path = "credential_references.rs"]
+pub mod references;
 
 const DEFAULT_CREDENTIAL_DRIVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_CREDENTIAL_DRIVER_RPC_TIMEOUT_SECS: u64 = 30;
@@ -122,6 +126,8 @@ pub trait CredentialDriver: std::fmt::Debug + Send + Sync {
 pub struct ResolvedProviderCredentials {
     pub values: HashMap<String, String>,
     pub expires_at_ms: HashMap<String, i64>,
+    /// Versions observed with the backing handles used for this resolution.
+    pub versions: HashMap<String, u64>,
     /// Keys returned by a credential driver whose effective expiration has
     /// already passed. Values stay withheld, but create-time consumers need
     /// the identities to fail closed instead of silently omitting credentials.
@@ -138,6 +144,8 @@ pub struct RefreshMaterialScope<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CredentialRuntime {
+    references: Option<Arc<openshell_credential_issuer::ReferenceRegistry>>,
+    reference_changes: tokio::sync::broadcast::Sender<(String, String)>,
     registry: CredentialDriverRegistry,
     drivers: BTreeMap<String, Arc<dyn CredentialDriver>>,
     driver_processes: Vec<Arc<ManagedCredentialDriverProcess>>,
@@ -394,6 +402,8 @@ impl CredentialRuntime {
             drivers,
             driver_processes: Vec::new(),
             negotiated_extensions,
+            references: store.map(references::new_registry),
+            reference_changes: tokio::sync::broadcast::channel(128).0,
         })
     }
 
@@ -463,6 +473,8 @@ impl CredentialRuntime {
             drivers,
             driver_processes,
             negotiated_extensions,
+            references: store.map(references::new_registry),
+            reference_changes: tokio::sync::broadcast::channel(128).0,
         })
     }
 
@@ -574,6 +586,13 @@ impl CredentialRuntime {
                     .get(credential_key)
                     .filter(|handle| normalize_driver_name(&handle.driver) == driver_name)
                     .cloned();
+                let scope = RefreshMaterialScope { provider_name, workspace, provider_id, credential_key };
+                if self.references.is_some() && let Some(handle) = existing_handle.as_ref() {
+                    let current = self.reference_state(scope, handle).await?
+                        .expect("persistent reference state");
+                    self.rotate_provider_reference(scope, handle, current.version, value, None).await?;
+                    return Ok((credential_key.clone(), handle.clone()));
+                }
                 let replaced_handle = existing_handles
                     .get(credential_key)
                     .filter(|handle| normalize_driver_name(&handle.driver) != driver_name)
@@ -595,6 +614,7 @@ impl CredentialRuntime {
                         "credential driver '{driver_name}' returned an empty handle for provider credential '{credential_key}'"
                     )));
                 }
+                self.reference_state(scope, &handle).await?;
                 if let Some(replaced_handle) = replaced_handle {
                     self.delete_provider_credential_handle(
                         provider_name,
@@ -625,15 +645,19 @@ impl CredentialRuntime {
         }
 
         if let Some(err) = first_error {
-            if !successes.is_empty()
-                && let Err(cleanup_err) = self
-                    .delete_provider_credential_handles(
-                        provider_name,
-                        workspace,
-                        provider_id,
-                        &successes,
-                    )
-                    .await
+            let new_references = successes
+                .iter()
+                .filter(|(key, handle)| existing_handles.get(*key) != Some(*handle))
+                .map(|(key, handle)| (key.clone(), handle.clone()))
+                .collect();
+            if let Err(cleanup_err) = self
+                .delete_provider_credential_handles(
+                    provider_name,
+                    workspace,
+                    provider_id,
+                    &new_references,
+                )
+                .await
             {
                 tracing::warn!(
                     provider_name = %provider_name,
@@ -850,6 +874,19 @@ impl CredentialRuntime {
         handle: CredentialHandle,
     ) -> Result<(), Status> {
         let driver_name = self.registry.driver_for_handle(credential_key, &handle)?;
+        if self.references.is_some() {
+            return self
+                .revoke_reference(
+                    RefreshMaterialScope {
+                        provider_name,
+                        workspace,
+                        provider_id,
+                        credential_key,
+                    },
+                    &handle,
+                )
+                .await;
+        }
         let driver = self.connected_driver(&driver_name)?;
         driver
             .delete_credential(DeleteCredentialRequest {
@@ -894,15 +931,27 @@ impl CredentialRuntime {
             .map(|metadata| metadata.id.clone())
             .unwrap_or_default();
         let mut request_keys = HashMap::new();
+        let mut reference_states = HashMap::new();
         let mut requests_by_driver: BTreeMap<String, Vec<ResolveCredentialRequest>> =
             BTreeMap::new();
 
         for (credential_key, handle) in &provider.credential_handles {
-            let driver_name = self.registry.driver_for_handle(credential_key, handle)?;
+            self.registry.driver_for_handle(credential_key, handle)?;
+            let reference = self
+                .reference_state(references::provider_scope(provider, credential_key), handle)
+                .await?;
+            let selected = if let Some(state) = reference.as_ref() {
+                CredentialHandle::decode(state.backing.as_slice())
+                    .map_err(|_| Status::data_loss("invalid credential reference backing handle"))?
+            } else {
+                handle.clone()
+            };
+            let driver_name = self.registry.driver_for_handle(credential_key, &selected)?;
+            reference_states.insert(credential_key.clone(), reference);
             let request_id = format!("credential-{}", request_keys.len());
             request_keys.insert(request_id.clone(), credential_key.clone());
 
-            let mut selected_handle = handle.clone();
+            let mut selected_handle = selected;
             selected_handle.driver.clone_from(&driver_name);
             requests_by_driver
                 .entry(driver_name)
@@ -952,8 +1001,16 @@ impl CredentialRuntime {
                     .expect("validated response request_id")
                     .clone();
 
-                // Check provider-level expiration
-                let provider_expires_at_ms = provider
+                let reference = reference_states
+                    .get(&credential_key)
+                    .and_then(Option::as_ref);
+                resolved.versions.insert(
+                    credential_key.clone(),
+                    reference.map_or(1, |state| state.version),
+                );
+                // Migrated version-one handles retain provider-authored expiry.
+                // Later issuer versions own their expiration independently.
+                let legacy_expires_at_ms = provider
                     .credential_expiration_times
                     .get(&credential_key)
                     .map(openshell_core::time::timestamp_to_millis)
@@ -966,6 +1023,9 @@ impl CredentialRuntime {
                     .transpose()
                     .map_err(|error| Status::internal(error.to_string()))?;
 
+                let provider_expires_at_ms = reference
+                    .filter(|state| state.version > 1)
+                    .map_or(legacy_expires_at_ms, |state| state.expiration_time_ms);
                 // Compute effective expiration (earliest present timestamp).
                 let effective_expires_at_ms = effective_credential_expiration_ms(
                     provider_expires_at_ms,
@@ -2813,6 +2873,8 @@ key_encryption_key_path = {key_encryption_key_path_toml}
         let provider = Provider {
             metadata: Some(openshell_core::proto::ObjectMeta {
                 name: "openai-local".to_string(),
+                workspace: "test-workspace".to_string(),
+                id: "test-provider-id".to_string(),
                 ..Default::default()
             }),
             credential_handles: stored,

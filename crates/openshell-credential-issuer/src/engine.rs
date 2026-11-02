@@ -8,7 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tonic::Status;
 
-use crate::minter::{MintFailure, MintRequest, MintResponse, MinterRegistry};
+use crate::minter::{
+    MintFailure, MintRequest, MintResponse, MinterRegistry, RecoveryAction, RetrySchedule,
+};
 use crate::refresh::RefreshCoordinator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,11 +38,13 @@ pub trait RefreshStateStore: Send + Sync + 'static {
 
     /// Reload under the lease; recheck deletion, authorization, coalescing and
     /// live retry eligibility. Before returning Ready, durably record uncertainty
-    /// and a fresh attempt ID. Never reuse a grant with an unresolved exchange.
+    /// and the engine-supplied attempt ID. Return that exact ID from `mint_request`
+    /// and use it as the completion receipt. Never reuse a grant with an unresolved exchange.
     async fn prepare(
         &self,
         observed: Self::Snapshot,
         trigger: RefreshTrigger,
+        attempt_id: &str,
     ) -> Result<Preparation<Self::Snapshot, Self::Attempt>, Status>;
 
     /// Resolve only this attempt's material, after its uncertainty marker commits.
@@ -108,12 +112,24 @@ impl<S: RefreshStateStore> RefreshEngine<S> {
                 &key,
                 Box::pin(async move {
                     let _lease = store.acquire_lease(&observed).await?;
-                    let attempt = match store.prepare(observed, trigger).await? {
+                    let attempt_id = uuid::Uuid::new_v4().to_string();
+                    let attempt = match store.prepare(observed, trigger, &attempt_id).await? {
                         Preparation::Current(snapshot) => return Ok(snapshot),
                         Preparation::Ready(attempt) => attempt,
                     };
                     let result = match store.mint_request(&attempt).await {
-                        Ok(request) => minters.mint(request).await,
+                        Ok(request) if request.attempt_id == attempt_id => {
+                            minters.mint(request).await
+                        }
+                        Ok(_) => Err(MintFailure {
+                            status: Status::failed_precondition(
+                                "credential refresh attempt does not match its durable preparation",
+                            ),
+                            recovery_action: RecoveryAction::Investigate,
+                            failure_code: "refresh_attempt_mismatch",
+                            provider_error_subtype: None,
+                            retry_schedule: RetrySchedule::Parked,
+                        }),
                         Err(failure) => Err(failure),
                     };
                     let response = match result {

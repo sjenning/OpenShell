@@ -4485,6 +4485,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 

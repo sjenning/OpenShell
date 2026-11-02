@@ -98,8 +98,8 @@ Production STS endpoints come from the region, not request material. The explici
 feature does not change the production registry.
 
 The gateway maps durable grants to requests and semantic outputs to pinned
-profile environment keys. It records an attempt UUID together with its
-pre-mint uncertainty marker and reuses it as the completed-mint receipt after
+profile environment keys. It records the issuer-allocated attempt UUID together
+with its pre-mint uncertainty marker and reuses it as the completed-mint receipt after
 publication. This does not provide upstream exactly-once delivery: built-in
 protocols do not yet send the ID to upstream providers.
 
@@ -109,6 +109,10 @@ lease, prepares a durable attempt, resolves material, invokes the minter, commit
 outputs, then notifies the sink. A coalesced attempt does not mint or notify.
 Mint failures are recorded before they return; publication failures retain the
 store adapter's recovery rather than being overwritten by a generic mint error.
+The engine allocates a fresh attempt ID under the lease and requires the resolved
+request to carry that exact ID before invoking a minter. Missing or mismatched
+IDs park the attempt for investigation. UUIDs are correlation/idempotency keys,
+not authorization tokens or cryptographic secrets.
 
 The gateway store adapter retains epoch/revision fencing, retry eligibility
 checks, and rotated-token staging. It captures output versions before minting,

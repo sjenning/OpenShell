@@ -85,6 +85,7 @@ impl RefreshStateStore for GatewayRefreshStore {
         &self,
         observed: Self::Snapshot,
         trigger: RefreshTrigger,
+        attempt_id: &str,
     ) -> Result<Preparation<Self::Snapshot, Self::Attempt>, Status> {
         let mut state = get_refresh_state(
             &self.store,
@@ -170,13 +171,12 @@ impl RefreshStateStore for GatewayRefreshStore {
         state.status = "refresh_in_progress".to_string();
         state.next_refresh_at_ms = i64::MAX;
         state.recovery_action = ProviderCredentialRefreshRecoveryAction::Investigate as i32;
-        let attempt_id = uuid::Uuid::new_v4().to_string();
         state
             .metadata
             .as_mut()
             .ok_or_else(|| Status::failed_precondition("refresh state metadata missing"))?
             .annotations
-            .insert(ATTEMPT_ANNOTATION.to_string(), attempt_id.clone());
+            .insert(ATTEMPT_ANNOTATION.to_string(), attempt_id.to_string());
         let expected_version =
             persist_refresh_state_if_current(&self.store, &state, expected_version)
                 .await?
@@ -185,7 +185,7 @@ impl RefreshStateStore for GatewayRefreshStore {
             state,
             provider,
             expected_version,
-            attempt_id,
+            attempt_id: attempt_id.to_string(),
             output_versions,
         }))
     }

@@ -7,6 +7,7 @@
 
 pub mod builtins;
 pub mod engine;
+pub mod grant;
 pub mod minter;
 pub mod refresh;
 pub mod scheduler;

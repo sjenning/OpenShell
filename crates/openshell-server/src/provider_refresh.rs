@@ -859,9 +859,8 @@ async fn cleanup_pending_secret_deletions_coordinated(
     Ok(())
 }
 
-/// Automatic callers must honor the live failure schedule, not the eligibility
-/// observed before they queued. Configuration/investigation failures can still
-/// be retried by the worker once due; reauthorization stays parked.
+/// Test the legacy durable-to-scheduler projection independently of admission.
+#[cfg(test)]
 fn ensure_automatic_refresh_ready(
     state: &StoredProviderCredentialRefreshState,
     now_ms: i64,

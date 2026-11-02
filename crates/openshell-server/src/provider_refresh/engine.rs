@@ -6,18 +6,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use openshell_credential_issuer::SecretOwner;
 use openshell_credential_issuer::engine::{
     Preparation, RefreshEngine, RefreshSink, RefreshStateStore, RefreshTrigger,
 };
+use openshell_credential_issuer::grant::{GrantAdmission, GrantCheckpoint, GrantIdentity};
 use openshell_credential_issuer::minter::{MintFailure, MintRequest, MintResponse};
 
 use super::{
     ATTEMPT_ANNOTATION, Provider, ProviderCredentialRefreshRecoveryAction, REFRESH_COORDINATOR,
     RefreshFailure, Status, Store, StoredProviderCredentialRefreshState,
     cleanup_pending_secret_deletions, commit_minted_refresh, completed_mint, current_time_ms,
-    effective_authorization_epoch, ensure_automatic_refresh_ready, get_refresh_state, minters,
-    persist_refresh_failure_state, persist_refresh_state_if_current, refresh_material_scope,
-    refresh_state_name, refresh_strategy_name, resolve_refresh_material, seconds_until_ms,
+    effective_authorization_epoch, get_refresh_state, minters, persist_refresh_failure_state,
+    persist_refresh_state_if_current, refresh_material_scope, refresh_schedule, refresh_state_name,
+    refresh_strategy_name, resolve_refresh_material, seconds_until_ms,
     validate_secret_material_references,
 };
 use openshell_core::{ObjectId, ObjectWorkspace};
@@ -35,6 +37,27 @@ pub(super) struct PreparedRefresh {
     pub expected_version: u64,
     pub attempt_id: String,
     pub output_versions: Option<std::collections::HashMap<String, u64>>,
+}
+
+/// Project only non-secret durable state. The issuer never sees provider
+/// profiles, credential handles, or material while deciding admission.
+fn grant_checkpoint(
+    state: &StoredProviderCredentialRefreshState,
+) -> Result<GrantCheckpoint, Status> {
+    Ok(GrantCheckpoint {
+        identity: GrantIdentity {
+            id: state.object_id().to_string(),
+            authorization_epoch: effective_authorization_epoch(state)?.to_string(),
+            owner: SecretOwner {
+                workspace: state.object_workspace().to_string(),
+                provider_id: state.provider_id.clone(),
+                credential_key: state.credential_key.clone(),
+            },
+        },
+        status: state.status.clone(),
+        completed_attempt: completed_mint(state).map(ToString::to_string),
+        schedule: refresh_schedule(state),
+    })
 }
 
 struct GatewayRefreshSink(crate::credentials::CredentialRuntime);
@@ -95,24 +118,8 @@ impl RefreshStateStore for GatewayRefreshStore {
         )
         .await?
         .ok_or_else(|| Status::aborted("provider refresh was deleted"))?;
-        if state.object_id() != observed.object_id()
-            || effective_authorization_epoch(&state)? != effective_authorization_epoch(&observed)?
-        {
-            return Err(Status::aborted("provider refresh was reconfigured"));
-        }
-        if state
-            .metadata
-            .as_ref()
-            .is_some_and(|meta| meta.deletion_time.is_some())
-        {
-            return Err(Status::failed_precondition(
-                "provider refresh is being deleted",
-            ));
-        }
-        if state.status == "refreshed"
-            && completed_mint(&state).is_some()
-            && completed_mint(&state) != completed_mint(&observed)
-        {
+        let live = grant_checkpoint(&state)?;
+        if live.admit(&grant_checkpoint(&observed)?)? == GrantAdmission::Current {
             return Ok(Preparation::Current(state));
         }
         let provider = self
@@ -124,17 +131,7 @@ impl RefreshStateStore for GatewayRefreshStore {
         if provider.object_id() != observed.provider_id {
             return Err(Status::aborted("provider was replaced"));
         }
-        if matches!(
-            state.status.as_str(),
-            "refresh_in_progress" | "refresh_committing"
-        ) {
-            return Err(Status::failed_precondition(
-                "previous credential mint has an uncertain outcome; reconfigure the refresh grant",
-            ));
-        }
-        if trigger == RefreshTrigger::Automatic {
-            ensure_automatic_refresh_ready(&state, current_time_ms())?;
-        }
+        live.ensure_mintable(trigger, current_time_ms())?;
         validate_secret_material_references(&state)?;
         let keys = std::iter::once(state.credential_key.clone())
             .chain(state.additional_output_keys.values().cloned())
@@ -238,3 +235,6 @@ impl RefreshStateStore for GatewayRefreshStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

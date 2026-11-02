@@ -197,7 +197,12 @@ records or placeholder identities. The refresh worker uses shared issuer
 coordination and a stateless minter registry. `RefreshEngine` owns attempt
 orchestration behind minter, refresh-state-store, and post-commit sink traits;
 the issuer also owns all four stateless built-in protocol implementations.
-The issuer owns periodic sweep execution, scheduling and retry policy.
+The issuer owns periodic sweep execution, scheduling and retry policy. Its
+non-secret grant checkpoint also owns admission: owner/ID/epoch checks, deletion,
+completed-mint coalescing, uncertain-outcome rejection, and live backoff. The
+adapter reloads under the distributed lease and checks provider liveness before
+preparing an issuer-allocated attempt ID; the engine rejects mismatched request
+IDs before invoking a minter.
 Gateway adapters still own durable grant serialization, enumeration/maintenance,
 and publication adapters. Established
 handle-backed grants publish fresh reference versions and their completed-mint

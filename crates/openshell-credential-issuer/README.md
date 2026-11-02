@@ -72,9 +72,9 @@ backend allocation and reference publication.
 `RefreshCoordinator` owns process-local grant locks, bounded admission, executor
 limits, and detached execution. Queue waits can time out; an executing mint
 cannot be cancelled by that timer or by the caller disconnecting. Maintenance
-uses the same grant lock. The gateway still acquires its distributed lease and
-rechecks authorization epochs, completed-mint receipts, and retry eligibility
-inside that local exclusion before minting.
+uses the same grant lock. The gateway acquires its distributed lease inside
+that local exclusion and reloads durable state before invoking issuer admission
+policy.
 
 `TokenMinter` receives non-secret configuration, resolved secret material, a
 strategy name, and a durable attempt ID. It returns semantic output IDs,
@@ -114,9 +114,16 @@ request to carry that exact ID before invoking a minter. Missing or mismatched
 IDs park the attempt for investigation. UUIDs are correlation/idempotency keys,
 not authorization tokens or cryptographic secrets.
 
-The gateway store adapter retains epoch/revision fencing, retry eligibility
-checks, and rotated-token staging. It captures output versions before minting,
-then stages fresh backings and atomically publishes the whole output set with
+`grant::GrantCheckpoint` owns admission policy over the freshly reloaded grant:
+immutable owner/ID/authorization-epoch checks, deletion rejection, completed-mint
+coalescing, unresolved-exchange parking, and live automatic retry eligibility.
+Explicit rotation bypasses backoff, never an uncertain mint. The checkpoint
+contains no material, handles, profiles, or upstream error bodies. It is a policy
+projection, not a new durable serialization format or substitute for a lease.
+
+The gateway store adapter retains serialization, owner liveness checks,
+epoch/revision-fenced writes, and rotated-token staging. It captures output
+versions before minting, then stages fresh backings and atomically publishes the whole output set with
 its completed-mint receipt and a provider-version precondition. A changed owner,
 grant, or output rejects the set without publishing siblings. Lost commit
 acknowledgements require the exact completed attempt receipt to establish success;

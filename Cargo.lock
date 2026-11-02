@@ -4475,9 +4475,17 @@ name = "openshell-credential-issuer"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "aws-config",
+ "aws-sdk-sts",
+ "jsonwebtoken",
+ "openshell-crypto",
+ "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "tokio",
  "tonic",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]
@@ -5102,8 +5110,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "aws-config",
- "aws-sdk-sts",
  "axum",
  "base64 0.22.1",
  "bytes",

@@ -88,8 +88,17 @@ outputs, and preserves classified failure recovery. Malformed or expired
 responses park the attempt rather than publishing values or automatically
 repeating an exchange whose outcome may be uncertain.
 
-The four existing built-ins now run behind this contract through gateway-local
-compatibility adapters. The gateway records an attempt UUID together with its
+`builtins::registry()` registers issuer-owned OAuth refresh-token, OAuth client
+credentials, Google service-account JWT, and AWS STS minters. Their protocols use
+only attempt-local inputs and return semantic outputs directly; they have no
+dependency on gateway storage DTOs. JWT signing and first-party TLS initialization
+use `openshell-crypto`; AWS SDK signing and transports remain dependency-owned.
+Production STS endpoints come from the region, not request material. The explicit
+`test-support` registry permits only HTTP loopback STS overrides; enabling that
+feature does not change the production registry.
+
+The gateway maps durable grants to requests and semantic outputs to pinned
+profile environment keys. It records an attempt UUID together with its
 pre-mint uncertainty marker and reuses it as the completed-mint receipt after
 publication. This does not provide upstream exactly-once delivery: built-in
 protocols do not yet send the ID to upstream providers.
@@ -112,8 +121,7 @@ invalidates provider delivery through the existing embedded fanout. This callbac
 is not a durable change stream and can duplicate callers' existing invalidations.
 
 The orchestration is extracted, but durable grant serialization, the periodic
-scheduler, built-in protocol implementations, and provider-record publication
-still live in gateway adapters. Moving those into the issuer, adding the public
+scheduler and provider-record publication still live in gateway adapters. Moving those into the issuer, adding the public
 `strategy_name` field, exposing custom
 minters through profiles/configuration, durable reconnectable change streams,
 and remote transport remain separate implementation work. The Rust registry

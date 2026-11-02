@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use async_trait::async_trait;
 use openshell_core::proto::ObjectMeta;
+use openshell_credential_issuer::minter::{StrategyDescriptor, TokenMinter};
 use std::sync::Mutex;
 
 #[derive(Debug)]

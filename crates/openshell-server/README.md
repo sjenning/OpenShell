@@ -196,8 +196,9 @@ reference therefore changes the environment revision without changing provider
 records or placeholder identities. The refresh worker uses shared issuer
 coordination and a stateless minter registry. `RefreshEngine` owns attempt
 orchestration behind minter, refresh-state-store, and post-commit sink traits;
-gateway adapters still own periodic scheduling, durable grant serialization,
-built-in protocol implementations, and publication adapters. Established
+the issuer also owns all four stateless built-in protocol implementations.
+Gateway adapters still own periodic scheduling, durable grant serialization,
+and publication adapters. Established
 handle-backed grants publish fresh reference versions and their completed-mint
 receipt in one transaction without modifying provider records. The transaction
 checks the provider's resource version and every captured output version. First
@@ -256,7 +257,8 @@ same issuer `RefreshEngine` and `RefreshCoordinator`:
   atomically commits all versions and the grant receipt, including AWS's three
   outputs. Provider references and their resource version remain unchanged;
   get/list responses project current expiration from reference metadata.
-- All four built-in strategies use the shared `TokenMinter` contract and registry.
+- All four built-in strategies live in the issuer crate behind the shared
+  `TokenMinter` contract and registry. No protocol consumes gateway storage DTOs.
   Adapters separate configuration from secret material and translate semantic
   outputs into pinned profile environment keys. The registry preserves failure
   recovery classifications and parks malformed responses. Custom Rust minters

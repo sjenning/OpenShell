@@ -3,18 +3,31 @@
 
 [package]
 name = "openshell-credential-issuer"
-description = "Embedded credential references, refresh coordination, and token-minter contracts for OpenShell"
+description = "Embedded credential references, refresh engine, and built-in token minters for OpenShell"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
+aws-config = { workspace = true }
+aws-sdk-sts = { workspace = true }
+jsonwebtoken = { workspace = true }
+openshell-crypto = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 serde = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
 
 [lints]
 workspace = true

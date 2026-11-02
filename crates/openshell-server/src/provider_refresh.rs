@@ -24,7 +24,6 @@ use openshell_core::proto::{
 };
 use openshell_core::{ObjectId, ObjectName};
 use prost::Message;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tonic::{Code, Status};
@@ -41,7 +40,6 @@ const COMPLETED_MINT_ANNOTATION: &str = "openshell.nvidia.com/refresh-completed-
 const DEFAULT_MAX_LIFETIME_SECONDS: i64 = 3600;
 const REFRESH_ERROR_RETRY_SECONDS: i64 = 60;
 const REFRESH_CONFIGURATION_RETRY_SECONDS: i64 = 60 * 60;
-const MAX_OAUTH_ERROR_RESPONSE_BYTES: usize = 8 * 1024;
 
 pub fn refresh_material_scope(
     state: &StoredProviderCredentialRefreshState,
@@ -474,34 +472,6 @@ struct MintedCredential {
     additional_credentials: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    expires_in: Option<i64>,
-    refresh_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthErrorResponse {
-    error: String,
-    #[serde(default, deserialize_with = "deserialize_optional_oauth_string")]
-    error_subtype: Option<String>,
-}
-
-fn deserialize_optional_oauth_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_str().map(str::to_owned))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OAuthGrantKind {
-    UserRefreshToken,
-    NonInteractive,
-}
-
 #[derive(Debug)]
 struct RefreshFailure {
     status: Status,
@@ -563,20 +533,6 @@ impl RefreshFailure {
         }
     }
 
-    fn fix_configuration_with_subtype(
-        status: Status,
-        failure_code: &'static str,
-        provider_error_subtype: &'static str,
-    ) -> Self {
-        Self {
-            status,
-            recovery_action: ProviderCredentialRefreshRecoveryAction::FixConfiguration,
-            failure_code,
-            provider_error_subtype: Some(provider_error_subtype),
-            retry_schedule: RefreshRetrySchedule::Configuration,
-        }
-    }
-
     fn into_status(self) -> Status {
         self.status
     }
@@ -603,17 +559,6 @@ impl From<Status> for RefreshFailure {
             _ => Self::investigate(status, "refresh_failed"),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct GoogleServiceAccountClaims<'a> {
-    iss: &'a str,
-    scope: String,
-    aud: &'a str,
-    iat: i64,
-    exp: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sub: Option<&'a str>,
 }
 
 pub fn next_refresh_at_ms(
@@ -1493,476 +1438,6 @@ async fn cleanup_staged_refresh_handles(
     }
 }
 
-async fn mint_oauth2_refresh_token(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    let token_url = oauth2_token_url(state)?;
-    let client_id = required_material(&state.material, "client_id")?;
-    let refresh_token = required_material(&state.material, "refresh_token")?;
-    let mut form = vec![
-        ("grant_type".to_string(), "refresh_token".to_string()),
-        ("client_id".to_string(), client_id),
-        ("refresh_token".to_string(), refresh_token),
-    ];
-    if let Some(client_secret) = material_value(&state.material, &["client_secret"]) {
-        form.push(("client_secret".to_string(), client_secret));
-    }
-    let scope = refresh_scopes(state).join(" ");
-    if !scope.is_empty() {
-        form.push(("scope".to_string(), scope));
-    }
-
-    request_token(
-        &token_url,
-        &form,
-        max_lifetime_seconds(state),
-        OAuthGrantKind::UserRefreshToken,
-    )
-    .await
-}
-
-async fn mint_oauth2_client_credentials(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    let token_url = oauth2_token_url(state)?;
-    let client_id = required_material(&state.material, "client_id")?;
-    let client_secret = required_material(&state.material, "client_secret")?;
-    let mut form = vec![
-        ("grant_type".to_string(), "client_credentials".to_string()),
-        ("client_id".to_string(), client_id),
-        ("client_secret".to_string(), client_secret),
-    ];
-    let scope = refresh_scopes(state).join(" ");
-    if !scope.is_empty() {
-        form.push(("scope".to_string(), scope));
-    }
-
-    request_token(
-        &token_url,
-        &form,
-        max_lifetime_seconds(state),
-        OAuthGrantKind::NonInteractive,
-    )
-    .await
-}
-
-async fn mint_google_service_account_jwt(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    crate::install_jsonwebtoken_crypto_provider();
-    let token_url = google_token_url(state);
-    let client_email = required_material(&state.material, "client_email")?;
-    let private_key = required_material(&state.material, "private_key")?;
-    let scopes = refresh_scopes(state);
-    if scopes.is_empty() {
-        return Err(Status::invalid_argument(
-            "google_service_account_jwt requires at least one scope",
-        )
-        .into());
-    }
-    let now_ms = current_time_ms();
-    let now_secs = now_ms / 1000;
-    let lifetime_secs = max_lifetime_seconds(state).min(DEFAULT_MAX_LIFETIME_SECONDS);
-    let subject = material_value(&state.material, &["subject", "sub"]);
-    let claims = GoogleServiceAccountClaims {
-        iss: &client_email,
-        scope: scopes.join(" "),
-        aud: &token_url,
-        iat: now_secs,
-        exp: now_secs.saturating_add(lifetime_secs),
-        sub: subject.as_deref(),
-    };
-    let assertion = openshell_crypto::jwt::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
-        &claims,
-        &jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|_| {
-            Status::invalid_argument("google_service_account_jwt private_key must be RSA PEM")
-        })?,
-    )
-    .map_err(|_| Status::internal("sign google service account jwt failed"))?;
-    let form = vec![
-        (
-            "grant_type".to_string(),
-            "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
-        ),
-        ("assertion".to_string(), assertion),
-    ];
-    request_token(
-        &token_url,
-        &form,
-        lifetime_secs,
-        OAuthGrantKind::NonInteractive,
-    )
-    .await
-}
-
-async fn mint_aws_sts_assume_role(
-    state: &StoredProviderCredentialRefreshState,
-) -> Result<MintedCredential, RefreshFailure> {
-    let role_arn = required_material(&state.material, "role_arn")?;
-    let session_name = material_value(&state.material, &["session_name"])
-        .unwrap_or_else(|| "openshell-sandbox".to_string());
-    let external_id = material_value(&state.material, &["external_id"]);
-    let region =
-        material_value(&state.material, &["aws_region"]).unwrap_or_else(|| "us-east-1".to_string());
-
-    let region_provider = aws_sdk_sts::config::Region::new(region);
-    let mut config_loader =
-        aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region_provider);
-
-    // Explicit source credentials are all-or-nothing. A lone key must not
-    // silently fall through to the gateway's ambient identity (CWE-20): the
-    // caller asked for a specific principal, so an incomplete pair is an error.
-    // An optional session token supports temporary source credentials (SSO or a
-    // prior AssumeRole); it requires the access/secret pair.
-    let session_token = material_value(&state.material, &["aws_session_token"]);
-    match (
-        material_value(&state.material, &["aws_access_key_id"]),
-        material_value(&state.material, &["aws_secret_access_key"]),
-    ) {
-        (Some(access_key), Some(secret_key)) => {
-            let creds = aws_sdk_sts::config::Credentials::new(
-                access_key,
-                secret_key,
-                session_token,
-                None,
-                "openshell-provider-refresh",
-            );
-            config_loader = config_loader.credentials_provider(creds);
-        }
-        (None, None) if session_token.is_some() => {
-            return Err(Status::invalid_argument(
-                "aws_session_token requires aws_access_key_id and aws_secret_access_key",
-            )
-            .into());
-        }
-        (None, None) => {}
-        _ => {
-            return Err(Status::invalid_argument(
-                "aws_access_key_id and aws_secret_access_key must both be set or both omitted",
-            )
-            .into());
-        }
-    }
-
-    let sdk_config = config_loader.load().await;
-    let sts_config = {
-        let mut builder = aws_sdk_sts::config::Builder::from(&sdk_config);
-        // Endpoint overrides exist only to point tests at a local mock STS. In
-        // production the endpoint is always resolved from the region so a caller
-        // cannot redirect an AWS-signed AssumeRole request at an arbitrary
-        // service (CWE-918). See `test_sts_endpoint_override`.
-        if let Some(endpoint) = test_sts_endpoint_override(state) {
-            builder = builder.endpoint_url(endpoint);
-        }
-        builder.build()
-    };
-    let client = aws_sdk_sts::Client::from_conf(sts_config);
-
-    let max_lifetime_i64 = max_lifetime_seconds(state);
-    let max_lifetime = i32::try_from(max_lifetime_i64.min(i64::from(i32::MAX))).unwrap_or(i32::MAX);
-    let max_lifetime_ms = i64::from(max_lifetime).saturating_mul(1000);
-
-    let mut req = client
-        .assume_role()
-        .role_arn(&role_arn)
-        .role_session_name(&session_name)
-        .duration_seconds(max_lifetime);
-
-    if let Some(eid) = external_id {
-        req = req.external_id(eid);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| Status::internal(format!("STS AssumeRole failed: {e}")))?;
-
-    let creds = resp
-        .credentials()
-        .ok_or_else(|| Status::internal("STS AssumeRole response missing credentials"))?;
-
-    let access_key_id = creds.access_key_id().to_string();
-    let secret_access_key = creds.secret_access_key().to_string();
-    let session_token = creds.session_token().to_string();
-
-    let now_ms = current_time_ms();
-    let max_expires = now_ms.saturating_add(max_lifetime_ms);
-    let expires_at_ms = creds.expiration().to_millis().unwrap_or(max_expires);
-    let expires_at_ms = expires_at_ms.min(max_expires);
-
-    // Map STS response fields to the env keys the profile bound to each semantic
-    // output. Configure pins these from the profile's additional_outputs, so a
-    // missing mapping means the state was not configured against a valid AWS STS
-    // profile binding; refuse rather than guessing standard AWS names.
-    let output_values = [
-        ("secret_access_key", secret_access_key),
-        ("session_token", session_token),
-    ];
-    let mut additional = HashMap::new();
-    for (output_id, value) in output_values {
-        let env_key = state.additional_output_keys.get(output_id).ok_or_else(|| {
-            Status::failed_precondition(format!(
-                "refresh state missing resolved output key for '{output_id}'; reconfigure the AWS STS refresh"
-            ))
-        })?;
-        additional.insert(env_key.clone(), value);
-    }
-
-    Ok(MintedCredential {
-        access_token: access_key_id,
-        expires_at_ms,
-        refresh_token: None,
-        additional_credentials: additional,
-    })
-}
-
-async fn request_token(
-    token_url: &str,
-    form: &[(String, String)],
-    max_lifetime_seconds: i64,
-    grant_kind: OAuthGrantKind,
-) -> Result<MintedCredential, RefreshFailure> {
-    let parsed = reqwest::Url::parse(token_url)
-        .map_err(|_| Status::invalid_argument("token_url must be an absolute URL"))?;
-    match parsed.scheme() {
-        "https" => {}
-        "http" if parsed.host_str().is_some_and(is_loopback_host) => {}
-        _ => {
-            return Err(Status::invalid_argument(
-                "token_url must use https, except loopback http for local tests",
-            )
-            .into());
-        }
-    }
-
-    openshell_crypto::tls::ensure_default_provider();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| Status::internal(format!("build refresh HTTP client failed: {e}")))?;
-    // GitHub returns form-encoded bodies unless JSON is requested.
-    let response = client
-        .post(parsed)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .form(form)
-        .send()
-        .await
-        .map_err(|error| {
-            let error_kind = if error.is_timeout() {
-                "timeout"
-            } else if error.is_connect() {
-                "connect"
-            } else if error.is_request() {
-                "request"
-            } else {
-                "other"
-            };
-            warn!(
-                error = %error.without_url(),
-                error_kind,
-                "OAuth token endpoint request failed"
-            );
-            if grant_kind == OAuthGrantKind::UserRefreshToken && error_kind != "connect" {
-                RefreshFailure::reauthorize(
-                    Status::failed_precondition(
-                        "refresh token exchange has an uncertain outcome; reauthorize the grant",
-                    ),
-                    "oauth_refresh_exchange_uncertain",
-                    None,
-                )
-            } else {
-                RefreshFailure::retryable(
-                    Status::unavailable("token endpoint request failed"),
-                    "oauth_token_endpoint_unavailable",
-                )
-            }
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = read_bounded_oauth_error_body(response).await;
-        return Err(classify_oauth_token_error(status, &body, grant_kind));
-    }
-    let token = response.json::<TokenResponse>().await.map_err(|_| {
-        if grant_kind == OAuthGrantKind::UserRefreshToken {
-            return RefreshFailure::reauthorize(
-                Status::failed_precondition(
-                    "refresh token exchange returned an unusable response; reauthorize the grant",
-                ),
-                "oauth_refresh_exchange_uncertain",
-                None,
-            );
-        }
-        RefreshFailure::investigate(
-            Status::failed_precondition("token endpoint returned invalid JSON"),
-            "oauth_invalid_success_response",
-        )
-    })?;
-    if token.access_token.trim().is_empty() {
-        if grant_kind == OAuthGrantKind::UserRefreshToken {
-            return Err(RefreshFailure::reauthorize(
-                Status::failed_precondition(
-                    "refresh token exchange returned no access token; reauthorize the grant",
-                ),
-                "oauth_refresh_exchange_uncertain",
-                None,
-            ));
-        }
-        return Err(RefreshFailure::investigate(
-            Status::failed_precondition("token endpoint returned empty access_token"),
-            "oauth_empty_access_token",
-        ));
-    }
-    let now_ms = current_time_ms();
-    let lifetime_cap_seconds = if max_lifetime_seconds > 0 {
-        max_lifetime_seconds
-    } else {
-        DEFAULT_MAX_LIFETIME_SECONDS
-    };
-    let lifetime_seconds = token
-        .expires_in
-        .filter(|value| *value > 0)
-        .unwrap_or(lifetime_cap_seconds);
-    let lifetime_seconds = lifetime_seconds.min(lifetime_cap_seconds);
-    Ok(MintedCredential {
-        access_token: token.access_token,
-        expires_at_ms: now_ms.saturating_add(lifetime_seconds.saturating_mul(1000)),
-        refresh_token: token
-            .refresh_token
-            .filter(|refresh_token| !refresh_token.trim().is_empty()),
-        additional_credentials: HashMap::new(),
-    })
-}
-
-async fn read_bounded_oauth_error_body(mut response: reqwest::Response) -> Vec<u8> {
-    let mut body = Vec::new();
-    while body.len() < MAX_OAUTH_ERROR_RESPONSE_BYTES {
-        let Ok(Some(chunk)) = response.chunk().await else {
-            break;
-        };
-        let remaining = MAX_OAUTH_ERROR_RESPONSE_BYTES.saturating_sub(body.len());
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if chunk.len() >= remaining {
-            break;
-        }
-    }
-    body
-}
-
-fn classify_oauth_token_error(
-    status: reqwest::StatusCode,
-    body: &[u8],
-    grant_kind: OAuthGrantKind,
-) -> RefreshFailure {
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        return RefreshFailure::retryable(
-            Status::unavailable(format!("token endpoint returned HTTP {status}")),
-            "oauth_token_endpoint_retryable",
-        );
-    }
-
-    let Ok(error_response) = serde_json::from_slice::<OAuthErrorResponse>(body) else {
-        return RefreshFailure::investigate(
-            Status::failed_precondition(format!(
-                "token endpoint returned HTTP {status} without a recognized OAuth error"
-            )),
-            "oauth_unrecognized_error_response",
-        );
-    };
-
-    match error_response.error.as_str() {
-        "invalid_grant" if grant_kind == OAuthGrantKind::UserRefreshToken => {
-            let subtype = error_response
-                .error_subtype
-                .as_deref()
-                .filter(|subtype| *subtype == "invalid_rapt")
-                .map(|_| "invalid_rapt");
-            let message = if subtype.is_some() {
-                "OAuth refresh grant requires interactive reauthorization (invalid_grant/invalid_rapt)"
-            } else {
-                "OAuth refresh grant is no longer usable (invalid_grant); user reauthorization is required"
-            };
-            RefreshFailure::reauthorize(
-                Status::failed_precondition(message),
-                "oauth_invalid_grant",
-                subtype,
-            )
-        }
-        "invalid_client" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth token endpoint rejected the client configuration (invalid_client)",
-            ),
-            "oauth_invalid_client",
-        ),
-        "unauthorized_client" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth token endpoint rejected the client grant (unauthorized_client)",
-            ),
-            "oauth_unauthorized_client",
-        ),
-        "invalid_scope" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth token endpoint rejected the configured scopes (invalid_scope)",
-            ),
-            "oauth_invalid_scope",
-        ),
-        "unsupported_grant_type" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth token endpoint rejected the configured grant type (unsupported_grant_type)",
-            ),
-            "oauth_unsupported_grant_type",
-        ),
-        "admin_policy_enforced" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth access is blocked by an administrator policy (admin_policy_enforced)",
-            ),
-            "oauth_admin_policy_enforced",
-        ),
-        "access_denied"
-            if error_response.error_subtype.as_deref() == Some("admin_policy_enforced") =>
-        {
-            RefreshFailure::fix_configuration_with_subtype(
-                Status::failed_precondition(
-                    "OAuth access is blocked by an administrator policy (access_denied/admin_policy_enforced)",
-                ),
-                "oauth_admin_policy_enforced",
-                "admin_policy_enforced",
-            )
-        }
-        "access_denied" if grant_kind == OAuthGrantKind::UserRefreshToken => {
-            RefreshFailure::reauthorize(
-                Status::failed_precondition(
-                    "OAuth access was denied; user reauthorization is required (access_denied)",
-                ),
-                "oauth_access_denied",
-                None,
-            )
-        }
-        "access_denied" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth access was denied for the non-interactive grant (access_denied)",
-            ),
-            "oauth_access_denied",
-        ),
-        "invalid_grant" => RefreshFailure::fix_configuration(
-            Status::failed_precondition(
-                "OAuth token endpoint rejected the non-interactive grant (invalid_grant)",
-            ),
-            "oauth_invalid_grant",
-        ),
-        "server_error" | "temporarily_unavailable" => RefreshFailure::retryable(
-            Status::unavailable("OAuth token endpoint reported a temporary failure"),
-            "oauth_token_endpoint_retryable",
-        ),
-        _ => RefreshFailure::investigate(
-            Status::failed_precondition(format!(
-                "token endpoint returned HTTP {status} with an unrecognized OAuth error"
-            )),
-            "oauth_unrecognized_error",
-        ),
-    }
-}
-
 pub fn refresh_scopes(state: &StoredProviderCredentialRefreshState) -> Vec<String> {
     if !state.scopes.is_empty() {
         return state.scopes.clone();
@@ -1995,33 +1470,6 @@ pub fn parse_material_i64(
         .map_err(|_| Status::invalid_argument(format!("{key} material must be a signed integer")))
 }
 
-fn oauth2_token_url(state: &StoredProviderCredentialRefreshState) -> Result<String, Status> {
-    if let Some(tenant_id) = material_value(&state.material, &["tenant_id"]) {
-        return Ok(format!(
-            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-        ));
-    }
-    if !state.token_url.trim().is_empty() {
-        return Ok(state.token_url.clone());
-    }
-    Err(Status::invalid_argument(
-        "oauth2_client_credentials requires token_url or tenant_id material",
-    ))
-}
-
-fn google_token_url(state: &StoredProviderCredentialRefreshState) -> String {
-    if state.token_url.trim().is_empty() {
-        "https://oauth2.googleapis.com/token".to_string()
-    } else {
-        state.token_url.clone()
-    }
-}
-
-fn required_material(material: &HashMap<String, String>, key: &str) -> Result<String, Status> {
-    material_value(material, &[key])
-        .ok_or_else(|| Status::invalid_argument(format!("{key} material is required")))
-}
-
 fn material_value(material: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(value) = material.get(*key).map(|value| value.trim())
@@ -2030,31 +1478,6 @@ fn material_value(material: &HashMap<String, String>, keys: &[&str]) -> Option<S
             return Some(value.to_string());
         }
     }
-    None
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-/// Test-only STS endpoint override. Reads the `sts_endpoint_url` material and
-/// accepts it only when it is a loopback URL, so unit tests can target a local
-/// mock STS. Compiled out of production builds entirely: the configure boundary
-/// also rejects the `sts_endpoint_url` material key, so it can never reach a
-/// stored refresh state outside tests.
-#[cfg(test)]
-fn test_sts_endpoint_override(state: &StoredProviderCredentialRefreshState) -> Option<String> {
-    material_value(&state.material, &["sts_endpoint_url"]).filter(|endpoint| {
-        reqwest::Url::parse(endpoint)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(is_loopback_host))
-            .unwrap_or(false)
-    })
-}
-
-#[cfg(not(test))]
-#[allow(clippy::missing_const_for_fn)]
-fn test_sts_endpoint_override(_state: &StoredProviderCredentialRefreshState) -> Option<String> {
     None
 }
 
@@ -2279,16 +1702,14 @@ mod tests {
     mod reference_publication;
 
     use super::{
-        MAX_OAUTH_ERROR_RESPONSE_BYTES, NewRefreshStateConfig, OAuthGrantKind, RefreshFailure,
-        RefreshRetrySchedule, Status, classify_oauth_token_error,
+        NewRefreshStateConfig, RefreshFailure, RefreshRetrySchedule, Status,
         delete_refresh_state_with_credentials, effective_authorization_epoch,
         enqueue_pending_secret_deletion, ensure_automatic_refresh_ready, get_refresh_state,
         list_all_refresh_states, list_refresh_states_for_provider, max_lifetime_seconds,
-        new_refresh_state, next_refresh_at_ms, put_refresh_state, read_bounded_oauth_error_body,
-        refresh_has_expiration, refresh_material_scope, refresh_provider_credential,
-        refresh_state_name, refresh_status_from_state, refresh_strategy_name, request_token,
-        run_refresh_worker_tick, seconds_until_ms, set_refresh_expiration_presence,
-        validate_secret_material_references,
+        new_refresh_state, next_refresh_at_ms, put_refresh_state, refresh_has_expiration,
+        refresh_material_scope, refresh_provider_credential, refresh_state_name,
+        refresh_status_from_state, refresh_strategy_name, run_refresh_worker_tick,
+        seconds_until_ms, set_refresh_expiration_presence, validate_secret_material_references,
     };
     use crate::credentials::CredentialRuntime;
     use crate::persistence::{current_time_ms, test_store};
@@ -2325,7 +1746,7 @@ mod tests {
     };
     use openshell_core::{ObjectId, ObjectName, ObjectWorkspace};
     use std::collections::HashMap;
-    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn ts(milliseconds: i64) -> prost_types::Timestamp {
@@ -2555,199 +1976,6 @@ mod tests {
         validate_secret_material_references(&state).unwrap();
     }
 
-    #[test]
-    fn oauth_invalid_grant_requires_user_reauthorization_without_exposing_description() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"error":"invalid_grant","error_subtype":"invalid_rapt","error_description":"sensitive provider detail"}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Reauthorize
-        );
-        assert_eq!(failure.failure_code, "oauth_invalid_grant");
-        assert_eq!(failure.provider_error_subtype, Some("invalid_rapt"));
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Parked);
-        assert!(
-            failure
-                .status
-                .message()
-                .contains("interactive reauthorization")
-        );
-        assert!(
-            !failure
-                .status
-                .message()
-                .contains("sensitive provider detail")
-        );
-    }
-
-    #[test]
-    fn oauth_invalid_grant_ignores_non_string_optional_subtype() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"error":"invalid_grant","error_subtype":{"vendor":"value"}}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Reauthorize
-        );
-        assert_eq!(failure.failure_code, "oauth_invalid_grant");
-        assert_eq!(failure.provider_error_subtype, None);
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Parked);
-    }
-
-    #[test]
-    fn oauth_noninteractive_invalid_grant_requires_configuration_fix() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"error":"invalid_grant"}"#,
-            OAuthGrantKind::NonInteractive,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::FixConfiguration
-        );
-        assert_eq!(failure.failure_code, "oauth_invalid_grant");
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Configuration);
-    }
-
-    #[test]
-    fn oauth_admin_policy_subtype_requires_configuration_fix() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"error":"access_denied","error_subtype":"admin_policy_enforced"}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::FixConfiguration
-        );
-        assert_eq!(failure.failure_code, "oauth_admin_policy_enforced");
-        assert_eq!(
-            failure.provider_error_subtype,
-            Some("admin_policy_enforced")
-        );
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Configuration);
-    }
-
-    #[test]
-    fn oauth_access_denied_recovery_depends_on_grant_kind() {
-        let user_failure = classify_oauth_token_error(
-            reqwest::StatusCode::FORBIDDEN,
-            br#"{"error":"access_denied"}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-        assert_eq!(
-            user_failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Reauthorize
-        );
-        assert_eq!(user_failure.failure_code, "oauth_access_denied");
-        assert_eq!(user_failure.retry_schedule, RefreshRetrySchedule::Parked);
-
-        let service_failure = classify_oauth_token_error(
-            reqwest::StatusCode::FORBIDDEN,
-            br#"{"error":"access_denied"}"#,
-            OAuthGrantKind::NonInteractive,
-        );
-        assert_eq!(
-            service_failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::FixConfiguration
-        );
-        assert_eq!(service_failure.failure_code, "oauth_access_denied");
-        assert_eq!(
-            service_failure.retry_schedule,
-            RefreshRetrySchedule::Configuration
-        );
-    }
-
-    #[test]
-    fn oauth_server_failure_remains_retryable() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"error":"invalid_grant"}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Retry
-        );
-        assert_eq!(failure.failure_code, "oauth_token_endpoint_retryable");
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Short);
-    }
-
-    #[test]
-    fn unrecognized_oauth_error_requests_investigation_without_echoing_body() {
-        let failure = classify_oauth_token_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"error":"vendor_secret_error","error_description":"do not expose me"}"#,
-            OAuthGrantKind::UserRefreshToken,
-        );
-
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Investigate
-        );
-        assert_eq!(failure.failure_code, "oauth_unrecognized_error");
-        assert_eq!(failure.retry_schedule, RefreshRetrySchedule::Short);
-        assert!(!failure.status.message().contains("vendor_secret_error"));
-        assert!(!failure.status.message().contains("do not expose me"));
-    }
-
-    #[test]
-    fn html_and_malformed_oauth_errors_are_investigated_without_echoing_body() {
-        for body in [b"<html>issuer failure</html>".as_slice(), b"{".as_slice()] {
-            let failure = classify_oauth_token_error(
-                reqwest::StatusCode::BAD_REQUEST,
-                body,
-                OAuthGrantKind::UserRefreshToken,
-            );
-
-            assert_eq!(
-                failure.recovery_action,
-                ProviderCredentialRefreshRecoveryAction::Investigate
-            );
-            assert_eq!(failure.failure_code, "oauth_unrecognized_error_response");
-            assert!(!failure.status.message().contains("issuer failure"));
-        }
-    }
-
-    #[tokio::test]
-    async fn oversized_oauth_error_body_is_bounded_and_investigated() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/oversized"))
-            .respond_with(ResponseTemplate::new(400).set_body_bytes(vec![
-                b'x';
-                MAX_OAUTH_ERROR_RESPONSE_BYTES
-                    + 512
-            ]))
-            .mount(&mock_server)
-            .await;
-
-        openshell_crypto::tls::ensure_default_provider();
-        let response = reqwest::get(format!("{}/oversized", mock_server.uri()))
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = read_bounded_oauth_error_body(response).await;
-        assert_eq!(body.len(), MAX_OAUTH_ERROR_RESPONSE_BYTES);
-
-        let failure = classify_oauth_token_error(status, &body, OAuthGrantKind::UserRefreshToken);
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::Investigate
-        );
-        assert_eq!(failure.failure_code, "oauth_unrecognized_error_response");
-    }
-
     #[tokio::test]
     async fn invalid_local_oauth_configuration_retries_hourly() {
         let store = test_store().await;
@@ -2880,30 +2108,6 @@ mod tests {
         assert_eq!(stored.provider_error_subtype, "invalid_rapt");
         assert!(stored.last_error_at_ms > 0);
         assert!(!stored.last_error.contains("provider-controlled detail"));
-    }
-
-    #[tokio::test]
-    async fn request_token_sends_accept_json() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .and(header("accept", "application/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "minted-token",
-                "expires_in": 3600
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let minted = request_token(
-            &format!("{}/token", mock_server.uri()),
-            &[("grant_type".to_string(), "refresh_token".to_string())],
-            60,
-            OAuthGrantKind::UserRefreshToken,
-        )
-        .await
-        .unwrap();
-        assert_eq!(minted.access_token, "minted-token");
     }
 
     #[tokio::test]

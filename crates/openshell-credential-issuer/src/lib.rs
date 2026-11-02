@@ -5,6 +5,7 @@
 //! crate owns stable identities, versions, revocation, cleanup ownership, local
 //! refresh coordination, and the stateless minter contract.
 
+pub mod builtins;
 pub mod engine;
 pub mod minter;
 pub mod refresh;

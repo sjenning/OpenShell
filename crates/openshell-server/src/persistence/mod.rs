@@ -185,6 +185,13 @@ const FULL_SCAN_PAGE_SIZE: u32 = 1000;
 /// One conditional write of a [`Store::write_atomically`] group.
 #[derive(Debug, Clone)]
 pub enum AtomicWrite {
+    /// Hold an existing object's version as a transaction precondition without
+    /// changing its payload, timestamps, or resource version.
+    Check {
+        object_type: String,
+        id: String,
+        expected_version: u64,
+    },
     /// Insert a new object at resource version 1; the group fails when it
     /// exists (or its name is taken).
     Create {
@@ -219,6 +226,9 @@ impl AtomicWrite {
                 object_type, id, ..
             }
             | Self::Delete {
+                object_type, id, ..
+            }
+            | Self::Check {
                 object_type, id, ..
             } => (object_type, id),
         }
@@ -635,10 +645,11 @@ impl Store {
 
     /// Apply conditional writes to several objects all together or not at
     /// all, in one transaction on one connection. A create whose object or
-    /// name exists fails the group with `UniqueViolation`; an update or delete
-    /// whose object is absent or at another version fails it with `Conflict`
-    /// (with no current version). Returns each write's result in input order,
-    /// `None` for deletes.
+    /// name exists fails the group with `UniqueViolation`; an update, delete,
+    /// or check whose object is absent or at another version fails it with
+    /// `Conflict` (with no current version). Checks hold their row version until
+    /// commit without mutating it. Returns results in input order, `None` for
+    /// deletes and the unchanged version/timestamps for checks.
     #[tracing::instrument(
         name = "store",
         level = "debug",

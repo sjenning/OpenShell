@@ -5,6 +5,9 @@ use super::*;
 use openshell_core::proto::ObjectMeta;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/batches.rs"]
+mod batches;
+
 #[derive(Debug)]
 struct LostAcknowledgement {
     database: DatabaseReferences,

@@ -4,6 +4,8 @@
 use super::*;
 use std::{collections::HashMap, sync::Mutex};
 
+mod batches;
+
 #[derive(Debug, Default)]
 struct MemoryStore(Mutex<HashMap<String, StoredReference>>);
 
@@ -30,6 +32,27 @@ impl ReferenceStateStore for MemoryStore {
                 revision: existing.unwrap_or(0) + 1,
             },
         );
+        Ok(())
+    }
+
+    async fn compare_and_swap_many(&self, writes: &[ReferenceWrite]) -> Result<(), Status> {
+        let mut entries = self.0.lock().unwrap();
+        for write in writes {
+            if entries.get(&write.reference).map(|record| record.revision)
+                != Some(write.expected_revision)
+            {
+                return Err(Status::aborted("conflict"));
+            }
+        }
+        for write in writes {
+            entries.insert(
+                write.reference.clone(),
+                StoredReference {
+                    state: write.state.clone(),
+                    revision: write.expected_revision + 1,
+                },
+            );
+        }
         Ok(())
     }
 }

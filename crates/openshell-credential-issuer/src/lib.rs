@@ -46,6 +46,26 @@ pub struct StoredReference {
     pub revision: u64,
 }
 
+/// One staged value replacement. Secret values have already been stored under
+/// fresh immutable backing handles; this request contains no credential values.
+#[derive(Debug, Clone)]
+pub struct ReferenceReplacement {
+    pub reference: String,
+    pub owner: SecretOwner,
+    pub expected_version: u64,
+    pub backing: Vec<u8>,
+    pub expiration_time_ms: Option<i64>,
+}
+
+/// A prepared, revision-fenced reference update. Durable adapters can combine
+/// these writes with grant receipts and owner fences in one native transaction.
+#[derive(Debug, Clone)]
+pub struct ReferenceWrite {
+    pub reference: String,
+    pub expected_revision: u64,
+    pub state: ReferenceState,
+}
+
 /// Implementations must make the entire state replacement atomic. `None`
 /// means create-only; stale writes return `ABORTED` or `ALREADY_EXISTS`.
 #[async_trait]
@@ -57,6 +77,27 @@ pub trait ReferenceStateStore: std::fmt::Debug + Send + Sync {
         expected_revision: Option<u64>,
         state: &ReferenceState,
     ) -> Result<(), Status>;
+
+    /// All writes commit together or none do. Never implement this by looping
+    /// over individual CAS calls. The default supports only a single write.
+    async fn compare_and_swap_many(&self, writes: &[ReferenceWrite]) -> Result<(), Status> {
+        match writes {
+            [write] => {
+                self.compare_and_swap(
+                    &write.reference,
+                    Some(write.expected_revision),
+                    &write.state,
+                )
+                .await
+            }
+            [] => Err(Status::invalid_argument(
+                "credential replacement batch is empty",
+            )),
+            _ => Err(Status::failed_precondition(
+                "reference store does not support atomic batches",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,9 +185,11 @@ impl ReferenceRegistry {
         Err(Status::aborted("credential reference adoption conflicted"))
     }
 
-    /// Commit an already-staged immutable backing handle. The caller owns and
-    /// must clean up that candidate if this CAS fails. Replacements never
-    /// change the identity or authorization scope of the reference.
+    /// Commit an already-staged immutable backing handle.
+    ///
+    /// The caller retains candidate ownership on failure and must establish that
+    /// it was not published before cleanup. Replacements never change reference
+    /// identity or authorization scope.
     pub async fn replace(
         &self,
         reference: &str,
@@ -155,39 +198,94 @@ impl ReferenceRegistry {
         backing: Vec<u8>,
         expiration_time_ms: Option<i64>,
     ) -> Result<ReferenceState, Status> {
-        if backing.is_empty() {
+        self.replace_many(&[ReferenceReplacement {
+            reference: reference.to_string(),
+            owner: owner.clone(),
+            expected_version,
+            backing,
+            expiration_time_ms,
+        }])
+        .await?
+        .pop()
+        .ok_or_else(|| Status::internal("credential replacement returned no state"))
+    }
+
+    /// Validate and fence every output before publication. This has no side
+    /// effects; a caller must commit ALL returned writes atomically, optionally
+    /// with its durable grant receipt and owner-version checks. CAS conflicts
+    /// require rebuilding the entire group, never retrying a subset.
+    pub async fn prepare_replacements(
+        &self,
+        replacements: &[ReferenceReplacement],
+    ) -> Result<Vec<ReferenceWrite>, Status> {
+        use std::collections::HashSet;
+        if replacements.is_empty() {
             return Err(Status::invalid_argument(
-                "credential backing must be nonempty",
+                "credential replacement batch is empty",
             ));
         }
-        for _ in 0..RETRIES {
+        let mut references = HashSet::new();
+        let mut candidates = HashSet::new();
+        for replacement in replacements {
+            if replacement.reference.is_empty()
+                || replacement.backing.is_empty()
+                || !references.insert(&replacement.reference)
+                || !candidates.insert(&replacement.backing)
+            {
+                return Err(Status::invalid_argument(
+                    "credential replacements require distinct references and fresh backing handles",
+                ));
+            }
+        }
+        let mut writes = Vec::with_capacity(replacements.len());
+        for replacement in replacements {
             let record = self
                 .store
-                .load(reference)
+                .load(&replacement.reference)
                 .await?
                 .ok_or_else(|| Status::not_found("credential reference not found"))?;
             let mut state = record.state;
-            authorize(&state, owner)?;
+            authorize(&state, &replacement.owner)?;
             ensure_live(&state)?;
-            if state.version != expected_version {
+            if state.version != replacement.expected_version {
                 return Err(Status::aborted("credential reference version changed"));
             }
-            if state.backing == backing || state.pending_deletions.contains(&backing) {
+            if candidates.contains(&state.backing)
+                || state
+                    .pending_deletions
+                    .iter()
+                    .any(|backing| candidates.contains(backing))
+            {
                 return Err(Status::invalid_argument(
                     "replacement requires a fresh backing handle",
                 ));
             }
             state.version = next_version(state.version)?;
-            state
-                .pending_deletions
-                .push(std::mem::replace(&mut state.backing, backing.clone()));
-            state.expiration_time_ms = expiration_time_ms;
-            match self
-                .store
-                .compare_and_swap(reference, Some(record.revision), &state)
-                .await
-            {
-                Ok(()) => return Ok(state),
+            state.pending_deletions.push(std::mem::replace(
+                &mut state.backing,
+                replacement.backing.clone(),
+            ));
+            state.expiration_time_ms = replacement.expiration_time_ms;
+            writes.push(ReferenceWrite {
+                reference: replacement.reference.clone(),
+                expected_revision: record.revision,
+                state,
+            });
+        }
+        Ok(writes)
+    }
+
+    /// Publish an entire output set atomically. On an ambiguous storage error,
+    /// the caller retains candidate ownership until it can establish the result;
+    /// an error is never permission to delete a possibly committed backing.
+    pub async fn replace_many(
+        &self,
+        replacements: &[ReferenceReplacement],
+    ) -> Result<Vec<ReferenceState>, Status> {
+        for _ in 0..RETRIES {
+            let writes = self.prepare_replacements(replacements).await?;
+            match self.store.compare_and_swap_many(&writes).await {
+                Ok(()) => return Ok(writes.into_iter().map(|write| write.state).collect()),
                 Err(error) if is_conflict(&error) => {}
                 Err(error) => return Err(error),
             }

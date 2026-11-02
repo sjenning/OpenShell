@@ -20,6 +20,19 @@ handles, versions, expiration, revocation, and pending handle deletions.
 - Superseded handles and revoked values stay in `pending_deletions` until the
   backend confirms deletion. Cleanup acknowledgement changes the storage
   revision, not the credential version, and cannot discard concurrent rotations.
+- `replace_many` publishes a complete output set atomically. Every reference must
+  match its expected value version and immutable owner; candidates cannot alias
+  any group member's live or retired backing. A single stale or revoked member
+  rejects the whole set. Adapters without native transactions fail closed rather
+  than publishing sequentially.
+
+`prepare_replacements` validates a group without side effects and returns
+storage-revision-fenced writes. A refresh store can include those writes, its
+grant receipt, and provider-owner checks in one native transaction. Gateway
+persistence provides non-mutating `AtomicWrite::Check` preconditions: PostgreSQL
+locks the checked row until commit; SQLite uses an immediate write transaction.
+Neither check advances the owner's version or changes its timestamps. These
+primitives do not yet switch the gateway refresh publication path to references.
 
 `ReferenceStateStore` implements durable create-only and compare-and-swap writes.
 The gateway adapter stores these records in its object database. PostgreSQL and
@@ -101,4 +114,5 @@ cargo test -p openshell-credential-issuer
 cargo test -p openshell-server --lib --features prebuilt-z3 credentials::references::tests
 cargo test -p openshell-server --lib --features prebuilt-z3 grpc::policy::reference_tests
 cargo test -p openshell-server --lib --features prebuilt-z3 provider_refresh::
+cargo test -p openshell-server --lib --features prebuilt-z3 persistence::tests::sqlite_
 ```

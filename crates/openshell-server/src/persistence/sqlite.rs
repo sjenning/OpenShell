@@ -542,6 +542,33 @@ RETURNING "resource_version", "created_at_ms", "updated_at_ms"
             .map_err(|e| map_db_error(&e))?;
         for index in atomic_write_order(writes) {
             match &writes[index] {
+                AtomicWrite::Check {
+                    object_type,
+                    id,
+                    expected_version,
+                } => {
+                    let expected = i64::try_from(*expected_version).map_err(|_| {
+                        PersistenceError::Conflict {
+                            current_resource_version: None,
+                        }
+                    })?;
+                    // BEGIN IMMEDIATE holds the database write reservation;
+                    // the checked owner cannot change before this group commits.
+                    let row = sqlx::query(
+                        r#"SELECT "resource_version", "created_at_ms", "updated_at_ms"
+FROM "objects" WHERE "object_type" = ?1 AND "id" = ?2 AND "resource_version" = ?3"#,
+                    )
+                    .bind(object_type)
+                    .bind(id)
+                    .bind(expected)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| map_db_error(&e))?
+                    .ok_or(PersistenceError::Conflict {
+                        current_resource_version: None,
+                    })?;
+                    results[index] = Some(write_result_from_row(&row));
+                }
                 AtomicWrite::Create {
                     object_type,
                     id,

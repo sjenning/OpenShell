@@ -3108,6 +3108,11 @@ async fn atomic_write_groups_apply_all_or_nothing(store: &Store) {
         id: id.to_string(),
         expected_version,
     };
+    let check = |id: &str, expected_version| AtomicWrite::Check {
+        object_type: "atomic_test".to_string(),
+        id: id.to_string(),
+        expected_version,
+    };
     let results = store
         .write_atomically(&[create("x", "x"), create("b", "b"), create("a", "a")])
         .await
@@ -3141,6 +3146,10 @@ async fn atomic_write_groups_apply_all_or_nothing(store: &Store) {
         create("y", "x"),
         // A delete at a stale version.
         delete("x", 7),
+        // A stale, missing, or out-of-range owner precondition.
+        check("x", 7),
+        check("z", 1),
+        check("x", u64::MAX),
     ];
     for last in failing_last {
         let unique = matches!(last, AtomicWrite::Create { .. });
@@ -3162,14 +3171,27 @@ async fn atomic_write_groups_apply_all_or_nothing(store: &Store) {
         assert!(store.get("atomic_test", "y").await.unwrap().is_none());
     }
 
-    // A group whose conditions hold applies every write.
+    // A group whose conditions hold applies every write without changing the
+    // checked owner's payload, timestamps, or version.
+    let owner_before = store.get("atomic_test", "x").await.unwrap().unwrap();
     let applied = store
-        .write_atomically(&[delete("b", 1), update("a", 1), create("c", "c")])
+        .write_atomically(&[
+            delete("b", 1),
+            update("a", 1),
+            create("c", "c"),
+            check("x", 1),
+        ])
         .await
         .unwrap();
     assert!(applied[0].is_none());
     assert_eq!(applied[1].as_ref().unwrap().resource_version, 2);
     assert_eq!(applied[2].as_ref().unwrap().resource_version, 1);
+    assert_eq!(applied[3].as_ref().unwrap().resource_version, 1);
+    let owner_after = store.get("atomic_test", "x").await.unwrap().unwrap();
+    assert_eq!(owner_after.payload, owner_before.payload);
+    assert_eq!(owner_after.resource_version, owner_before.resource_version);
+    assert_eq!(owner_after.created_at_ms, owner_before.created_at_ms);
+    assert_eq!(owner_after.updated_at_ms, owner_before.updated_at_ms);
     assert!(store.get("atomic_test", "b").await.unwrap().is_none());
     assert!(store.get("atomic_test", "c").await.unwrap().is_some());
     let a = store.get("atomic_test", "a").await.unwrap().unwrap();

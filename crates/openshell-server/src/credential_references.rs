@@ -5,7 +5,8 @@
 
 use async_trait::async_trait;
 use openshell_credential_issuer::{
-    ReferenceRegistry, ReferenceState, ReferenceStateStore, SecretOwner, StoredReference,
+    ReferenceRegistry, ReferenceState, ReferenceStateStore, ReferenceWrite, SecretOwner,
+    StoredReference,
 };
 use prost::Message as _;
 
@@ -62,6 +63,31 @@ impl ReferenceStateStore for DatabaseReferences {
             )
             .await
             .map_err(|error| persistence_status(error, "commit credential reference"))?;
+        Ok(())
+    }
+
+    async fn compare_and_swap_many(&self, writes: &[ReferenceWrite]) -> Result<(), Status> {
+        if writes.is_empty() {
+            return Err(Status::invalid_argument(
+                "credential replacement batch is empty",
+            ));
+        }
+        let writes = writes
+            .iter()
+            .map(|write| {
+                Ok(crate::persistence::AtomicWrite::Update {
+                    object_type: OBJECT_TYPE.to_string(),
+                    id: write.reference.clone(),
+                    expected_version: write.expected_revision,
+                    payload: serde_json::to_vec(&write.state)
+                        .map_err(|_| Status::internal("encode credential reference failed"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        self.0
+            .write_atomically(&writes)
+            .await
+            .map_err(|error| persistence_status(error, "commit credential references"))?;
         Ok(())
     }
 }

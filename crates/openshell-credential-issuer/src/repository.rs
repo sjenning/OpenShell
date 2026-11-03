@@ -6,6 +6,7 @@
 use crate::auth::GatewayScope;
 
 mod backend_objects;
+pub mod grants;
 pub mod references;
 use sqlx::{Any, AnyPool, Row, Transaction, any::AnyPoolOptions};
 use std::{

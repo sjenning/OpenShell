@@ -129,6 +129,28 @@ revisions without emitting value-change events. `prepare_many` exposes fenced
 writes and events so the host can atomically commit them with grant receipts and
 owner checks. SQLite and PostgreSQL tests cover that combined publication path.
 
+## Durable grant metadata
+
+`Repository::grants(scope)` stores issuer-owned definitions, fixed output
+bindings, material handles, schedules, status versions, attempt identity, and
+encrypted result spools. Configuration and material remain backend references,
+not inline plaintext. The typed adapter rejects definition/epoch changes,
+attempt replacement during an unresolved exchange, deletion resurrection,
+unmatched completion receipts, and loss of staged/retired material ownership.
+Status changes emit durable `grant` events; cleanup-only storage revisions do not.
+Workspace-filtered enumeration advances its scanned cursor even on empty pages.
+
+`GrantRepository::prepare` returns a fenced mutation/event for the host's native
+transaction, not an independently committed grant publication. The caller must
+include fixed output-reference writes, output-binding/owner fences, completed
+receipts, and artifact ownership transfers in that same transaction. SQLite and
+PostgreSQL tests join pending output allocation and later value/receipt publication,
+recover an encrypted known result through an independent pool, and prove failed
+fences roll back outputs, grant state, receipts, and events together.
+
+This is the persistence adapter, not the CredentialRefresh RPC host, autonomous
+recovery/sweep, or gateway source integration.
+
 ## Refresh coordination and minters
 
 `RefreshCoordinator` owns process-local grant locks, bounded admission, executor

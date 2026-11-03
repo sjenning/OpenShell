@@ -15,7 +15,7 @@ use tonic::Status;
 ///
 /// Reauthorization changes the epoch even when the storage object ID is retained. Display names and storage revisions are not
 /// identity: ordinary cleanup can advance the latter without replacing a grant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GrantIdentity {
     pub id: String,
     pub authorization_epoch: String,

@@ -283,6 +283,14 @@ pub(super) async fn get_provider_record(
     workspace: &str,
     name: &str,
 ) -> Result<Provider, Status> {
+    get_provider_record_with_source(store, workspace, name, None).await
+}
+async fn get_provider_record_with_source(
+    store: &Store,
+    workspace: &str,
+    name: &str,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
+) -> Result<Provider, Status> {
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -292,7 +300,13 @@ pub(super) async fn get_provider_record(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
-    crate::credentials::references::project_expiration_times(store, &mut provider).await?;
+    if let Some(source) = source {
+        source
+            .project_expiration_metadata(store, &mut provider)
+            .await?;
+    } else {
+        crate::credentials::references::project_expiration_times(store, &mut provider).await?;
+    }
     Ok(redact_provider_credentials(provider))
 }
 
@@ -2828,7 +2842,13 @@ pub(super) async fn handle_get_provider(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .name;
-    let provider = get_provider_record(state.store.as_ref(), &workspace, &req.name).await?;
+    let provider = get_provider_record_with_source(
+        state.store.as_ref(),
+        &workspace,
+        &req.name,
+        Some(state.provider_credential_source()),
+    )
+    .await?;
 
     Ok(Response::new(ProviderResponse {
         provider: Some(provider),
@@ -2886,11 +2906,10 @@ pub(super) async fn handle_list_providers(
         .map_err(|e| Status::internal(format!("list providers failed: {e}")))?;
     let mut providers = Vec::with_capacity(page.messages.len());
     for mut provider in page.messages {
-        crate::credentials::references::project_expiration_times(
-            state.store.as_ref(),
-            &mut provider,
-        )
-        .await?;
+        state
+            .provider_credential_source()
+            .project_expiration_metadata(state.store.as_ref(), &mut provider)
+            .await?;
         providers.push(redact_provider_credentials(provider));
     }
     let next_page_token = pagination.next_object_token(page.next_cursor.as_ref());

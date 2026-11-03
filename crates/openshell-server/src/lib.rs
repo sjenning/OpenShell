@@ -322,7 +322,7 @@ pub struct ServerState {
     /// Compute orchestration over the configured driver.
     pub compute: ComputeRuntime,
 
-    /// Credential-driver selection and resolution runtime.
+    /// Local runtime for internal secrets and embedded provider operations.
     pub credentials: credentials::CredentialRuntime,
 
     /// Provider read selection. None preserves embedded behavior; internal

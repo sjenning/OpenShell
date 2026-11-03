@@ -324,6 +324,128 @@ async fn remote_subject_metadata_and_cache_hits_do_not_depend_on_available_value
 }
 
 #[tokio::test]
+async fn public_get_and_list_use_selected_remote_expiration_without_value_reads_or_provider_writes()
+{
+    use super::super::{handle_get_provider, handle_list_providers};
+    use super::{authed_request, test_server_state};
+    use crate::credential_source::RemoteProviderSource;
+    use openshell_core::proto::{
+        GetProviderRequest, ListProvidersRequest, credentials::store::v1 as wire,
+    };
+    use std::sync::atomic::Ordering;
+    let mut state = test_server_state().await;
+    let issuer = crate::credential_source::tests::issuer::Issuer::start().await;
+    let source = Arc::new(RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap());
+    let mut provider = provider();
+    let owner = wire::SecretOwner {
+        workspace: "default".into(),
+        provider_id: provider.object_id().into(),
+        credential_key: "SUBJECT_TOKEN".into(),
+        provider: "display".into(),
+    };
+    let stored = issuer
+        .raw
+        .put_secret(wire::PutSecretRequest {
+            owner: Some(owner.clone()),
+            value: "never-export-this-value".into(),
+            idempotency_key: "public-metadata".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    provider.credential_handles.insert(
+        "SUBJECT_TOKEN".into(),
+        source.reference_handle(&stored.reference, None).unwrap(),
+    );
+    let legacy = openshell_core::time::timestamp_from_millis(1).unwrap();
+    provider
+        .credential_expiration_times
+        .insert("SUBJECT_TOKEN".into(), legacy);
+    source.register_provider(&provider).unwrap();
+    issuer
+        .watched
+        .wait_synchronized(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    Arc::get_mut(&mut state).unwrap().provider_source = Some(source);
+    state.store.put_message(&provider).await.unwrap();
+    let before = state
+        .store
+        .get_message::<Provider>(provider.object_id())
+        .await
+        .unwrap()
+        .unwrap();
+    issuer.fail_resolves.store(true, Ordering::SeqCst);
+    let get = || {
+        authed_request(GetProviderRequest {
+            name: "provider".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+        })
+    };
+    let initial = handle_get_provider(&state, get())
+        .await
+        .unwrap()
+        .into_inner()
+        .provider
+        .unwrap();
+    assert_eq!(initial.credential_expiration_times["SUBJECT_TOKEN"], legacy);
+    let expiration = current_time_ms() + 60_000;
+    let timestamp = openshell_core::time::timestamp_from_millis(expiration).unwrap();
+    issuer
+        .watched
+        .put_secret(wire::PutSecretRequest {
+            owner: Some(owner),
+            reference: stored.reference,
+            expected_version: Some(1),
+            value: "still-never-export".into(),
+            expiration_time: Some(timestamp),
+            idempotency_key: "replace-public-metadata".into(),
+        })
+        .await
+        .unwrap();
+    issuer
+        .watched
+        .wait_synchronized(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    let get = handle_get_provider(&state, get())
+        .await
+        .unwrap()
+        .into_inner()
+        .provider
+        .unwrap();
+    let list = handle_list_providers(
+        &state,
+        authed_request(ListProvidersRequest {
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(list.providers.len(), 1);
+    for provider in [&get, &list.providers[0]] {
+        assert_eq!(
+            provider.credential_expiration_times["SUBJECT_TOKEN"],
+            timestamp
+        );
+        assert!(provider.credential_handles.is_empty());
+        assert_eq!(provider.credentials["SUBJECT_TOKEN"], "REDACTED");
+    }
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        state
+            .store
+            .get_message::<Provider>(provider.object_id())
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn get_and_list_project_current_reference_expiration_without_mutating_or_revealing_values() {
     let store = Arc::new(test_store().await);
     let runtime =

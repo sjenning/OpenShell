@@ -12,7 +12,9 @@ use tonic::{Request, Response, Status, transport::Channel};
 
 mod validation;
 mod watch;
+mod watched;
 pub use watch::RemoteWatch;
+pub use watched::{ChangeKind, IssuerChange, WatchHealth, WatchedIssuer};
 const LIMIT: usize = 1024 * 1024;
 const ORDINARY: Duration = Duration::from_secs(10);
 const REFRESH: Duration = Duration::from_mins(3);

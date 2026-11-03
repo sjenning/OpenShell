@@ -372,8 +372,45 @@ and invalid watch frames. It subtracts elapsed request time from cache budgets
 and clamps them to expiration. Errors contain static diagnostics without remote
 messages or details. Watch connections resume from durable namespace cursors;
 reset/checkpoint frames do not reconcile caller state. Broken, malformed, or
-stalled streams terminate and require a new watch. This is a transport adapter,
-not yet the gateway source, cache, or reconciliation controller.
+stalled streams terminate and require a new watch. This is the transport adapter;
+WatchedIssuer supplies the cache/reconciliation layer. Gateway mode selection and
+provider/config-delivery integration remain pending.
+
+## Watched remote values
+
+`remote_issuer::WatchedIssuer` wraps one authenticated RemoteIssuer with secret
+and grant watch controllers, value-free notifications, local metadata getters,
+and a bounded value cache. Register persisted reference/owner and grant bindings
+before waiting for synchronization. `wait_synchronized` also requires reconciled
+tracked metadata; a checkpoint by itself is insufficient. Inspection never reads
+backend values.
+A failed batch is inspected individually so one missing binding cannot revoke
+unrelated siblings.
+
+Both watches must be healthy before any cached value is usable. Breaks, resets,
+and stalled/malformed streams discard cached values, invalidate affected local
+metadata, and reconnect with the last validated namespace cursor. Reconciliation
+never replays an upstream mint. Fresh authenticated reads can still succeed while
+a watch is unknown, but return zero cache TTL. Candidates captured before a reset
+or disconnect cannot repopulate the cache after synchronization resumes.
+
+Cache hits require the complete batch, exact immutable owners, purpose, and
+explicit pinned versions. A miss sends the whole batch to the issuer, not just
+missing members. After reading, watch observations fence the entire result before
+cache publication. Budgets subtract RPC/processing time and expire at the earlier
+monotonic TTL or wall-clock credential expiration. Limits are 512 cached values,
+eight MiB of value bytes, 4,096 tracked references, and 1,024 tracked grants.
+Metadata retains no value buffers or audit display names. Idle expired values
+are pruned on checkpoints.
+
+`known_secret` and `known_grant` perform no network I/O and fail closed while
+metadata is unknown. Gateway request paths can use these to avoid issuer calls
+on intermediate-token cache hits. Notifications contain no values; consumers
+must invalidate/reconcile on Unknown or broadcast receiver lag. Dropping the last
+wrapper aborts its watch workers and releases cached state, not already admitted
+issuer work. Real mTLS tests close live sockets, rotate while disconnected, and
+verify cursor recovery, metadata-only reconciliation, TTL expiry, and version
+invalidation. This layer is not yet wired into gateway provider delivery.
 
 ## Hosted minters
 

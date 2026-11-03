@@ -35,6 +35,7 @@ mod mtls;
 mod postgres;
 mod recovery;
 mod remote_client;
+mod watched_client;
 
 const A: &str = "spiffe://test.example/gateway/a";
 const B: &str = "spiffe://test.example/gateway/b";
@@ -42,6 +43,8 @@ const B: &str = "spiffe://test.example/gateway/b";
 struct Driver {
     inner: DbCredstoreCredentialDriver,
     fail: Arc<AtomicBool>,
+    resolves: Arc<AtomicUsize>,
+    fail_resolves: Arc<AtomicBool>,
 }
 #[tonic::async_trait]
 impl CredentialDriver for Driver {
@@ -61,6 +64,10 @@ impl CredentialDriver for Driver {
         &self,
         request: Vec<ResolveCredentialRequest>,
     ) -> Result<Vec<ResolvedCredential>, Status> {
+        self.resolves.fetch_add(request.len(), Ordering::SeqCst);
+        if self.fail_resolves.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("private-resolve-error"));
+        }
         self.inner.resolve_credentials(request).await
     }
 }
@@ -140,6 +147,8 @@ struct Fixture {
     service: CredentialRefreshService,
     store: CredentialStoreService,
     minter: Arc<Minter>,
+    resolves: Arc<AtomicUsize>,
+    fail_resolves: Arc<AtomicBool>,
     _directory: tempfile::TempDir,
 }
 impl Fixture {
@@ -151,10 +160,14 @@ impl Fixture {
             toml::Value::String(directory.path().join("key").to_str().unwrap().into()),
         )]);
         let fail = Arc::new(AtomicBool::new(false));
+        let resolves = Arc::new(AtomicUsize::new(0));
+        let fail_resolves = Arc::new(AtomicBool::new(false));
         let driver: Arc<dyn CredentialDriver> = Arc::new(Driver {
             inner: DbCredstoreCredentialDriver::from_config(repository.backend_objects(), &config)
                 .unwrap(),
             fail: fail.clone(),
+            resolves: resolves.clone(),
+            fail_resolves: fail_resolves.clone(),
         });
         let storage =
             CredentialStorage::new(BTreeMap::from([("db".into(), driver)]), "db".into()).unwrap();
@@ -184,6 +197,8 @@ impl Fixture {
             service,
             store,
             minter,
+            resolves,
+            fail_resolves,
             _directory: directory,
         }
     }

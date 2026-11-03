@@ -13,6 +13,8 @@ fn services(
         inner: DbCredstoreCredentialDriver::from_config(repository.backend_objects(), config)
             .unwrap(),
         fail: minter.backend.clone(),
+        resolves: Arc::default(),
+        fail_resolves: Arc::default(),
     });
     let storage =
         CredentialStorage::new(BTreeMap::from([("db".into(), driver)]), "db".into()).unwrap();

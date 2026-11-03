@@ -14,10 +14,12 @@ pub(in crate::service) struct Server {
     ca: openshell_crypto::pki::Certificate,
     key: openshell_crypto::pki::KeyPair,
     task: tokio::task::JoinHandle<()>,
+    sockets: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
 }
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        self.disconnect();
     }
 }
 impl Server {
@@ -48,12 +50,22 @@ impl Server {
             "https://localhost:{}",
             listener.local_addr().unwrap().port()
         );
+        let sockets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let accepted = sockets.clone();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener)
             .map(move |socket| {
                 let acceptor = acceptor.clone();
+                let controls = accepted.clone();
                 async move {
                     match socket {
-                        Ok(socket) => acceptor.accept(socket).await.ok(),
+                        Ok(socket) => {
+                            let socket = socket.into_std().ok()?;
+                            controls.lock().unwrap().push(socket.try_clone().ok()?);
+                            acceptor
+                                .accept(tokio::net::TcpStream::from_std(socket).ok()?)
+                                .await
+                                .ok()
+                        }
                         Err(_) => None,
                     }
                 }
@@ -73,6 +85,14 @@ impl Server {
             ca,
             key,
             task,
+            sockets,
+        }
+    }
+    // Close only this fixture's accepted connections, retaining its listener
+    // so production clients must re-dial, reauthenticate, and resume watches.
+    pub(in crate::service) fn disconnect(&self) {
+        for socket in self.sockets.lock().unwrap().drain(..) {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
         }
     }
     async fn client(

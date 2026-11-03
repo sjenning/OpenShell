@@ -135,6 +135,7 @@ impl ProviderCredentialSource for CredentialRuntime {
 
 pub mod delivery_watch;
 pub mod handoff;
+pub mod startup;
 
 #[cfg(test)]
 pub(crate) mod tests;

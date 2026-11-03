@@ -140,6 +140,9 @@ pub struct GatewayFileSection {
     pub default_credential_driver: Option<String>,
     #[serde(default)]
     pub credential_storage: Option<toml::Table>,
+    /// Presence explicitly selects a remote issuer for provider credentials only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_issuer: Option<crate::credential_source::startup::RemoteConfig>,
 
     // ── Sandbox / SSH ────────────────────────────────────────────────────
     #[serde(default)]
@@ -1485,6 +1488,9 @@ fn parse_and_validate(path: &Path, contents: &str) -> Result<ConfigFile, ConfigF
         None => return Err(ConfigFileError::MissingVersion),
     }
 
+    if let Some(issuer) = &file.openshell.gateway.credential_issuer {
+        issuer.validate().map_err(|_|ConfigFileError::InvalidValue {field:"openshell.gateway.credential_issuer",message:"requires private-CA HTTPS, absolute paths, one complete PEM or SPIFFE identity, and bounded startup/cleanup intervals"})?;
+    }
     if file.openshell.gateway.database_url.is_some() {
         return Err(ConfigFileError::SecretInFile {
             field: "database_url",

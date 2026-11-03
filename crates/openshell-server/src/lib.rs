@@ -326,7 +326,7 @@ pub struct ServerState {
     pub credentials: credentials::CredentialRuntime,
 
     /// Provider read selection. None preserves embedded behavior; internal
-    /// secrets never use this interface. Remote startup/mutations are separate.
+    /// secrets never use this interface. Remote startup is explicit and fail-closed.
     provider_source: Option<Arc<dyn credential_source::ProviderCredentialSource>>,
 
     /// In-memory sandbox correlation index.
@@ -722,15 +722,28 @@ pub(crate) async fn run_server(
     )
     .await?;
 
-    credentials
-        .migrate_provider_references(&store)
-        .await
-        .map_err(|error| {
+    let remote_issuer_config = config_file
+        .as_ref()
+        .and_then(|file| file.openshell.gateway.credential_issuer.clone());
+    let remote_source = if let Some(issuer) = &remote_issuer_config {
+        Some(Box::pin(issuer.connect(&store)).await.map_err(|error| {
             Error::config(format!(
-                "credential reference migration failed: {}",
+                "credential issuer startup failed: {}",
                 error.code()
             ))
-        })?;
+        })?)
+    } else {
+        credentials
+            .migrate_provider_references(&store)
+            .await
+            .map_err(|error| {
+                Error::config(format!(
+                    "credential reference migration failed: {}",
+                    error.code()
+                ))
+            })?;
+        None
+    };
 
     let oidc_cache = if let Some(ref oidc) = config.oidc {
         // Validate RBAC configuration before starting.
@@ -839,6 +852,11 @@ pub(crate) async fn run_server(
         supervisor_sessions,
         oidc_cache,
         credentials,
+    );
+    state.provider_source = remote_source.as_ref().map(
+        |source| -> Arc<dyn credential_source::ProviderCredentialSource> {
+            Arc::new(source.clone())
+        },
     );
     state.middleware_registry = middleware_registry;
     state.gateway_interceptors = gateway_interceptors;
@@ -987,7 +1005,28 @@ pub(crate) async fn run_server(
     }
 
     let state = Arc::new(state);
-    credentials::references::spawn_reference_notifications(&state);
+    let issuer_workers = remote_source
+        .as_ref()
+        .zip(remote_issuer_config.as_ref())
+        .map(|(source, config)| {
+            let delivery = credential_source::delivery_watch::spawn(&state, source);
+            let cleanup = credential_source::handoff::StaticHandoff::spawn_reconciler(
+                store.clone(),
+                source.clone(),
+                Duration::from_secs(u64::from(config.cleanup_idle_seconds)),
+            )?;
+            Ok::<_, tonic::Status>((delivery, cleanup))
+        })
+        .transpose()
+        .map_err(|error| {
+            Error::config(format!(
+                "credential issuer workers failed: {}",
+                error.code()
+            ))
+        })?;
+    if remote_source.is_none() {
+        credentials::references::spawn_reference_notifications(&state);
+    }
 
     // Install the recorder before the endpoint-status startup reconciliation so
     // the lock waits and timeouts recorded there are exported. Its listener
@@ -1168,13 +1207,16 @@ pub(crate) async fn run_server(
     ssh_sessions::spawn_session_reaper(store.clone(), Duration::from_hours(1));
     supervisor_session::spawn_relay_reaper(state.clone(), Duration::from_secs(30));
     provider_profile_sources::spawn_refresh(state.clone());
-    provider_refresh::spawn_refresh_worker(state.clone(), Duration::from_mins(1));
+    if remote_source.is_none() {
+        provider_refresh::spawn_refresh_worker(state.clone(), Duration::from_mins(1));
+    }
 
     shutdown_signal().await;
     info!("Shutdown signal received; stopping gateway");
     state.gateway_shutting_down.store(true, Ordering::Release);
     state.supervisor_sessions.close_admission();
     let _ = shutdown_tx.send(true);
+    drop(issuer_workers);
 
     if let Err(err) = listener_task.await {
         warn!(error = %err, "Gateway listener task failed during shutdown");

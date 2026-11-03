@@ -257,22 +257,28 @@ status without resolving values or minting. Missing ownership and unsupported
 read-only metadata sources fail closed rather than consulting embedded grants;
 a final provider-binding fence rejects stale status projections. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.
-Production still defaults to the embedded source; tests exercise injected remote
-selection over real mTLS. Selected remote sources now opt in explicitly to static
+The gateway defaults to the embedded source. An explicit
+`[openshell.gateway.credential_issuer]` table selects remote provider delivery,
+mutation, export, and status adapters over private-CA mTLS. Startup registers
+persisted bindings in bounded pages and waits for metadata reconciliation before
+serving. Inline/legacy handles and embedded refresh records require explicit
+migration; startup never adopts or resolves them. Internal SSH and launch secrets
+continue using the local credential runtime. Selected remote sources now opt in explicitly to static
 provider create/update/delete routing through the handoff journal; a selected
 read-only source cannot fall back to embedded mutation storage. Partial updates
 and metadata-only changes preserve untouched issuer bindings, and deletion claims
 retirement without waiting for physical cleanup. Legacy inline/driver records
 cannot be implicitly adopted on update. Internal secret storage remains local.
 Issuer refresh configure/rotate/delete currently fail explicitly under remote
-selection rather than persisting refresh material locally. Production remote
-gateway configuration and grant mutation routing remain separate work.
+selection rather than persisting refresh material locally. Grant mutation routing
+remains separate work.
 `credential_source::delivery_watch` bridges issuer value/grant changes, Unknown,
 consumer lag, and reconciliation recovery to local push-session invalidation.
 Each replica observes its own watches, so the bridge does not echo peer fanout.
 Unchanged health updates do not trigger rebuild loops. Dropping its guard stops
-forwarding without canceling issuer-admitted work. Production startup wiring
-remains separate.
+forwarding without canceling issuer-admitted work. Remote startup retains this
+guard and the handoff reconciler until shutdown and disables embedded provider
+reference migration/notifications and the embedded refresh worker.
 
 ### Credential handoff ownership journal
 
@@ -293,14 +299,15 @@ identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
 Static RPC adapters use this infrastructure when a remote source is explicitly
-selected; production source selection and grant RPC adapters remain pending. The optional
+selected; grant RPC adapters remain pending. The
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;
 foreign registrations and live Published bindings are never reclaimed. Filtered pages
 advance the raw scan cursor even when no source/provider rows match.
 `published_for_provider` discovers live immutable ownership before a mutation.
-The production gateway does not start this worker yet. Published journals refuse direct abort. `publish_replacing` joins
+Remote gateway startup starts this worker with `cleanup_idle_seconds` (default
+300, range 60–3600). Published journals refuse direct abort. `publish_replacing` joins
 old-journal retirement claims to the replacement transaction, and `delete_provider`
 joins them to provider deletion. Both require complete immutable ownership of the
 current bindings. Cleanup reloads those committed claims before issuer

@@ -102,6 +102,55 @@ version = 2
 
 The gateway selector is `compute_driver = "<driver>"`. It accepts one scalar driver name. Omit it to retain auto-detection.
 
+## Remote credential issuer
+
+Omit `[openshell.gateway.credential_issuer]` to keep embedded provider storage.
+To select the experimental standalone issuer, configure its private HTTPS
+endpoint and a gateway client identity:
+
+```toml
+[openshell.gateway.credential_issuer]
+name = "primary"
+endpoint = "https://issuer.example.com:8443"
+server_ca_path = "/etc/openshell/issuer/ca.pem"
+client_cert_path = "/etc/openshell/issuer/gateway.pem"
+client_key_path = "/etc/openshell/issuer/gateway.key"
+startup_timeout_seconds = 30
+cleanup_idle_seconds = 300
+```
+
+All paths must be absolute. The client certificate must carry the SPIFFE identity
+authorized by the issuer for this gateway and its workspaces. The server CA and
+endpoint hostname authenticate the issuer independently of that client identity.
+HTTP, platform-root fallback, URL credentials, and insecure verification are not
+supported. These settings are file-only; they do not change gateway listener TLS.
+
+For a local SPIFFE Workload API, replace both client file fields with
+`workload_api_endpoint = "unix:///run/spire/agent.sock"` and
+`spiffe_id = "spiffe://example.com/gateway/a"`. Do not combine the two identity
+modes. New TLS connections reload the PEM identity or fetch the exact X.509 SVID.
+Restart the gateway to change the server trust bundle or issuer endpoint.
+
+Startup validates issuer capabilities, registers existing references without
+reading values, and waits for metadata reconciliation before serving. The startup
+budget defaults to 30 seconds (range 1–300). Existing inline credentials, local
+driver handles, and embedded refresh grants require explicit migration; the
+gateway fails startup rather than moving them or falling back. Keep the
+registration name and authority stable, and configure every gateway replica
+consistently. Removing or changing the table is not a migration mechanism.
+
+Remote mode supports static provider create/update/delete, delivery, operator
+export, and refresh-status reads. Public refresh configure/rotate/delete remain
+unsupported in this experimental mode. SSH host keys and supervisor launch
+secrets remain in the gateway's local credential store. The embedded provider
+refresh worker does not run in remote mode.
+
+Each replica invalidates its local push sessions when issuer watches change,
+become unknown, or reconcile. A background reconciler retains and retries
+abandoned handoff cleanup. Its idle cutoff defaults to 300 seconds (range
+60–3600); published live bindings are never reclaimed based on parent absence.
+See [Credential Issuer](/extensibility/credential-issuer) for service configuration.
+
 ## Additional Destination CAs
 
 Use the global supervisor network table to trust private certificate authorities

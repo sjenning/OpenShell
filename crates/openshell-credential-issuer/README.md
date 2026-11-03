@@ -154,7 +154,8 @@ recover an encrypted known result through an independent pool, and prove failed
 fences roll back outputs, grant state, receipts, and events together.
 
 `service::CredentialRefreshService` composes this adapter with the shared engine
-and autonomous recovery/sweep. Gateway remote-source integration remains pending.
+and autonomous recovery/sweep. Gateway source selection is explicit; public
+remote grant mutation routing remains pending.
 
 ## Refresh coordination and minters
 
@@ -314,8 +315,9 @@ fail closed. The journal currently retains all events.
 
 The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. The gateway has selected-source delivery, static
-mutation journaling, and operator-export adapters. Production source selection
-and grant mutation routing remain pending.
+mutation journaling, and operator-export adapters. Gateway TOML source selection
+also starts delivery invalidation and cleanup reconciliation; public grant
+mutation routing remains pending.
 
 ### Value-free static reservations
 
@@ -332,9 +334,9 @@ sending a conditional `PutSecret(expected_version = 1)`. First fill publishes
 version two. Revoking the known pending identity fences a late fill through the
 same native reference CAS and permanent tombstone. The gateway need not persist
 the provider value to discover or clean up an ambiguous fill. This is the
-issuer-side primitive used by the gateway's static handoff journal. Production
-remote-source selection remains pending. The existing backing-allocation-to-
-candidate-journal crash window remains.
+issuer-side primitive used by the gateway's static handoff journal and configured
+remote source. The existing backing-allocation-to-candidate-journal crash window
+remains.
 
 ## CredentialRefresh RPC host
 
@@ -394,8 +396,8 @@ SQLite supports one runtime; use PostgreSQL for replicas. mTLS tests exercise th
 actual generated clients for both services. PostgreSQL tests use independent
 service pools to coalesce mints, replay intents, recover known results and
 complete cleanup. The standalone daemon supplies validated TOML composition,
-mandatory mTLS, storage, and registered minters; it does not enable gateway
-remote mode or provide container/Helm packaging.
+mandatory mTLS, storage, and registered minters. Gateway remote mode requires
+explicit gateway configuration; container/Helm issuer packaging remains pending.
 
 ### Graceful host shutdown
 
@@ -428,8 +430,8 @@ and clamps them to expiration. Errors contain static diagnostics without remote
 messages or details. Watch connections resume from durable namespace cursors;
 reset/checkpoint frames do not reconcile caller state. Broken, malformed, or
 stalled streams terminate and require a new watch. This is the transport adapter;
-WatchedIssuer supplies the cache/reconciliation layer. Gateway mode selection and
-provider/config-delivery integration remain pending.
+WatchedIssuer supplies the cache/reconciliation layer used by explicit gateway
+remote-source selection and provider/config-delivery integration.
 
 ## Watched remote values
 
@@ -465,7 +467,8 @@ must invalidate/reconcile on Unknown or broadcast receiver lag. Dropping the las
 wrapper aborts its watch workers and releases cached state, not already admitted
 issuer work. Real mTLS tests close live sockets, rotate while disconnected, and
 verify cursor recovery, metadata-only reconciliation, TTL expiry, and version
-invalidation. This layer is not yet wired into gateway provider delivery.
+invalidation. Gateway remote startup registers persisted bindings, waits for
+reconciliation, and bridges changes and health transitions to local push delivery.
 
 ## Hosted minters
 

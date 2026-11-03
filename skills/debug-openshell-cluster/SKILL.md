@@ -156,6 +156,21 @@ authenticate gateway RPCs with sandbox bearer tokens.
 
 Custom names use `[openshell.drivers.<name>].socket_path`. A launch-time `--compute-driver-socket` override may also use `docker`, `podman`, `kubernetes`, or `vm`; the endpoint then takes precedence over built-in construction. First-party standalone drivers require the socket parent directory to be owned by the driver's effective UID, force its mode to `0700`, create the socket with mode `0600`, and accept only peers with that same UID. Check the parent and socket separately with `stat`; a gateway running under a different UID cannot connect even when filesystem permissions or group membership would otherwise allow it. Operator-supplied drivers must provide equivalent access control appropriate to their implementation. Check gateway logs for connection errors, `GetCapabilities` failures, missing peer metadata, protocol-major mismatch, unmet required capabilities, or an unexpected advertised driver name. `openshell gateway info` reports successful startup negotiations. The advertised name is diagnostic metadata; negotiated features control optional behavior. The gateway does not create or supervise operator-supplied driver processes or sockets.
 
+If `[openshell.gateway.credential_issuer]` is present, the gateway explicitly
+selects the remote issuer for provider credentials. Check its HTTPS reachability,
+`server_ca_path`, endpoint hostname, and the complete PEM client pair or exact
+local SPIFFE Workload API identity. The issuer must authorize that gateway SPIFFE
+identity for every selected workspace. Startup waits for capability discovery and
+metadata reconciliation within `startup_timeout_seconds` (default 30, range
+1–300), without reading values. Existing inline credentials, local driver handles,
+and embedded refresh grants require explicit migration; never remove the table
+or disable TLS verification to bypass that failure. Internal SSH/launch secrets
+still need the local credential store. Public refresh configure/rotate/delete
+are currently unsupported remotely. Watch changes invalidate local push delivery,
+and the handoff reconciler retries owned cleanup with `cleanup_idle_seconds`
+(default 300, range 60–3600); do not delete ownership journals to clear warnings.
+See the published gateway configuration reference for the experimental mode.
+
 For the Kubernetes Secrets credential driver, every provider credential lives in
 the configured `namespace`, in every workspace mode. A `PermissionDenied` error
 naming another namespace means the provider's credential handle points outside

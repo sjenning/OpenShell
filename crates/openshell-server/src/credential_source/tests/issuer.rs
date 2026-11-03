@@ -64,6 +64,7 @@ impl CredentialDriver for Driver {
 }
 
 pub struct Issuer {
+    pub startup: crate::credential_source::startup::RemoteConfig,
     pub raw: RemoteIssuer,
     pub watched: WatchedIssuer,
     pub resolves: Arc<AtomicUsize>,
@@ -156,6 +157,23 @@ impl Issuer {
         params.subject_alt_names = vec![SanType::URI(identity.try_into().unwrap())];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let certificate = openshell_crypto::pki::signed_by(params, &client_key, &ca, &key).unwrap();
+        let server_ca_path = directory.path().join("ca.pem");
+        let client_cert_path = directory.path().join("client.pem");
+        let client_key_path = directory.path().join("client.key");
+        std::fs::write(&server_ca_path, ca.pem()).unwrap();
+        std::fs::write(&client_cert_path, certificate.pem()).unwrap();
+        std::fs::write(&client_key_path, client_key.serialize_pem().unwrap()).unwrap();
+        let startup = crate::credential_source::startup::RemoteConfig {
+            name: "primary".into(),
+            endpoint: endpoint.clone(),
+            server_ca_path,
+            client_cert_path: Some(client_cert_path),
+            client_key_path: Some(client_key_path),
+            workload_api_endpoint: None,
+            spiffe_id: None,
+            startup_timeout_seconds: 5,
+            cleanup_idle_seconds: 300,
+        };
         let config = ExtensionChannelConfig::new(endpoint)
             .with_custom_ca_pem(ca.pem())
             .with_client_identity(ExtensionClientIdentity::Pem {
@@ -165,6 +183,7 @@ impl Issuer {
         let raw = RemoteIssuer::connect(&config).await.unwrap();
         let watched = WatchedIssuer::new(raw.clone());
         Self {
+            startup,
             raw,
             watched,
             resolves,

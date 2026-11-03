@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+mod pending;
 mod postgres;
 mod status;
 use openshell_core::proto::credentials::refresh::v1 as refresh;

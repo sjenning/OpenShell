@@ -49,10 +49,13 @@ impl GrantPlan {
 pub(super) struct GrantSlot {
     plan: GrantPlan,
     id: Option<String>,
+    #[serde(default)]
+    pending_publication: bool,
 }
 impl GrantSlot {
     pub(super) fn valid(&self, state: &State) -> bool {
         self.plan.valid()
+            && (!self.pending_publication || state.phase != Phase::Preparing)
             && self.plan.outputs.values().collect::<BTreeSet<_>>()
                 == state.slots.keys().collect::<BTreeSet<_>>()
             && self.id.as_ref().is_none_or(|id| {
@@ -80,6 +83,12 @@ impl StaticHandoff {
             .grant
             .as_ref()
             .and_then(|grant| grant.id.as_deref())
+    }
+    pub(super) fn allows_pending_publication(&self) -> bool {
+        self.state
+            .grant
+            .as_ref()
+            .is_some_and(|grant| grant.pending_publication)
     }
     /// Persist the complete value-free allocation recipe before reserving any
     /// issuer resource. Discovery does not allocate or transmit credential values.
@@ -115,7 +124,11 @@ impl StaticHandoff {
             provider,
             &keys,
             expected_provider_version,
-            Some(GrantSlot { plan, id: None }),
+            Some(GrantSlot {
+                plan,
+                id: None,
+                pending_publication: false,
+            }),
         )
         .await
     }
@@ -180,6 +193,30 @@ impl StaticHandoff {
         config: &HashMap<String, String>,
         material: &HashMap<String, String>,
     ) -> Result<(), Status> {
+        self.prepare_grant_inner(store, source, config, material, true)
+            .await
+    }
+    /// Initialize a grant without requesting an upstream mint. Its pending
+    /// references can be published atomically; delivery remains unavailable
+    /// until the issuer scheduler or a freshness request publishes first values.
+    pub async fn prepare_grant(
+        &mut self,
+        store: &Store,
+        source: &RemoteProviderSource,
+        config: &HashMap<String, String>,
+        material: &HashMap<String, String>,
+    ) -> Result<(), Status> {
+        self.prepare_grant_inner(store, source, config, material, false)
+            .await
+    }
+    async fn prepare_grant_inner(
+        &mut self,
+        store: &Store,
+        source: &RemoteProviderSource,
+        config: &HashMap<String, String>,
+        material: &HashMap<String, String>,
+        first_value: bool,
+    ) -> Result<(), Status> {
         self.source(source)?;
         if self.state.phase != Phase::Preparing {
             return Err(invalid());
@@ -201,6 +238,11 @@ impl StaticHandoff {
         {
             return Err(invalid());
         }
+        self.state
+            .grant
+            .as_mut()
+            .ok_or_else(invalid)?
+            .pending_publication = !first_value;
         self.state.phase = Phase::Filling;
         self.save(store).await?;
         source
@@ -213,22 +255,24 @@ impl StaticHandoff {
             })
             .await?;
         self.check(store).await?;
-        let response = source
-            .client
-            .ensure_fresh(refresh::EnsureFreshRequest {
-                grant: id,
-                min_remaining: None,
-            })
-            .await?;
-        let status = response.status.ok_or_else(invalid)?;
-        if status.state != "refreshed"
-            || status.expiration_time.as_ref().is_none_or(|time| {
-                openshell_core::time::timestamp_to_millis(time)
-                    .ok()
-                    .is_none_or(|time| time <= crate::persistence::current_time_ms())
-            })
-        {
-            return Err(invalid());
+        if first_value {
+            let response = source
+                .client
+                .ensure_fresh(refresh::EnsureFreshRequest {
+                    grant: id,
+                    min_remaining: None,
+                })
+                .await?;
+            let status = response.status.ok_or_else(invalid)?;
+            if status.state != "refreshed"
+                || status.expiration_time.as_ref().is_none_or(|time| {
+                    openshell_core::time::timestamp_to_millis(time)
+                        .ok()
+                        .is_none_or(|time| time <= crate::persistence::current_time_ms())
+                })
+            {
+                return Err(invalid());
+            }
         }
         for slot in self.state.slots.values_mut() {
             slot.filled = true;

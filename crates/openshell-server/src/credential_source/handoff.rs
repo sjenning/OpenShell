@@ -520,11 +520,13 @@ impl StaticHandoff {
                     .collect::<Result<Vec<_>, Status>>()?,
             })
             .await?;
-        if metadata
-            .secrets
-            .iter()
-            .any(|secret| secret.pending_value || secret.version < 2)
-        {
+        if metadata.secrets.iter().any(|secret| {
+            if secret.pending_value {
+                !(self.allows_pending_publication() && secret.version == 1)
+            } else {
+                secret.version < 2
+            }
+        }) {
             return Err(invalid());
         }
         let labels = provider

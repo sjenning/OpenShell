@@ -332,8 +332,13 @@ rejection of inline values, and atomic label-index replacement/removal.
 mapping, primary key, and scheduling bounds). `reserve` allocates and records the
 grant and every output identity together before `fill_grant` transmits any
 configuration or refresh material. A lost reservation response is recoverable
-from that recipe alone. Grant fill is one-shot: it journals Filling, initializes
-the issuer grant, then requests its first fresh output bundle. Failure or
+from that recipe alone. Grant preparation is one-shot: it journals Filling and
+initializes the issuer grant. `fill_grant` then requests its first fresh output
+bundle. `prepare_grant` instead permits atomic publication of the pending
+version-one bundle without requesting an upstream mint; delivery stays unavailable
+until issuer scheduling or an explicit freshness request publishes first values.
+A persisted, default-false marker distinguishes pending publication from the
+first-value-required path, so older journals do not gain that authority. Failure or
 interruption requires abandonment, not a retry with replacement inputs. No
 configuration, material, or secret-dependent fingerprint enters gateway storage.
 

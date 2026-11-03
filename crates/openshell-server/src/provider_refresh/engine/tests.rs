@@ -90,6 +90,21 @@ fn parked_investigation_remains_uncertain_after_failure_recording() {
 }
 
 #[test]
+fn projection_preserves_uncertain_oauth_failure_code_for_manual_admission() {
+    let mut stored = state();
+    stored.status = "reauthorization_required".into();
+    stored.recovery_action = ProviderCredentialRefreshRecoveryAction::Reauthorize as i32;
+    stored.failure_code = "oauth_refresh_exchange_uncertain".into();
+    stored.next_refresh_at_ms = i64::MAX;
+    assert!(
+        grant_checkpoint(&stored)
+            .unwrap()
+            .ensure_mintable(RefreshTrigger::ExplicitRotation, 100)
+            .is_err()
+    );
+}
+
+#[test]
 fn projection_preserves_receipts_tombstones_and_unknown_recovery_backoff() {
     let mut stored = state();
     let before = grant_checkpoint(&stored).unwrap();

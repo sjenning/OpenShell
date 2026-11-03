@@ -25,6 +25,7 @@ openshell-driver-kubernetes-secrets = { path = "../openshell-driver-kubernetes-s
 openshell-driver-vault = { path = "../openshell-driver-vault" }
 openshell-extension-core = { path = "../openshell-extension-core" }
 prost = { workspace = true }
+prost-types = { workspace = true }
 spiffe = { workspace = true, features = ["x509"] }
 reqwest = { workspace = true }
 serde_json = { workspace = true }

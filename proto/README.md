@@ -117,9 +117,10 @@ without backend value reads. Reserved outputs reject ordinary resolution until
 first publication; reservations never stand in for fabricated secret values.
 Capabilities advertise that support and message/batch limits.
 
-The issuer library hosts authenticated store and custom-minter services. These
-contracts do not enable a gateway remote-source mode or relax authorization for
-an existing gateway RPC; refresh hosting and deployment wiring remain separate.
+The issuer library hosts authenticated store, refresh, and custom-minter
+services. These contracts do not enable a gateway remote-source mode or relax
+authorization for an existing gateway RPC; deployment and gateway wiring remain
+separate.
 
 ## Isolation backend protocol
 

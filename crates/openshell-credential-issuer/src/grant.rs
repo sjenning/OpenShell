@@ -30,6 +30,7 @@ pub struct GrantIdentity {
 pub struct GrantCheckpoint {
     pub identity: GrantIdentity,
     pub status: String,
+    pub failure_code: String,
     pub completed_attempt: Option<String>,
     pub schedule: GrantSchedule,
 }
@@ -75,8 +76,9 @@ impl GrantCheckpoint {
         if matches!(
             self.status.as_str(),
             "refresh_in_progress" | "refresh_committing"
-        ) || (self.schedule.recovery_action == Some(RecoveryAction::Investigate)
-            && self.schedule.next_refresh_at_ms == i64::MAX)
+        ) || self.failure_code == "oauth_refresh_exchange_uncertain"
+            || (self.schedule.recovery_action == Some(RecoveryAction::Investigate)
+                && self.schedule.next_refresh_at_ms == i64::MAX)
         {
             return Err(Status::failed_precondition(
                 "previous credential mint has an uncertain outcome; reconfigure the refresh grant",

@@ -101,6 +101,7 @@ impl GrantState {
         GrantCheckpoint {
             identity: self.definition.identity.clone(),
             status: status.to_string(),
+            failure_code: self.failure_code.clone(),
             completed_attempt: self.completed_attempt.clone(),
             schedule: GrantSchedule {
                 next_refresh_at_ms: self.next_refresh_at_ms,
@@ -264,6 +265,7 @@ impl GrantState {
                 Parked => {
                     next == Deleting
                         || self.recovery_action == Some(RecoveryAction::Reauthorize)
+                            && self.failure_code != "oauth_refresh_exchange_uncertain"
                             && next == Refreshing
                 }
                 Deleting => next == Deleted,
@@ -414,7 +416,18 @@ impl GrantRepository {
                     "grant material requires a known completed mint",
                 ));
             }
-            if !old.state.allows(state.phase) {
+            let late_known_result = old.state.phase == GrantPhase::Parked
+                && old.state.recovery_action == Some(RecoveryAction::Investigate)
+                && state.phase == GrantPhase::Publishing
+                && old
+                    .state
+                    .attempt
+                    .as_ref()
+                    .zip(state.attempt.as_ref())
+                    .is_some_and(|(before, after)| {
+                        before.id == after.id && after.encrypted_result.is_some()
+                    });
+            if !old.state.allows(state.phase) && !late_known_result {
                 return Err(Status::failed_precondition(
                     "issuer grant phase cannot be replayed or resurrected",
                 ));

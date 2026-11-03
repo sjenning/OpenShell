@@ -1,10 +1,11 @@
 # Credential issuer library
 
-This crate owns embedded credential reference state, local refresh coordination,
-and a stateless token-minter contract. It does not yet host a service or run
-refresh workers. Secret values remain in the existing credential drivers;
-persisted reference state contains only ownership metadata, encoded opaque
-handles, versions, expiration, revocation, and pending handle deletions.
+This crate owns credential references, refresh coordination and persistence,
+stateless minter contracts, authenticated store/refresh/minter library hosts,
+and an autonomous refresh/recovery worker. Credential drivers store values;
+reference metadata contains ownership, opaque handles, versions, expiration,
+revocation, and pending deletions. Known mint results use encrypted native spools.
+Standalone deployment and gateway remote-source wiring remain incomplete.
 
 ## Reference lifecycle
 
@@ -117,8 +118,7 @@ pool, release on cancellation/drop, and cannot starve data commits by occupying
 the data pool. SQLite relies on shared engine-local exclusion and durable CAS;
 use PostgreSQL for multiple issuer replicas. Schema initialization rejects newer
 versions and serializes PostgreSQL migrations across startup replicas. The
-repository backs the CredentialStore RPC host. The CredentialRefresh host remains
-unimplemented.
+repository backs both CredentialStore and CredentialRefresh RPC hosts.
 
 `Repository::backend_objects` adapts the encrypted database driver into a
 reserved physical-object partition that authenticated gateway scopes cannot
@@ -151,8 +151,8 @@ PostgreSQL tests join pending output allocation and later value/receipt publicat
 recover an encrypted known result through an independent pool, and prove failed
 fences roll back outputs, grant state, receipts, and events together.
 
-This is the persistence adapter, not the CredentialRefresh RPC host, autonomous
-recovery/sweep, or gateway source integration.
+`service::CredentialRefreshService` composes this adapter with the shared engine
+and autonomous recovery/sweep. Gateway remote-source integration remains pending.
 
 ## Refresh coordination and minters
 
@@ -250,8 +250,8 @@ fences before external material/output staging. Recovery can then finish the
 known result instead of repeating an upstream exchange. Even expired results
 remain decryptable: recovery must preserve rotated material before deciding
 whether fresh outputs need another mint. The helper bounds source/envelope sizes
-and does not perform persistence, publication, or recovery itself; standalone
-grant wiring remains pending.
+and does not perform persistence, publication, or recovery itself. The refresh
+host persists the ciphertext with native grant fences before external staging.
 
 ## Remote minter adapter
 
@@ -311,7 +311,51 @@ Unknown cursors reset; stream errors require clients to invalidate caches and
 fail closed. The journal currently retains all events.
 
 The service is a library host, not yet a standalone command or gateway remote
-source. It does not yet implement refresh-grant RPCs or source-side caching.
+source. CredentialRefreshService shares its storage/coordination runtime;
+source-side caching and gateway wiring remain pending.
+
+## CredentialRefresh RPC host
+
+`service::CredentialRefreshService` hosts all seven refresh RPCs alongside a
+CredentialStoreService. Supply a pinned minter registry and MintResultSpool
+using a shared encryption key across replicas. The host never reads gateway
+profiles. Creation encrypts configuration/material, allocates fixed pending
+outputs, binds them to the grant's immutable epoch, and commits ownership,
+idempotency receipts, and value-free events together. Default lifetime is one
+hour, default lead time is five minutes, and requested lifetime is bounded to
+twelve hours. The issuer serving window never exceeds that lifetime; this does
+not shorten the upstream credential's actual validity.
+
+Store and grant mutations share the gateway's durable idempotency namespace.
+Rotation claims its intent with the pre-mint uncertainty marker, before any
+upstream call. Completed results or classified failures replay without minting;
+reusing the key for another operation/intent fails. Pending intents survive
+cancellation. Legacy static-store receipts still decode as completed.
+
+The host persists an encrypted known-success result before external staging,
+stages rotated material before outputs, then atomically publishes every output,
+the exact mint-completion receipt, material ownership, grant status, rotation
+result, and events. Ambiguous acknowledgments recover through the per-attempt
+receipt, not just the latest grant receipt. Backend outages after the spool
+commits leave recoverable publication work and never repeat the upstream call.
+Before that native spool commit, detached work retains the known result while
+retrying a transient database failure. A process crash with no durable result
+still parks the unresolved attempt; it does not promise exactly-once upstream
+execution.
+
+`spawn_worker()` performs serialized scheduling, known-result recovery, orphaned
+attempt parking, and owned cleanup, including store reference/candidate cleanup.
+Parked unknown outcomes reject scheduled and manual minting. A late known result
+for the same immutable attempt can recover without minting again, but cannot
+cross deletion or an epoch change. Grant deletion revokes all outputs atomically
+before physical cleanup and retains tombstones. Watches use the same durable
+reset/checkpoint model as store watches and never return credential values.
+
+SQLite supports one runtime; use PostgreSQL for replicas. mTLS tests exercise the
+actual generated clients for both services. PostgreSQL tests use independent
+service pools to coalesce mints, replay intents, recover known results and
+complete cleanup. These library hosts are not yet a standalone binary,
+deployment configuration, or gateway remote source.
 
 ## Hosted minters
 
@@ -353,8 +397,8 @@ supplied owner never permits access to another gateway's object. Missing TLS,
 unknown or ambiguous identities, unconfigured workspaces, and wildcard workspace
 bindings fail closed. Services must authenticate every operation, select storage
 by that namespace, and check the bound owner before reading values or mutating
-state. CredentialStoreService applies these checks to its hosted operations;
-the refresh RPC host remains pending.
+state. CredentialStoreService and CredentialRefreshService apply these checks
+to every hosted operation. Neither host enables gateway remote mode by itself.
 
 ## Verification
 

@@ -269,7 +269,9 @@ user must obtain a new OAuth grant and run `provider refresh configure`,
 `fix_configuration` means an operator must repair the OAuth client, scopes, or
 administrator policy, and `investigate` can mean an unrecognized issuer
 response or an interrupted mint with an uncertain outcome. The gateway parks
-`reauthorize` records until a manual rotate or reconfiguration. It retries
+`reauthorize` records until manual recovery. A manual rotate can retry a known
+rejection, but `oauth_refresh_exchange_uncertain` requires reconfiguration with
+a valid grant: the previous refresh token may have been consumed. It retries
 `fix_configuration` records hourly so externally repaired configuration can
 recover without rapid token-endpoint traffic. A parked `investigate` record
 also rejects manual rotation: its mint outcome is unknown. Investigate, then

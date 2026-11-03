@@ -9,7 +9,7 @@ use openshell_extension_core::{
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, SanType};
 use tonic::transport::Channel;
 
-struct Server {
+pub(in crate::service) struct Server {
     endpoint: String,
     ca: openshell_crypto::pki::Certificate,
     key: openshell_crypto::pki::KeyPair,
@@ -22,6 +22,12 @@ impl Drop for Server {
 }
 impl Server {
     async fn start(service: CredentialStoreService) -> Self {
+        Self::start_with_refresh(service, None).await
+    }
+    pub(in crate::service) async fn start_with_refresh(
+        service: CredentialStoreService,
+        refresh: Option<CredentialRefreshService>,
+    ) -> Self {
         openshell_crypto::tls::ensure_default_provider();
         let key = openshell_crypto::pki::generate_keypair().unwrap();
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -57,6 +63,7 @@ impl Server {
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(service.into_service())
+                .add_optional_service(refresh.map(CredentialRefreshService::into_service))
                 .serve_with_incoming(Box::pin(incoming))
                 .await
                 .unwrap();
@@ -72,6 +79,9 @@ impl Server {
         &self,
         identity: &str,
     ) -> wire::credential_store_client::CredentialStoreClient<Channel> {
+        wire::credential_store_client::CredentialStoreClient::new(self.channel(identity).await)
+    }
+    pub(in crate::service) async fn channel(&self, identity: &str) -> Channel {
         let key = openshell_crypto::pki::generate_keypair().unwrap();
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.subject_alt_names = vec![SanType::URI(identity.try_into().unwrap())];
@@ -83,9 +93,7 @@ impl Server {
                 certificate: cert.pem().into_bytes(),
                 private_key: key.serialize_pem().unwrap().into_bytes(),
             });
-        wire::credential_store_client::CredentialStoreClient::new(
-            connect_channel(&config).await.unwrap(),
-        )
+        connect_channel(&config).await.unwrap()
     }
 }
 

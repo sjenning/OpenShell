@@ -18,7 +18,7 @@ use std::{
 use tonic::Code;
 use wire::credential_store_server::CredentialStore as _;
 
-mod mtls;
+pub(super) mod mtls;
 mod postgres;
 mod watch;
 
@@ -429,6 +429,15 @@ async fn claiming_an_abandoned_candidate_fences_late_publication_before_backend_
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn legacy_receipts_remain_completed_when_shared_grant_results_are_added() {
+    let payload=serde_json::to_vec(&serde_json::json!({"operation":"put","owner":owner(Some(&wire_owner())).unwrap(),"reference":"ref","version":1,"fingerprint":[1],"created_at_ms":1})).unwrap();
+    let receipt: Receipt = decode(&payload).unwrap();
+    receipt.require_completed().unwrap();
+    assert!(receipt.response.is_empty());
+    assert_eq!(receipt.result_code, 0);
 }
 
 #[tokio::test]

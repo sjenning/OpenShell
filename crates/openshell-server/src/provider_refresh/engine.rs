@@ -55,6 +55,7 @@ fn grant_checkpoint(
             },
         },
         status: state.status.clone(),
+        failure_code: state.failure_code.clone(),
         completed_attempt: completed_mint(state).map(ToString::to_string),
         schedule: refresh_schedule(state),
     })

@@ -20,8 +20,10 @@ use std::{
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 
+mod grants;
 mod maintenance;
 mod mutations;
+pub use grants::CredentialRefreshService;
 mod watch;
 
 const MESSAGE_LIMIT: usize = 1024 * 1024;
@@ -56,6 +58,33 @@ struct Receipt {
     version: u64,
     fingerprint: Vec<u8>,
     created_at_ms: i64,
+    #[serde(default = "completed_receipt")]
+    completed: bool,
+    /// Secret-free encoded RPC result for grant operations. Legacy static
+    /// operations retain their reference/version projection above.
+    #[serde(default)]
+    response: Vec<u8>,
+    #[serde(default)]
+    result_code: i32,
+}
+fn completed_receipt() -> bool {
+    true
+}
+impl Receipt {
+    fn require_completed(&self) -> Result<(), Status> {
+        if !self.completed {
+            return Err(Status::failed_precondition(
+                "issuer operation has an unresolved outcome",
+            ));
+        }
+        if self.result_code != 0 {
+            return Err(Status::new(
+                tonic::Code::from_i32(self.result_code),
+                "issuer operation failed; inspect grant status",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Candidate {

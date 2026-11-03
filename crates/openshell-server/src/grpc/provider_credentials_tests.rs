@@ -634,8 +634,24 @@ async fn automatic_waiters_honor_failed_refresh(
     );
     issuer.verify().await;
 
-    // A separately requested manual rotation can retry a parked grant or
-    // override retry backoff; it still goes through the same coordination.
+    // A successful-but-unusable rotating exchange may already have consumed
+    // the refresh token. Manual rotation must not replay that unknown outcome.
+    if failed.failure_code == "oauth_refresh_exchange_uncertain" {
+        let error = crate::provider_refresh::refresh_provider_credential(
+            state.store.as_ref(),
+            "other",
+            &state.credentials,
+            Some(&state.compute),
+            "provider",
+            "ACCESS_TOKEN",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        issuer.verify().await;
+        return;
+    }
+    // Known rejections and retry backoff can still be retried explicitly.
     issuer.reset().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(

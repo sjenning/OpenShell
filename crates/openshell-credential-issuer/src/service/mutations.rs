@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tonic::Status;
 
 impl Runtime {
-    async fn replay(
+    pub(super) async fn replay(
         &self,
         scope: &GatewayScope,
         key: &str,
@@ -53,7 +53,7 @@ impl Runtime {
         }
         Ok(Some(receipt))
     }
-    async fn stage_candidate(
+    pub(super) async fn stage_candidate(
         &self,
         scope: &GatewayScope,
         owner: &SecretOwner,
@@ -132,6 +132,7 @@ impl Runtime {
             .replay(&scope, &key, "put", &supplied, &fingerprint)
             .await?
         {
+            receipt.require_completed()?;
             return Ok(wire::PutSecretResponse {
                 reference: receipt.reference,
                 version: receipt.version,
@@ -213,6 +214,9 @@ impl Runtime {
             version: state.version,
             fingerprint: fp_backing,
             created_at_ms: now_ms()?,
+            completed: true,
+            response: Vec::new(),
+            result_code: 0,
         };
         let mutations = [
             mutation,
@@ -273,6 +277,7 @@ impl Runtime {
             .replay(&scope, &key, "delete", &supplied, &fingerprint)
             .await?
         {
+            receipt.require_completed()?;
             return Ok(wire::DeleteSecretResponse {
                 version: receipt.version,
             });
@@ -325,6 +330,9 @@ impl Runtime {
             version: state.version,
             fingerprint: backing,
             created_at_ms: now_ms()?,
+            completed: true,
+            response: Vec::new(),
+            result_code: 0,
         };
         mutations.push(Mutation::Put {
             kind: IDEMPOTENCY_KIND.to_string(),

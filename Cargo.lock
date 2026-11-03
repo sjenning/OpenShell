@@ -4487,6 +4487,7 @@ dependencies = [
  "openshell-driver-vault",
  "openshell-extension-core",
  "prost",
+ "prost-types",
  "rcgen",
  "reqwest 0.12.28",
  "serde",

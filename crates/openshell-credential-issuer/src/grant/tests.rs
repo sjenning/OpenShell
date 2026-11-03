@@ -17,6 +17,7 @@ fn checkpoint() -> GrantCheckpoint {
             },
         },
         status: "configured".to_string(),
+        failure_code: String::new(),
         completed_attempt: None,
         schedule: GrantSchedule {
             next_refresh_at_ms: 0,
@@ -160,6 +161,24 @@ fn parked_unknown_outcomes_cannot_be_replayed_by_manual_rotation() {
             }
         }
     }
+}
+
+#[test]
+fn uncertain_rotating_oauth_exchanges_cannot_hide_behind_reauthorize_classification() {
+    let mut live = checkpoint();
+    live.status = "reauthorization_required".into();
+    live.failure_code = "oauth_refresh_exchange_uncertain".into();
+    live.schedule.recovery_action = Some(RecoveryAction::Reauthorize);
+    live.schedule.next_refresh_at_ms = i64::MAX;
+    for trigger in [RefreshTrigger::Automatic, RefreshTrigger::ExplicitRotation] {
+        assert_eq!(
+            live.ensure_mintable(trigger, 100).unwrap_err().code(),
+            Code::FailedPrecondition
+        );
+    }
+    live.failure_code = "oauth_invalid_grant".into();
+    live.ensure_mintable(RefreshTrigger::ExplicitRotation, 100)
+        .unwrap();
 }
 
 #[test]

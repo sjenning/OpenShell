@@ -15,6 +15,7 @@ openshell-crypto = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 tokio-rustls = { workspace = true }
+spiffe = { workspace = true, features = ["workload-api-x509"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -23,6 +24,8 @@ tonic = { workspace = true, features = ["channel", "tls-native-roots"] }
 tower = { workspace = true }
 
 [dev-dependencies]
+prost = { workspace = true }
+tonic-prost = { workspace = true }
 tempfile = "3"
 http = { workspace = true }
 rcgen = { workspace = true }

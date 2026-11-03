@@ -14,6 +14,9 @@ use tokio::net::TcpStream;
 use tonic::transport::{Channel, Uri};
 use tower::service_fn;
 
+mod spiffe_identity;
+type IdentityMaterial = (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>);
+
 /// Client certificate source, loaded again for every new TLS connection.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -28,6 +31,9 @@ pub enum ExtensionClientIdentity {
         certificate: PathBuf,
         private_key: PathBuf,
     },
+    /// Fetch this exact identity from a local SPIFFE Workload API on each dial.
+    /// The endpoint must be an absolute unix:// socket, never a remote URL.
+    Spiffe { endpoint: String, spiffe_id: String },
 }
 
 impl std::fmt::Debug for ExtensionClientIdentity {
@@ -35,17 +41,18 @@ impl std::fmt::Debug for ExtensionClientIdentity {
         f.write_str(match self {
             Self::Pem { .. } => "Pem(<redacted>)",
             Self::PemFiles { .. } => "PemFiles(<redacted>)",
+            Self::Spiffe { .. } => "Spiffe(<redacted>)",
         })
     }
 }
 
 impl ExtensionClientIdentity {
-    async fn load(&self) -> Result<(Vec<u8>, Vec<u8>), TransportError> {
+    async fn load(&self) -> Result<IdentityMaterial, TransportError> {
         match self {
             Self::Pem {
                 certificate,
                 private_key,
-            } => Ok((certificate.clone(), private_key.clone())),
+            } => parse_pem(certificate, private_key),
             Self::PemFiles {
                 certificate,
                 private_key,
@@ -66,13 +73,29 @@ impl ExtensionClientIdentity {
                         .await
                         .map_err(|_| TransportError::ClientIdentity)?;
                     if cert == cert_again && key == key_again {
-                        return Ok((cert, key));
+                        return parse_pem(&cert, &key);
                     }
                 }
                 Err(TransportError::ClientIdentity)
             }
+            Self::Spiffe {
+                endpoint,
+                spiffe_id,
+            } => spiffe_identity::load(endpoint, spiffe_id).await,
         }
     }
+}
+
+fn parse_pem(certificate: &[u8], private_key: &[u8]) -> Result<IdentityMaterial, TransportError> {
+    let chain = CertificateDer::pem_slice_iter(certificate)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| TransportError::ClientIdentity)?;
+    if chain.is_empty() {
+        return Err(TransportError::ClientIdentity);
+    }
+    let key =
+        PrivateKeyDer::from_pem_slice(private_key).map_err(|_| TransportError::ClientIdentity)?;
+    Ok((chain, key))
 }
 
 async fn tls_config(
@@ -98,20 +121,12 @@ async fn tls_config(
     if roots.is_empty() {
         return Err(TransportError::ClientIdentity);
     }
-    let (certificate, private_key) = config
+    let (chain, key) = config
         .client_identity
         .as_ref()
         .ok_or(TransportError::ClientIdentity)?
         .load()
         .await?;
-    let chain = CertificateDer::pem_slice_iter(&certificate)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| TransportError::ClientIdentity)?;
-    if chain.is_empty() {
-        return Err(TransportError::ClientIdentity);
-    }
-    let key =
-        PrivateKeyDer::from_pem_slice(&private_key).map_err(|_| TransportError::ClientIdentity)?;
     let mut tls = openshell_crypto::tls::try_client_builder()
         .map_err(|_| TransportError::ClientIdentity)?
         .with_root_certificates(roots)

@@ -4784,17 +4784,20 @@ dependencies = [
  "http 1.4.0",
  "hyper-util",
  "openshell-crypto",
+ "prost",
  "rcgen",
  "rustls",
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "spiffe",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
  "tonic",
+ "tonic-prost",
  "tower",
 ]
 
@@ -7660,6 +7663,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "log",
+ "pkcs8 0.10.2",
  "prost",
  "prost-types",
  "serde",
@@ -7673,6 +7677,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "x509-parser 0.18.1",
  "zeroize",
 ]
 

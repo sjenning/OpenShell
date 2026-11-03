@@ -12,6 +12,7 @@ pub(super) use configuration::{Configuration, configure};
 pub(super) use custom::configure_custom;
 use openshell_core::{ObjectId as _, ObjectName as _, ObjectWorkspace as _, proto::Provider};
 use prost::Message as _;
+pub(super) use refresh::delete_refresh;
 pub(super) use refresh::rotate;
 use std::collections::HashMap;
 use tonic::Status;

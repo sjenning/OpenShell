@@ -157,7 +157,13 @@ fences roll back outputs, grant state, receipts, and events together.
 and autonomous recovery/sweep. Gateway source selection is explicit; public
 builtin and single-output custom grant configuration and rotation use the selected
 issuer with value-free gateway journals and metadata-only replay. Custom profile
-declarations, multi-output custom configuration, and refresh deletion remain pending.
+declarations and multi-output custom configuration remain pending. `DetachGrant`
+serializes with minting and deletion under the grant lock and distributed lease.
+It atomically stops refresh, releases output-binding guards to static ownership,
+and retires configuration/material without changing output references, values,
+versions, or expiry. Detached grants can never mint or revoke those static outputs;
+static deletion owns subsequent cleanup. Grants without published values cannot
+be detached.
 
 ## Refresh coordination and minters
 
@@ -321,8 +327,8 @@ shared storage/coordination. The gateway has selected-source delivery, static
 mutation journaling, and operator-export adapters. Gateway TOML source selection
 also starts delivery invalidation and cleanup reconciliation. Public grant
 configuration for builtin and single-output custom strategies and rotation use
-that source; custom profile declarations, multi-output custom configuration, and
-refresh deletion remain pending.
+that source. Refresh deletion preserves published outputs as static credentials;
+custom profile declarations and multi-output custom configuration remain pending.
 
 ### Value-free static reservations
 

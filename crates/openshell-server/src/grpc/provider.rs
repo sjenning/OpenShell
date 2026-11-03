@@ -5616,6 +5616,17 @@ pub(super) async fn handle_delete_provider_refresh(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
+    if let Some(source) = state.remote_provider_mutations()? {
+        return issuer_mutations::delete_refresh(
+            state,
+            source,
+            &workspace,
+            provider_name,
+            credential_key,
+            request.allow_missing,
+        )
+        .await;
+    }
     let existing_refresh_state = crate::provider_refresh::get_refresh_state(
         state.store.as_ref(),
         &workspace,
@@ -5623,11 +5634,6 @@ pub(super) async fn handle_delete_provider_refresh(
         credential_key,
     )
     .await?;
-    if state.remote_provider_mutations()?.is_some() {
-        return Err(Status::unimplemented(
-            "remote issuer refresh routing is not configured",
-        ));
-    }
     let Some(refresh_state) = existing_refresh_state else {
         return Ok(Response::new(DeleteProviderRefreshResponse {
             outcome: super::deletion_outcome(

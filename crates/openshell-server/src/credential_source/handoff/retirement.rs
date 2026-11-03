@@ -21,6 +21,11 @@ pub(super) fn claims(
     let mut ids = HashSet::new();
     for old in owned {
         old.source(source)?;
+        if old.is_detaching() {
+            return Err(Status::failed_precondition(
+                "provider refresh deletion is in progress",
+            ));
+        }
         if old.state.phase != Phase::Published
             || old.state.provider_id != provider.object_id()
             || old.state.workspace != provider.object_workspace()

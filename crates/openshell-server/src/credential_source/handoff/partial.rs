@@ -83,21 +83,15 @@ impl StaticHandoff {
             .collect();
         for key in keys {
             self.check(store).await?;
-            let reserved = source
-                .client
-                .reserve_secret(wire::ReserveSecretRequest {
-                    owner: Some(self.owner(&key)),
-                    idempotency_key: self.operation(&key, "reserve")?,
-                })
-                .await?;
-            if self.state.slots[&key].reference.as_ref() != Some(&reserved.reference) {
-                return Err(invalid());
-            }
+            let reference = self.state.slots[&key]
+                .reference
+                .clone()
+                .ok_or_else(invalid)?;
             source
                 .client
                 .delete_secret(wire::DeleteSecretRequest {
                     owner: Some(self.owner(&key)),
-                    reference: reserved.reference,
+                    reference,
                     expected_version: None,
                     idempotency_key: self.operation(&key, "abort")?,
                 })

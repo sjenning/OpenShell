@@ -131,6 +131,15 @@ grant with its replay receipt. Reserved grants cannot mint; deletion fences late
 initialization. Exact reservation/initialization receipts remain replayable after
 deletion and never resurrect a grant. Neither operation retries an upstream mint.
 
+`ListStrategies.supports_grant_detach` advertises value-free conversion to static
+ownership. `DetachGrant` serializes with refresh and deletion, permanently stops
+minting, and atomically releases the complete published output set to static
+ownership without changing reference identities, versions, values, or expiration.
+Pending or revoked outputs fail without changing the grant. Detached grant
+cleanup cannot revoke those outputs; subsequent static operations own them.
+Gateways must durably claim publication/cleanup ownership before detaching and
+recover interrupted transfers rather than sending `DeleteGrant`.
+
 The issuer library hosts authenticated store, refresh, and custom-minter
 services. These contracts do not enable a gateway remote-source mode or relax
 authorization for an existing gateway RPC; deployment and gateway wiring remain

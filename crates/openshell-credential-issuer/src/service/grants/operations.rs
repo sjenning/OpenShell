@@ -357,6 +357,11 @@ impl GrantRuntime {
         let mut state = loaded.state;
         let supplied = state.definition.identity.owner.clone();
         let fingerprint = hex_digest(&encode(&("delete-grant-v1", &state.definition.identity))?)?;
+        if state.phase == GrantPhase::Detached {
+            return Err(Status::failed_precondition(
+                "detached outputs require static credential deletion",
+            ));
+        }
         if let Some(receipt) = self
             .store
             .replay(&scope, &key, "delete_grant", &supplied, &fingerprint)

@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 use tonic::Status;
+mod detach;
 pub(super) mod publication;
 mod status;
 /// Value-free immutable request recipe. Never add configuration or material here.
@@ -52,10 +53,15 @@ pub(super) struct GrantSlot {
     id: Option<String>,
     #[serde(default)]
     pending_publication: bool,
+    #[serde(default)]
+    detaching: bool,
 }
 impl GrantSlot {
     pub(super) fn valid(&self, state: &State) -> bool {
         self.plan.valid()
+            && (!self.detaching
+                || state.phase == Phase::Published
+                    && state.slots.values().all(|slot| !slot.retiring))
             && (!self.pending_publication || state.phase != Phase::Preparing)
             && self.plan.outputs.values().collect::<BTreeSet<_>>()
                 == state.slots.keys().collect::<BTreeSet<_>>()
@@ -129,6 +135,7 @@ impl StaticHandoff {
                 plan,
                 id: None,
                 pending_publication: false,
+                detaching: false,
             }),
         )
         .await

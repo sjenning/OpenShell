@@ -666,6 +666,7 @@ mod tests {
                     "openshell.credentials.refresh.v1.CredentialRefresh/InitializeGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/GetGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/DeleteGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/DetachGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/RotateGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/EnsureFresh",
                     "openshell.credentials.refresh.v1.CredentialRefresh/WatchGrants",

@@ -598,31 +598,32 @@ impl StaticHandoff {
         }
         let keys: Vec<_> = self.state.slots.keys().cloned().collect();
         for key in keys {
-            let reserved = source
-                .client
-                .reserve_secret(wire::ReserveSecretRequest {
-                    owner: Some(self.owner(&key)),
-                    idempotency_key: self.operation(&key, "reserve")?,
-                })
-                .await?;
-            if self.state.slots[&key]
-                .reference
-                .as_ref()
-                .is_some_and(|reference| reference != &reserved.reference)
-            {
-                return Err(invalid());
-            }
+            self.check(store).await?;
+            // Converted grant outputs have durable reference ownership but no
+            // static reservation receipt. Discover only unknown references.
+            let reference = if let Some(reference) = &self.state.slots[&key].reference {
+                reference.clone()
+            } else {
+                source
+                    .client
+                    .reserve_secret(wire::ReserveSecretRequest {
+                        owner: Some(self.owner(&key)),
+                        idempotency_key: self.operation(&key, "reserve")?,
+                    })
+                    .await?
+                    .reference
+            };
             self.state
                 .slots
                 .get_mut(&key)
                 .expect("known slot")
-                .reference = Some(reserved.reference.clone());
+                .reference = Some(reference.clone());
             self.save(store).await?;
             source
                 .client
                 .delete_secret(wire::DeleteSecretRequest {
                     owner: Some(self.owner(&key)),
-                    reference: reserved.reference,
+                    reference,
                     expected_version: None,
                     idempotency_key: self.operation(&key, "abort")?,
                 })

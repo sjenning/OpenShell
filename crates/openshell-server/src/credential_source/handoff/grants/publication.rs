@@ -70,6 +70,9 @@ impl PublishedGrant {
         let handoff = StaticHandoff::load(store, &self.journal)
             .await?
             .ok_or_else(invalid)?;
+        if handoff.is_detaching() {
+            return Err(invalid());
+        }
         let provider = store
             .get_message::<Provider>(&self.provider_id)
             .await

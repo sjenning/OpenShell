@@ -31,6 +31,7 @@ use std::{
     },
 };
 
+mod detach;
 mod mtls;
 mod postgres;
 mod recovery;

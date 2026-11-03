@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 mod postgres;
-async fn prepared(store: &Store, source: &RemoteProviderSource) -> StaticHandoff {
+pub(super) async fn prepared(store: &Store, source: &RemoteProviderSource) -> StaticHandoff {
     let mut handoff = begin(store, source).await;
     handoff.reserve(store, source).await.unwrap();
     handoff

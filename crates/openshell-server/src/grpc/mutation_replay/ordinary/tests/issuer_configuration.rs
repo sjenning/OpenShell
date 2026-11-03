@@ -380,3 +380,87 @@ async fn concurrent_remote_configuration_retries_publish_one_grant_epoch() {
         2
     );
 }
+
+#[tokio::test]
+async fn deleting_builtin_refresh_keeps_profile_credentials_exportable_without_another_mint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token":"private-final-token","token_type":"Bearer","expires_in":3600}))).expect(1).mount(&server).await;
+    let (_directory, state, issuer, provider) = context(&server.uri()).await;
+    run(&state, authed_request(configure("private-secret")))
+        .await
+        .unwrap();
+    run(
+        &state,
+        authed_request(RotateProviderCredentialRequest {
+            provider: "issuer-provider".into(),
+            credential_key: "ACCESS_TOKEN".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            request_id: id(),
+        }),
+    )
+    .await
+    .unwrap();
+    run(
+        &state,
+        authed_request(DeleteProviderRefreshRequest {
+            provider: "issuer-provider".into(),
+            credential_key: "ACCESS_TOKEN".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            request_id: id(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    issuer
+        .watched
+        .wait_synchronized(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    let current = state
+        .store
+        .get_message::<Provider>(provider.object_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let source = state.remote_provider_mutations().unwrap().unwrap();
+    assert!(
+        source
+            .refresh_statuses(&state.store, &current, "")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut request = Request::new(openshell_core::proto::GetProviderCredentialsRequest {
+        workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+        name: "issuer-provider".into(),
+        credential_keys: vec!["ACCESS_TOKEN".into()],
+        minimum_remaining_lifetime: None,
+    });
+    request.extensions_mut().insert(Principal::Operator(
+        crate::auth::principal::OperatorPrincipal {
+            identity: Identity {
+                subject: "operator-test".into(),
+                display_name: None,
+                roles: vec!["operator".into()],
+                scopes: vec![],
+                provider: IdentityProvider::Mtls,
+            },
+            certificate_sha256: "verified-test-certificate".into(),
+        },
+    ));
+    let exported = crate::grpc::provider_credentials::handle(&state, request)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        exported.credentials["ACCESS_TOKEN"].value,
+        "private-final-token"
+    );
+    assert!(
+        exported.credentials["ACCESS_TOKEN"]
+            .expiration_time
+            .is_some()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}

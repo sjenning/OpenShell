@@ -168,8 +168,14 @@ or disable TLS verification to bypass that failure. Internal SSH/launch secrets
 still need the local credential store. Builtin refresh configuration publishes a
 new pending epoch without copying old values/expirations; delivery waits for the
 issuer's first mint. Rotate explicitly rather than changing source selection to
-force readiness. Custom configuration and refresh deletion remain unsupported
-remotely. Rotation requires complete published grant ownership and issuer
+force readiness. Registered single-output custom configuration is supported;
+custom profile refresh declarations and multi-output custom configuration are not.
+Refresh deletion requires issuer grant-detachment support and preserves published
+outputs as static credentials with their original expiry. Pending first values
+must be minted before deleting refresh. A durable transfer claim temporarily
+blocks conflicting provider mutations; check issuer availability and gateway
+reconciliation rather than removing journals to bypass it.
+Rotation requires complete published grant ownership and issuer
 metadata authorization. Reuse the same request ID when retrying configuration or
 rotation; a retired or replaced bundle makes replay unavailable, never permission
 to remint. Watch changes invalidate local push delivery,

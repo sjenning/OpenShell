@@ -452,6 +452,14 @@ impl WatchedIssuer {
         self.inner.invalidate_values()?;
         result
     }
+    pub async fn detach_grant(
+        &self,
+        request: refresh::DetachGrantRequest,
+    ) -> Result<refresh::DetachGrantResponse, Status> {
+        // Output metadata and values are unchanged. The grant watch observes
+        // refresh retirement; do not erase otherwise-valid secret metadata.
+        self.inner.client.detach_grant(request).await
+    }
     pub async fn rotate_grant(
         &self,
         request: refresh::RotateGrantRequest,

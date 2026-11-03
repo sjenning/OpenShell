@@ -300,6 +300,16 @@ impl RemoteIssuer {
         })
         .await
     }
+    pub async fn detach_grant(
+        &self,
+        message: refresh::DetachGrantRequest,
+    ) -> Result<refresh::DetachGrantResponse, Status> {
+        let mut client = self.refresh.clone();
+        self.call(message, ORDINARY, move |request| async move {
+            client.detach_grant(request).await
+        })
+        .await
+    }
     pub async fn rotate_grant(
         &self,
         message: refresh::RotateGrantRequest,

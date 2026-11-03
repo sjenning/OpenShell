@@ -18,6 +18,7 @@ pub struct RecoveryPage {
     pub cleaned: usize,
     pub conflicts: usize,
     pub failures: usize,
+    pub detached: usize,
     pub next_cursor: Option<ObjectCursor>,
 }
 /// Dropping the worker cancels scanning, not issuer-admitted work. Every
@@ -126,6 +127,17 @@ impl StaticHandoff {
                 continue;
             }
             let outcome = if handoff.state.phase == Phase::Published {
+                if handoff.is_detaching() {
+                    match handoff.finish_detach(store, source).await {
+                        Ok(()) => {
+                            result.cleaned += 1;
+                            result.detached += 1;
+                        }
+                        Err(error) if error.code() == Code::Aborted => result.conflicts += 1,
+                        Err(_) => result.failures += 1,
+                    }
+                    continue;
+                }
                 if !handoff.state.slots.values().any(|slot| slot.retiring) {
                     continue;
                 }
@@ -150,6 +162,7 @@ impl StaticHandoff {
         store: Arc<Store>,
         source: RemoteProviderSource,
         idle_timeout: Duration,
+        notifications: std::sync::Weak<crate::ServerState>,
     ) -> Result<HandoffReconciler, Status> {
         if idle_timeout < Duration::from_mins(1) || idle_timeout > Duration::from_hours(1) {
             return Err(invalid());
@@ -165,6 +178,11 @@ impl StaticHandoff {
                 if let Ok(page) =
                     Self::recover_page(&store, &source, cursor.as_ref(), 32, cutoff).await
                 {
+                    if page.detached > 0
+                        && let Some(state) = notifications.upgrade()
+                    {
+                        crate::config_delivery::publish_all_connected(&state);
+                    }
                     if page.failures > 0 {
                         tracing::warn!(
                             failures = page.failures,

@@ -12,6 +12,7 @@ use openshell_core::proto::credentials::{minter::v1 as minter_wire, refresh::v1 
 use std::{sync::Arc, time::Duration};
 use tonic::{Request, Response, Status};
 
+mod detach;
 mod kernel;
 mod maintenance;
 mod operations;
@@ -103,6 +104,7 @@ fn grant_status(state: &GrantState) -> Result<wire::GrantStatus, Status> {
         GrantPhase::Parked => "parked",
         GrantPhase::Deleting => "deleting",
         GrantPhase::Deleted => "deleted",
+        GrantPhase::Detached => "detached",
     };
     let action = match state.recovery_action {
         None => minter_wire::RecoveryAction::Unspecified,
@@ -175,6 +177,7 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
         let result = wire::ListStrategiesResponse {
             strategies,
             supports_pending_reservations: true,
+            supports_grant_detach: true,
         };
         check_size(&result)?;
         Ok(Response::new(result))
@@ -273,6 +276,28 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
             .run(
                 &coordination,
                 Box::pin(async move { runtime.delete(scope, request.grant, key).await }),
+            )
+            .await?;
+        Ok(Response::new(result))
+    }
+    async fn detach_grant(
+        &self,
+        request: Request<wire::DetachGrantRequest>,
+    ) -> Result<Response<wire::DetachGrantResponse>, Status> {
+        let scope = self.runtime.store.policy.authenticate(&request)?;
+        let request = request.into_inner();
+        check_size(&request)?;
+        valid_reference(&request.grant)?;
+        let key = idempotency(&request.idempotency_key)?;
+        let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
+        let runtime = self.runtime.clone();
+        let result = self
+            .runtime
+            .store
+            .coordinator
+            .run(
+                &coordination,
+                Box::pin(async move { runtime.detach(scope, request.grant, key).await }),
             )
             .await?;
         Ok(Response::new(result))

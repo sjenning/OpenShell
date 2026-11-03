@@ -1014,6 +1014,7 @@ pub(crate) async fn run_server(
                 store.clone(),
                 source.clone(),
                 Duration::from_secs(u64::from(config.cleanup_idle_seconds)),
+                Arc::downgrade(&state),
             )?;
             Ok::<_, tonic::Status>((delivery, cleanup))
         })

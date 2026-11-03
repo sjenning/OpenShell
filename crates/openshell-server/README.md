@@ -281,7 +281,13 @@ custom minters use the same publication path. The exact authenticated descriptor
 selects the sole output and separates required configuration and secret material;
 unknown fields, contrary secret annotations, conflicting enum selectors, profile
 refresh overrides, and ambiguous multi-output bindings fail before allocation.
-Custom profile declarations and refresh deletion remain unsupported remotely.
+Custom profile declarations remain unsupported remotely. Refresh deletion claims
+its published journal before calling issuer `DetachGrant`, then atomically removes
+grant annotations from provider handles and converts the journal to static
+ownership. Values, reference versions, and issuer expiration remain unchanged.
+Retirement and replay reject the claim while it is in progress; reconciliation
+resumes interrupted transfers and publishes delivery invalidation. Pending outputs
+without first values fail before claiming ownership.
 Delivery projects immutable source/grant epochs from issuer references, so
 rotation changes snapshot revisions without changing workload placeholder
 identity. Reconfiguration selects a new grant epoch and revokes that identity.
@@ -320,8 +326,9 @@ identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
 Static RPC adapters use this infrastructure when a remote source is explicitly
-selected. Builtin grant configuration uses `prepare_grant`; custom configuration
-and refresh deletion remain pending. The
+selected. Builtin and single-output custom grant configuration use
+`prepare_grant`; refresh deletion transfers complete published bundles to static
+ownership. The
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;

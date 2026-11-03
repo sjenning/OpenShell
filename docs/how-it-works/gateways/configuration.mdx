@@ -142,9 +142,10 @@ consistently. Removing or changing the table is not a migration mechanism.
 
 Remote mode supports static provider create/update/delete, delivery, operator
 export, refresh-status reads, builtin and single-output custom refresh
-configuration, and grant rotation. See the
-[custom minter requirements](/extensibility/credential-issuer#configure-a-custom-refresh).
-Refresh deletion remains unsupported in this experimental mode.
+configuration, grant rotation, and refresh deletion that preserves the latest
+published values as static credentials. See the
+[custom minter requirements](/extensibility/credential-issuer#configure-a-custom-refresh)
+and [refresh deletion behavior](/extensibility/credential-issuer#delete-refresh-without-deleting-credentials).
 Configuring refresh replaces the output references with a
 new pending epoch; delivery waits for the issuer's first mint. Previous values
 and their expiration metadata, including existing-value expiration supplied with

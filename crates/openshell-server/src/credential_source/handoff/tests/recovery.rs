@@ -128,7 +128,12 @@ async fn failed_cleanup_retains_ownership_and_does_not_block_an_unrelated_journa
         Phase::Aborting
     );
     assert!(
-        StaticHandoff::spawn_reconciler(std::sync::Arc::new(store), source, Duration::from_secs(1))
-            .is_err()
+        StaticHandoff::spawn_reconciler(
+            std::sync::Arc::new(store),
+            source,
+            Duration::from_secs(1),
+            std::sync::Weak::new()
+        )
+        .is_err()
     );
 }

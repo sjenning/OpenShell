@@ -48,6 +48,8 @@ pub enum GrantPhase {
     Parked,
     Deleting,
     Deleted,
+    /// Refresh is permanently stopped; output references now have static owners.
+    Detached,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GrantAttempt {
@@ -101,6 +103,7 @@ impl GrantState {
             GrantPhase::Parked => "parked",
             GrantPhase::Deleting => "deleting",
             GrantPhase::Deleted => "deleted",
+            GrantPhase::Detached => "detached",
         };
         GrantCheckpoint {
             identity: self.definition.identity.clone(),
@@ -111,7 +114,10 @@ impl GrantState {
                 next_refresh_at_ms: self.next_refresh_at_ms,
                 recovery_action: self.recovery_action,
                 rotation_requested: false,
-                deleting: matches!(self.phase, GrantPhase::Deleting | GrantPhase::Deleted),
+                deleting: matches!(
+                    self.phase,
+                    GrantPhase::Deleting | GrantPhase::Deleted | GrantPhase::Detached
+                ),
                 pending_cleanup: !self.retired.is_empty() || self.phase == GrantPhase::Publishing,
             },
         }
@@ -133,7 +139,10 @@ impl GrantState {
             || definition.config_backing.is_empty()
                 && !matches!(
                     self.phase,
-                    GrantPhase::Reserved | GrantPhase::Deleting | GrantPhase::Deleted
+                    GrantPhase::Reserved
+                        | GrantPhase::Deleting
+                        | GrantPhase::Deleted
+                        | GrantPhase::Detached
                 )
             || self.phase == GrantPhase::Reserved
                 && (!definition.config_backing.is_empty()
@@ -205,6 +214,14 @@ impl GrantState {
         {
             return Err(Status::data_loss("invalid durable grant phase"));
         }
+        if self.phase == GrantPhase::Detached
+            && (self.attempt.is_some()
+                || self.next_refresh_at_ms != i64::MAX
+                || self.recovery_action.is_some()
+                || !self.failure_code.is_empty())
+        {
+            return Err(Status::data_loss("invalid detached grant state"));
+        }
         if let Some(attempt) = &self.attempt
             && (attempt.id.is_empty()
                 || attempt
@@ -266,24 +283,25 @@ impl GrantState {
     }
     fn allows(&self, next: GrantPhase) -> bool {
         use GrantPhase::{
-            Deleted, Deleting, Failed, Parked, Pending, Publishing, Refreshed, Refreshing, Reserved,
+            Deleted, Deleting, Detached, Failed, Parked, Pending, Publishing, Refreshed,
+            Refreshing, Reserved,
         };
         self.phase == next
             || match self.phase {
                 Reserved => matches!(next, Pending | Deleting),
                 Pending | Failed | Refreshed => {
-                    matches!(next, Refreshing | Failed | Parked | Deleting)
+                    matches!(next, Refreshing | Failed | Parked | Deleting | Detached)
                 }
-                Refreshing => matches!(next, Publishing | Failed | Parked | Deleting),
-                Publishing => matches!(next, Refreshed | Deleting),
+                Refreshing => matches!(next, Publishing | Failed | Parked | Deleting | Detached),
+                Publishing => matches!(next, Refreshed | Deleting | Detached),
                 Parked => {
-                    next == Deleting
+                    matches!(next, Deleting | Detached)
                         || self.recovery_action == Some(RecoveryAction::Reauthorize)
                             && self.failure_code != "oauth_refresh_exchange_uncertain"
                             && next == Refreshing
                 }
                 Deleting => next == Deleted,
-                Deleted => false,
+                Deleted | Detached => false,
             }
     }
 }
@@ -492,7 +510,7 @@ impl GrantRepository {
             kind: "grant".to_string(),
             key: id.clone(),
             version: state.version,
-            deleted: state.phase == GrantPhase::Deleted,
+            deleted: matches!(state.phase, GrantPhase::Deleted | GrantPhase::Detached),
         });
         Ok((
             Mutation::Put {

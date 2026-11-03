@@ -259,7 +259,11 @@ and fails if that epoch was retired or replaced. SDK/API clients may configure
 registered single-output custom minters with `strategy_name` and an unspecified
 legacy enum. The issuer descriptor classifies material; custom profile refresh
 declarations and multi-output custom configuration remain unsupported. Refresh
-deletion remains unsupported remotely. Consult the installed CLI help and published
+deletion preserves the latest published output bundle as static credentials,
+including its original token expiration. Restart processes holding the old
+refresh-managed workload handle after deletion. It fails before changing configuration
+if no first values exist; rotate first, or delete the provider if values are not
+needed. Interrupted transfers resume through gateway recovery. Consult the installed CLI help and published
 gateway configuration reference before selecting this experimental mode.
 
 Gateway-managed refresh credentials use an identity-stable workload handle.

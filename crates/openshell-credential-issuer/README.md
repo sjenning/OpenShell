@@ -211,6 +211,23 @@ and issuer-service transport remain separate implementation work. The private
 store, refresh, and minter RPC contracts live under `proto/`; they are not served
 by the gateway listener.
 
+## Encrypted mint-result spools
+
+`mint_spool::MintResultSpool` seals a known-success result, including rotated
+material, using the existing encrypted-database credential crypto adapter. The
+adapter uses `openshell-crypto`; this adds no independent cryptographic backend.
+Authenticated envelope identity binds gateway namespace, immutable owner, grant
+ID, authorization epoch, and attempt. Replicas must share the explicitly
+configured encryption key. Ciphertexts and crypto errors expose no result values.
+
+A durable grant adapter must persist these bytes with its revision/epoch/attempt
+fences before external material/output staging. Recovery can then finish the
+known result instead of repeating an upstream exchange. Even expired results
+remain decryptable: recovery must preserve rotated material before deciding
+whether fresh outputs need another mint. The helper bounds source/envelope sizes
+and does not perform persistence, publication, or recovery itself; standalone
+grant wiring remains pending.
+
 ## Remote minter adapter
 
 `remote_minter::RemoteMinter` connects using private-CA mTLS through

@@ -77,6 +77,13 @@ keys or launch material to an issuer: `InternalSecretStore` remains local and
 retains its own backend ownership. The issuer can compose these same first-party
 drivers without depending on `openshell-server`.
 
+These are raw legacy driver requests, not an authorization boundary. In
+particular, the database driver binds its legacy `provider` and credential-key
+fields. An issuer service must derive a stable physical owner from authenticated
+namespace and immutable owner metadata (or retain the original physical owner
+with its backing). Do not pass a mutable display name or rely on extra request
+fields that a particular driver does not enforce.
+
 ## Standalone persistence
 
 `repository::Repository` owns a separate, versioned SQLite/PostgreSQL schema.
@@ -99,6 +106,18 @@ the data pool. SQLite relies on shared engine-local exclusion and durable CAS;
 use PostgreSQL for multiple issuer replicas. Schema initialization rejects newer
 versions and serializes PostgreSQL migrations across startup replicas. The
 repository is not yet wired to the store/refresh RPC hosts.
+
+`Repository::backend_objects` adapts the encrypted database driver into a
+reserved physical-object partition that authenticated gateway scopes cannot
+select. It preserves encrypted envelopes, names, labels, and revision fences
+without gateway storage or provider DTOs.
+
+`Repository::references` adapts scoped metadata to `ReferenceRegistry`, enforcing
+workspace authorization, immutable owners, monotonic value versions, retained
+retired backings, and permanent tombstones. Cleanup-only updates advance storage
+revisions without emitting value-change events. `prepare_many` exposes fenced
+writes and events so the host can atomically commit them with grant receipts and
+owner checks. SQLite and PostgreSQL tests cover that combined publication path.
 
 ## Refresh coordination and minters
 

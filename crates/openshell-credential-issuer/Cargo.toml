@@ -37,6 +37,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+toml = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 tower = { workspace = true }

@@ -4,6 +4,9 @@
 //! Issuer-owned persistence, independent of gateway records and serialization.
 
 use crate::auth::GatewayScope;
+
+mod backend_objects;
+pub mod references;
 use sqlx::{Any, AnyPool, Row, Transaction, any::AnyPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},

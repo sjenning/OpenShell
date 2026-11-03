@@ -4,6 +4,70 @@
 use super::*;
 use tokio::time::timeout;
 
+#[tokio::test]
+#[ignore = "requires a disposable OPENSHELL_TEST_ISSUER_POSTGRES_URL"]
+async fn postgres_typed_references_publish_with_receipts_and_ignore_cleanup_only_revisions() {
+    use crate::{ReferenceReplacement, ReferenceStateStore, SecretOwner};
+    let (a, b) = replicas().await;
+    let refs = a.repository.references(&test_scope(&a.creator));
+    let peer = b.repository.references(&test_scope(&b.creator));
+    let owner = |key: &str| SecretOwner {
+        workspace: "default".to_string(),
+        provider_id: "provider-id".to_string(),
+        credential_key: key.to_string(),
+    };
+    for key in ["a", "b"] {
+        refs.registry()
+            .adopt(key, &owner(key), format!("old-{key}").into_bytes())
+            .await
+            .unwrap();
+    }
+    a.commit(
+        &[Mutation::Put {
+            kind: "grant-v1".to_string(),
+            key: "grant".to_string(),
+            expected: None,
+            payload: b"in-progress".to_vec(),
+        }],
+        &[],
+    )
+    .await
+    .unwrap();
+    let replacements = ["a", "b"].map(|key| ReferenceReplacement {
+        reference: key.to_string(),
+        owner: owner(key),
+        expected_version: 1,
+        backing: format!("new-{key}").into_bytes(),
+        expiration_time_ms: None,
+    });
+    let writes = refs
+        .registry()
+        .prepare_replacements(&replacements)
+        .await
+        .unwrap();
+    let (mut mutations, events) = refs.prepare_many(&writes).await.unwrap();
+    mutations.push(Mutation::Put {
+        kind: "grant-v1".to_string(),
+        key: "grant".to_string(),
+        expected: Some(1),
+        payload: b"completed-attempt".to_vec(),
+    });
+    a.commit(&mutations, &events).await.unwrap();
+    for key in ["a", "b"] {
+        assert_eq!(peer.load(key).await.unwrap().unwrap().state.version, 2);
+    }
+    assert_eq!(
+        b.load("grant-v1", "grant").await.unwrap().unwrap().payload,
+        b"completed-attempt"
+    );
+    peer.registry()
+        .acknowledge_deletion("a", &owner("a"), b"old-a")
+        .await
+        .unwrap();
+    assert_eq!(refs.load("a").await.unwrap().unwrap().revision, 3);
+    assert_eq!(a.events_after(0, 10).await.unwrap().len(), 4);
+}
+
 async fn replicas() -> (ScopedRepository, ScopedRepository) {
     let url = std::env::var("OPENSHELL_TEST_ISSUER_POSTGRES_URL")
         .expect("set a disposable OPENSHELL_TEST_ISSUER_POSTGRES_URL");

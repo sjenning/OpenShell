@@ -30,6 +30,54 @@ fn put() -> wire::PutSecretRequest {
     }
 }
 #[tokio::test]
+async fn delivery_cache_cannot_satisfy_refresh_or_operator_export_reads() {
+    use std::sync::atomic::Ordering;
+    let issuer = issuer::Issuer::start().await;
+    let stored = issuer.raw.put_secret(put()).await.unwrap();
+    let source = RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap();
+    let mut provider = provider();
+    provider.credential_handles.insert(
+        "TOKEN".into(),
+        source.reference_handle(&stored.reference, None).unwrap(),
+    );
+    source.register_provider(&provider).unwrap();
+    issuer
+        .watched
+        .wait_synchronized(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let first = source
+        .resolve_provider_handles(&provider, current_time_ms())
+        .await
+        .unwrap();
+    assert_eq!(first.values["TOKEN"], "remote-first");
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 1);
+    issuer.fail_resolves.store(true, Ordering::SeqCst);
+    for purpose in [
+        CredentialReadPurpose::Refresh,
+        CredentialReadPurpose::OperatorExport,
+    ] {
+        assert_eq!(
+            source
+                .resolve_provider_handles_for(&provider, current_time_ms(), purpose)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+    }
+    assert_eq!(
+        source
+            .resolve_provider_handles(&provider, current_time_ms())
+            .await
+            .unwrap()
+            .values["TOKEN"],
+        "remote-first"
+    );
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn remote_reader_projects_versions_without_rewriting_provider_or_touching_internal_storage() {
     let issuer = issuer::Issuer::start().await;
     let first = issuer.raw.put_secret(put()).await.unwrap();

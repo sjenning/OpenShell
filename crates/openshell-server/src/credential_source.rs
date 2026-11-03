@@ -13,6 +13,23 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tonic::Status;
 
+/// Trusted gateway call-site purpose, never a public request selector. Issuer
+/// caches bind this purpose alongside immutable owner and explicit version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialReadPurpose {
+    SandboxDelivery,
+    OperatorExport,
+    Refresh,
+}
+impl CredentialReadPurpose {
+    fn wire(self) -> wire::ResolvePurpose {
+        match self {
+            Self::SandboxDelivery => wire::ResolvePurpose::SandboxDelivery,
+            Self::OperatorExport => wire::ResolvePurpose::OperatorExport,
+            Self::Refresh => wire::ResolvePurpose::Refresh,
+        }
+    }
+}
 #[async_trait]
 pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
     /// Project current expiration without fetching secret values. Reconciled
@@ -34,6 +51,15 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
         &self,
         provider: &Provider,
         now_ms: i64,
+    ) -> Result<ResolvedProviderCredentials, Status> {
+        self.resolve_provider_handles_for(provider, now_ms, CredentialReadPurpose::SandboxDelivery)
+            .await
+    }
+    async fn resolve_provider_handles_for(
+        &self,
+        provider: &Provider,
+        now_ms: i64,
+        purpose: CredentialReadPurpose,
     ) -> Result<ResolvedProviderCredentials, Status>;
 }
 #[async_trait]
@@ -52,10 +78,11 @@ impl ProviderCredentialSource for CredentialRuntime {
     ) -> Result<HashMap<String, u64>, Status> {
         references::versions(store, provider).await
     }
-    async fn resolve_provider_handles(
+    async fn resolve_provider_handles_for(
         &self,
         provider: &Provider,
         now_ms: i64,
+        _purpose: CredentialReadPurpose,
     ) -> Result<ResolvedProviderCredentials, Status> {
         Self::resolve_provider_handles(self, provider, now_ms).await
     }
@@ -263,10 +290,11 @@ impl ProviderCredentialSource for RemoteProviderSource {
             .map(|(key, value)| (key, value.version))
             .collect())
     }
-    async fn resolve_provider_handles(
+    async fn resolve_provider_handles_for(
         &self,
         provider: &Provider,
         now_ms: i64,
+        purpose: CredentialReadPurpose,
     ) -> Result<ResolvedProviderCredentials, Status> {
         let metadata = self.metadata(provider)?;
         let mut result = ResolvedProviderCredentials::default();
@@ -301,7 +329,7 @@ impl ProviderCredentialSource for RemoteProviderSource {
             .client
             .resolve_secrets(wire::ResolveSecretsRequest {
                 secrets: requests,
-                purpose: wire::ResolvePurpose::SandboxDelivery as i32,
+                purpose: purpose.wire() as i32,
             })
             .await?;
         for value in response.secrets {

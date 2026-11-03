@@ -241,6 +241,10 @@ versions through this selection. Metadata checks and intermediate-cache hits do
 not read issuer values; misses resolve through the selected source and recheck
 the captured version before exchanging the subject. Tests keep issuer metadata
 healthy while its value backend is unavailable and prove this ordering.
+`CredentialReadPurpose` keeps sandbox delivery, refresh exchanges, and operator
+export cache entries separate. Subject misses select refresh purpose; a cached
+delivery value cannot satisfy either of the other purposes. Privileged export
+RPC forwarding still needs issuer-owned refresh integration.
 Public provider get/list calls project expiration through the selected source
 before redaction, without resolving values or rewriting records. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.

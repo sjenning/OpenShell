@@ -4635,7 +4635,11 @@ async fn resolve_subject_token_credential(
 
     if provider.credential_handles.contains_key(credential_key) {
         let resolved = credentials
-            .resolve_provider_handles(provider, crate::persistence::current_time_ms())
+            .resolve_provider_handles_for(
+                provider,
+                crate::persistence::current_time_ms(),
+                crate::credential_source::CredentialReadPurpose::Refresh,
+            )
             .await
             .map_err(token_grant_dependency_status)?;
         if let Some(value) = resolved

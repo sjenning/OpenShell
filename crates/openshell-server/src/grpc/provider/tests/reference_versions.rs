@@ -53,10 +53,11 @@ impl crate::credential_source::ProviderCredentialSource for Source {
             })
             .collect())
     }
-    async fn resolve_provider_handles(
+    async fn resolve_provider_handles_for(
         &self,
         provider: &Provider,
         _now: i64,
+        _purpose: crate::credential_source::CredentialReadPurpose,
     ) -> Result<crate::credentials::ResolvedProviderCredentials, tonic::Status> {
         let version = self.0.load(std::sync::atomic::Ordering::SeqCst);
         Ok(crate::credentials::ResolvedProviderCredentials {

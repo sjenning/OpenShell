@@ -264,17 +264,17 @@ selection rather than persisting refresh material locally. Production remote
 gateway configuration, grant mutation routing, and watch-driven config-delivery
 fanout remain separate work.
 
-### Static credential handoff journal
+### Credential handoff ownership journal
 
 `credential_source::handoff::StaticHandoff` provides the gateway-local,
-value-free ownership primitive for remote static credential mutations. It writes
+value-free ownership primitive for remote static credentials and grant bundles. It writes
 `credential_issuer_handoff_v1` before contacting the issuer, reserves every
 reference before sending any value, and journals a one-shot Filling phase before
 value transmission. Interrupted or failed fills recover only through revocation;
 they cannot mix values from a new request into an old partial attempt. No provider
 value or secret-dependent whole-request fingerprint enters this journal.
 
-A ready handoff verifies the complete version-two metadata batch and joins its
+A ready static handoff verifies the complete version-two metadata batch and joins its
 Published marker with the exact provider create/update in one gateway transaction.
 The provider payload must contain only the expected issuer bindings and no inline
 values. Cleanup first claims the journal revision, then replays value-free
@@ -282,7 +282,8 @@ reservations to discover lost allocation responses and revokes every known
 identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
-This is library infrastructure, not production mutation routing. The optional
+Static RPC adapters use this infrastructure when a remote source is explicitly
+selected; production source selection and grant RPC adapters remain pending. The optional
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;
@@ -292,7 +293,7 @@ advance the raw scan cursor even when no source/provider rows match.
 The production gateway does not start this worker yet. Published journals refuse direct abort. `publish_replacing` joins
 old-journal retirement claims to the replacement transaction, and `delete_provider`
 joins them to provider deletion. Both require complete immutable ownership of the
-current static bindings. Cleanup reloads those committed claims before issuer
+current bindings. Cleanup reloads those committed claims before issuer
 revocation; it never infers permission from a missing provider or a display name.
 Stale ownership rolls back the whole mutation. Partial replacements preserve
 untouched bindings without resolving their values. Old journals mark only replaced
@@ -309,6 +310,26 @@ backing-allocation-to-candidate-journal crash window is not closed by this gatew
 journal. Real mTLS tests cover round trips, ambiguous allocation recovery,
 one-shot fill failure, cleanup/publication fences, rollback, immutable ownership,
 rejection of inline values, and atomic label-index replacement/removal.
+
+`begin_grant` journals a value-free `GrantPlan` (strategy, semantic output/key
+mapping, primary key, and scheduling bounds). `reserve` allocates and records the
+grant and every output identity together before `fill_grant` transmits any
+configuration or refresh material. A lost reservation response is recoverable
+from that recipe alone. Grant fill is one-shot: it journals Filling, initializes
+the issuer grant, then requests its first fresh output bundle. Failure or
+interruption requires abandonment, not a retry with replacement inputs. No
+configuration, material, or secret-dependent fingerprint enters gateway storage.
+
+Grant bindings include the issuer grant ID. Publication allows later value
+versions when the issuer refreshed before gateway publication, without changing
+those bindings. Replacement/deletion claims retire every output of a grant as
+one bundle; partial retirement fails before the provider transaction commits.
+Metadata-only updates preserve the bundle without reading values. Recovery
+replays the grant reservation, deletes the known grant, and forgets the journal
+only after confirmed issuer revocation. A cleanup revision claim fences late
+initialization/mint completion from gateway publication. These grant preparation
+primitives remain library-only; they do not yet enable public refresh mutations
+under remote selection.
 
 ## Operator credential export
 

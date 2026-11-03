@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Value-free gateway ownership journal for static issuer credentials.
+//! Value-free gateway ownership journal for issuer credentials.
 //!
 //! Provider publication joins the journal fence in the gateway database; issuer values
 //! and secret-dependent request fingerprints never enter this journal.
@@ -11,7 +11,9 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tonic::Status;
+mod grants;
 mod partial;
+pub use grants::GrantPlan;
 mod recovery;
 mod retirement;
 pub use recovery::{HandoffPage, HandoffReconciler, RecoveryPage};
@@ -45,6 +47,8 @@ struct State {
     expected_provider_version: Option<u64>,
     phase: Phase,
     slots: BTreeMap<String, Slot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<grants::GrantSlot>,
 }
 /// The payload contains only immutable ownership, operation IDs, and references.
 /// Clones may become stale: every write and publication fences their revision.
@@ -80,6 +84,24 @@ impl StaticHandoff {
         provider: &Provider,
         keys: &[String],
         expected_provider_version: Option<u64>,
+    ) -> Result<Self, Status> {
+        Self::begin_inner(
+            store,
+            source,
+            provider,
+            keys,
+            expected_provider_version,
+            None,
+        )
+        .await
+    }
+    async fn begin_inner(
+        store: &Store,
+        source: &RemoteProviderSource,
+        provider: &Provider,
+        keys: &[String],
+        expected_provider_version: Option<u64>,
+        grant: Option<grants::GrantSlot>,
     ) -> Result<Self, Status> {
         if !source.client.capabilities().supports_pending_reservations {
             return Err(Status::failed_precondition(
@@ -143,6 +165,7 @@ impl StaticHandoff {
             expected_provider_version,
             phase: Phase::Preparing,
             slots,
+            grant,
         };
         let result = store
             .put_if(
@@ -177,6 +200,10 @@ impl StaticHandoff {
             || state.workspace != record.workspace
             || state.slots.is_empty()
             || state.slots.len() > 64
+            || state
+                .grant
+                .as_ref()
+                .is_some_and(|grant| !grant.valid(&state))
             || state
                 .slots
                 .values()
@@ -256,6 +283,9 @@ impl StaticHandoff {
         if self.state.phase != Phase::Preparing {
             return Err(invalid());
         }
+        if self.state.grant.is_some() {
+            return self.reserve_grant(store, source).await;
+        }
         let keys: Vec<_> = self.state.slots.keys().cloned().collect();
         for key in keys {
             if self.state.slots[&key].reference.is_some() {
@@ -291,6 +321,7 @@ impl StaticHandoff {
     ) -> Result<(), Status> {
         self.source(source)?;
         if self.state.phase != Phase::Preparing
+            || self.state.grant.is_some()
             || values.len() != self.state.slots.len()
             || values.keys().any(|key| !self.state.slots.contains_key(key))
             || self
@@ -347,8 +378,10 @@ impl StaticHandoff {
             .map(|(key, slot)| {
                 Ok((
                     key.clone(),
-                    source
-                        .reference_handle(slot.reference.as_deref().ok_or_else(invalid)?, None)?,
+                    source.reference_handle(
+                        slot.reference.as_deref().ok_or_else(invalid)?,
+                        self.grant_id(),
+                    )?,
                 ))
             })
             .collect()
@@ -464,7 +497,7 @@ impl StaticHandoff {
         {
             return Err(invalid());
         }
-        source
+        let metadata = source
             .client
             .resolve_secrets(wire::ResolveSecretsRequest {
                 purpose: wire::ResolvePurpose::MetadataInspection as i32,
@@ -477,12 +510,23 @@ impl StaticHandoff {
                             request_id: key.clone(),
                             owner: Some(self.owner(key)),
                             reference: slot.reference.clone().ok_or_else(invalid)?,
-                            expected_version: Some(2),
+                            expected_version: if self.state.grant.is_some() {
+                                None
+                            } else {
+                                Some(2)
+                            },
                         })
                     })
                     .collect::<Result<Vec<_>, Status>>()?,
             })
             .await?;
+        if metadata
+            .secrets
+            .iter()
+            .any(|secret| secret.pending_value || secret.version < 2)
+        {
+            return Err(invalid());
+        }
         let labels = provider
             .metadata
             .as_ref()
@@ -546,6 +590,9 @@ impl StaticHandoff {
         }
         self.state.phase = Phase::Aborting;
         self.save(store).await?;
+        if self.state.grant.is_some() {
+            return self.abort_grant(store, source).await;
+        }
         let keys: Vec<_> = self.state.slots.keys().cloned().collect();
         for key in keys {
             let reserved = source

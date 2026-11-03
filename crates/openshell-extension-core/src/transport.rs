@@ -137,7 +137,7 @@ pub enum TransportError {
 pub async fn connect_channel(config: &ExtensionChannelConfig) -> Result<Channel, TransportError> {
     validate_config(config)?;
     if config.client_identity.is_some() {
-        return client_identity::connect(config).await;
+        return Box::pin(client_identity::connect(config)).await;
     }
     if let Some(path) = config.endpoint.strip_prefix("unix://") {
         return connect_unix(PathBuf::from(path)).await;
@@ -244,6 +244,14 @@ mod tests {
         fn call(&mut self, _request: http::Request<Body>) -> Self::Future {
             ready(Ok(http::Response::new(Body::empty())))
         }
+    }
+
+    #[test]
+    fn channel_future_remains_small_for_nested_callers() {
+        let config = ExtensionChannelConfig::new("https://extension.test");
+        let future = connect_channel(&config);
+        let size = size_of_val(&future);
+        assert!(size < 4096, "extension channel future grew to {size} bytes");
     }
 
     #[test]

@@ -30,6 +30,55 @@ fn put() -> wire::PutSecretRequest {
     }
 }
 #[tokio::test]
+async fn remote_refresh_epochs_are_source_and_grant_bound_without_resolving_values() {
+    use std::sync::atomic::Ordering;
+    let issuer = issuer::Issuer::start().await;
+    let source = RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap();
+    let other = RemoteProviderSource::new("other", issuer.watched.clone()).unwrap();
+    let mut provider = provider();
+    provider.credential_handles = HashMap::from([
+        (
+            "TOKEN".into(),
+            source
+                .reference_handle("first-reference", Some("first-grant"))
+                .unwrap(),
+        ),
+        (
+            "STATIC".into(),
+            source.reference_handle("static-reference", None).unwrap(),
+        ),
+    ]);
+    let first = source.refresh_authorization_epochs(&provider).unwrap();
+    assert_eq!(first.len(), 1);
+    assert!(first.contains_key("TOKEN"));
+    provider.metadata.as_mut().unwrap().resource_version += 1;
+    provider.credential_expiration_times.insert(
+        "TOKEN".into(),
+        openshell_core::time::timestamp_from_millis(1).unwrap(),
+    );
+    assert_eq!(
+        source.refresh_authorization_epochs(&provider).unwrap(),
+        first
+    );
+    assert!(other.refresh_authorization_epochs(&provider).is_err());
+    provider.credential_handles.insert(
+        "TOKEN".into(),
+        source
+            .reference_handle("second-reference", Some("second-grant"))
+            .unwrap(),
+    );
+    assert_ne!(
+        source.refresh_authorization_epochs(&provider).unwrap(),
+        first
+    );
+    provider.credential_handles.insert(
+        "STATIC".into(),
+        other.reference_handle("static-reference", None).unwrap(),
+    );
+    assert!(source.refresh_authorization_epochs(&provider).is_err());
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
 async fn delivery_cache_cannot_satisfy_refresh_or_operator_export_reads() {
     use std::sync::atomic::Ordering;
     let issuer = issuer::Issuer::start().await;

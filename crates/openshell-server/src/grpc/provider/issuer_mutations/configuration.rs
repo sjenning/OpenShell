@@ -118,6 +118,29 @@ pub(in crate::grpc::provider) async fn configure(
     {
         return Err(invalid());
     }
+    publish_grant(
+        state,
+        source,
+        provider,
+        plan,
+        &config.material,
+        &material,
+        facts,
+    )
+    .await
+}
+
+/// Shared publication path for built-in and registered custom strategies. Only
+/// the value-free plan is journaled; inputs go directly to issuer initialization.
+pub(super) async fn publish_grant(
+    state: &Arc<ServerState>,
+    source: &RemoteProviderSource,
+    provider: &Provider,
+    plan: GrantPlan,
+    config: &HashMap<String, String>,
+    material: &HashMap<String, String>,
+    facts: &Facts,
+) -> Result<Response<ConfigureProviderRefreshResponse>, Status> {
     let owned = StaticHandoff::published_for_provider(&state.store, source, provider).await?;
     let mut candidate = provider.clone();
     for handoff in owned.iter().filter(|handoff| handoff.grant_id().is_some()) {
@@ -151,7 +174,7 @@ pub(in crate::grpc::provider) async fn configure(
     let result = async {
         handoff.reserve(&state.store, source).await?;
         handoff
-            .prepare_grant(&state.store, source, &config.material, &material)
+            .prepare_grant(&state.store, source, config, material)
             .await?;
         let status = source
             .issuer()

@@ -39,6 +39,15 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
     fn remote_mutations(&self) -> Option<&RemoteProviderSource> {
         None
     }
+    /// Immutable refresh epochs carried by source-owned references. Versions
+    /// change within an epoch and must not change workload placeholder identity.
+    /// Value resolution still authenticates the complete reference/owner set.
+    fn refresh_authorization_epochs(
+        &self,
+        _provider: &Provider,
+    ) -> Result<HashMap<String, String>, Status> {
+        Ok(HashMap::new())
+    }
     /// Read issuer-owned refresh metadata. A selected source must not fall back
     /// to unrelated embedded grants, even when it is otherwise read-only.
     async fn refresh_statuses(
@@ -359,6 +368,22 @@ impl RemoteProviderSource {
 }
 #[async_trait]
 impl ProviderCredentialSource for RemoteProviderSource {
+    fn refresh_authorization_epochs(
+        &self,
+        provider: &Provider,
+    ) -> Result<HashMap<String, String>, Status> {
+        let mut epochs = HashMap::new();
+        for (key, handle) in &provider.credential_handles {
+            // Gateway handoff publication fixes these bindings; decode checks
+            // structure/registration, not grant membership. Issuer grants fix
+            // their output references, and snapshot resolution authenticates
+            // every reference owner and version before returning any binding.
+            if let Some(grant) = self.decode(handle)?.grant {
+                epochs.insert(key.clone(), format!("issuer:{}:{grant}", self.name));
+            }
+        }
+        Ok(epochs)
+    }
     async fn refresh_statuses(
         &self,
         store: &Store,

@@ -1404,7 +1404,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
             (None, None) => None,
         };
         let has_no_usable_endpoint = effective_endpoints.is_some_and(Vec::is_empty);
-        let refresh_epochs = refresh_authorization_epochs_by_key(record)?;
+        let refresh_epochs = refresh_authorization_epochs_by_key(record, credentials)?;
 
         for (key, value) in &provider.credentials {
             if accepted_stored_credential_keys
@@ -1684,8 +1684,9 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
 
 fn refresh_authorization_epochs_by_key(
     record: &ProviderEnvironmentRecord,
+    credentials: &dyn crate::credential_source::ProviderCredentialSource,
 ) -> Result<HashMap<String, String>, Status> {
-    let mut epochs = HashMap::new();
+    let mut epochs = credentials.refresh_authorization_epochs(&record.provider)?;
     for state in &record.refresh_states {
         if state
             .metadata
@@ -5082,18 +5083,6 @@ pub(super) async fn handle_configure_provider_refresh(
             "credential_key must be a valid environment variable name",
         ));
     }
-    let strategy =
-        openshell_providers::resolve_refresh_strategy(request.strategy, &request.strategy_name)
-            .map_err(Status::invalid_argument)?;
-    if strategy == ProviderCredentialRefreshStrategy::Unspecified {
-        return Err(Status::invalid_argument("refresh strategy is required"));
-    }
-    if !crate::provider_refresh::is_gateway_mintable_strategy(strategy) {
-        return Err(Status::invalid_argument(format!(
-            "refresh strategy '{}' is not gateway-mintable; update current credentials with provider update instead",
-            crate::provider_refresh::refresh_strategy_name(strategy as i32)
-        )));
-    }
     if request.material.len() > MAX_PROVIDER_CONFIG_ENTRIES {
         return Err(Status::invalid_argument(format!(
             "material exceeds maximum entries ({} > {MAX_PROVIDER_CONFIG_ENTRIES})",
@@ -5127,6 +5116,21 @@ pub(super) async fn handle_configure_provider_refresh(
                 key.len()
             )));
         }
+    }
+    if request.strategy_name.starts_with("custom:") {
+        return issuer_mutations::configure_custom(state, &workspace, request, &replay_facts).await;
+    }
+    let strategy =
+        openshell_providers::resolve_refresh_strategy(request.strategy, &request.strategy_name)
+            .map_err(Status::invalid_argument)?;
+    if strategy == ProviderCredentialRefreshStrategy::Unspecified {
+        return Err(Status::invalid_argument("refresh strategy is required"));
+    }
+    if !crate::provider_refresh::is_gateway_mintable_strategy(strategy) {
+        return Err(Status::invalid_argument(format!(
+            "refresh strategy '{}' is not gateway-mintable; update current credentials with provider update instead",
+            crate::provider_refresh::refresh_strategy_name(strategy as i32)
+        )));
     }
     if request
         .material

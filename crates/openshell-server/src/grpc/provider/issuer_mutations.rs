@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Remote provider mutations never enter local credential storage.
 mod configuration;
+mod custom;
 mod refresh;
 use crate::{
     credential_source::{RemoteProviderSource, handoff::StaticHandoff},
     persistence::{AtomicWrite, Store},
 };
 pub(super) use configuration::{Configuration, configure};
+pub(super) use custom::configure_custom;
 use openshell_core::{ObjectId as _, ObjectName as _, ObjectWorkspace as _, proto::Provider};
 use prost::Message as _;
 pub(super) use refresh::rotate;

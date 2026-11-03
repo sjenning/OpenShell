@@ -3,6 +3,7 @@
 
 use super::*;
 mod issuer_configuration;
+mod issuer_custom;
 mod issuer_refresh;
 use crate::auth::identity::{Identity, IdentityProvider};
 use crate::auth::principal::UserPrincipal;

@@ -155,9 +155,9 @@ fences roll back outputs, grant state, receipts, and events together.
 
 `service::CredentialRefreshService` composes this adapter with the shared engine
 and autonomous recovery/sweep. Gateway source selection is explicit; public
-builtin grant configuration and rotation use the selected issuer with value-free
-gateway journals and metadata-only replay. Custom configuration and refresh
-deletion remain pending.
+builtin and single-output custom grant configuration and rotation use the selected
+issuer with value-free gateway journals and metadata-only replay. Custom profile
+declarations, multi-output custom configuration, and refresh deletion remain pending.
 
 ## Refresh coordination and minters
 
@@ -272,8 +272,9 @@ malformed, or unknown failure details park the attempt for investigation; networ
 errors and deadlines may follow an upstream side effect. Arbitrary remote status
 messages, failure codes, and subtypes are discarded in favor of static local
 diagnostics. Configured minter services remain responsible for authenticating
-and authorizing issuer identities. Gateway custom-profile/configuration wiring
-and a hosted minter server adapter remain future work.
+and authorizing issuer identities. The gateway configures registered single-output
+custom strategies through its selected issuer. Custom profile declarations and
+multi-output configuration remain future work.
 
 ## CredentialStore RPC host
 
@@ -319,8 +320,9 @@ The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. The gateway has selected-source delivery, static
 mutation journaling, and operator-export adapters. Gateway TOML source selection
 also starts delivery invalidation and cleanup reconciliation. Public grant
-configuration for builtin strategies and rotation use that source; custom
-configuration and refresh deletion remain pending.
+configuration for builtin and single-output custom strategies and rotation use
+that source; custom profile declarations, multi-output custom configuration, and
+refresh deletion remain pending.
 
 ### Value-free static reservations
 

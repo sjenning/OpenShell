@@ -255,8 +255,11 @@ storage. It replaces the output epoch with pending references rather than
 copying old values/expirations. Delivery waits for the issuer scheduler or
 `provider refresh rotate` to publish first values. For SDK/API clients, reuse a
 stable request ID for configuration/rotation retries; replay returns metadata without reminting,
-and fails if that epoch was retired or replaced. Remote custom configuration and
-refresh deletion remain unsupported. Consult the installed CLI help and published
+and fails if that epoch was retired or replaced. SDK/API clients may configure
+registered single-output custom minters with `strategy_name` and an unspecified
+legacy enum. The issuer descriptor classifies material; custom profile refresh
+declarations and multi-output custom configuration remain unsupported. Refresh
+deletion remains unsupported remotely. Consult the installed CLI help and published
 gateway configuration reference before selecting this experimental mode.
 
 Gateway-managed refresh credentials use an identity-stable workload handle.

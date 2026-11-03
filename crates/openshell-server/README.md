@@ -276,8 +276,16 @@ enter local refresh state or handoff records. The issuer's pinned descriptor
 classifies both encrypted input groups. New references are pending until issuer
 scheduling or explicit freshness publishes values; old values/expiry metadata do
 not seed the new epoch. Reconfiguration retires complete old bundles, and a
-request-ID replay cannot select the replacement epoch. Custom configuration and
-refresh deletion remain unsupported remotely. Rotation uses the selected issuer:
+request-ID replay cannot select the replacement epoch. Registered single-output
+custom minters use the same publication path. The exact authenticated descriptor
+selects the sole output and separates required configuration and secret material;
+unknown fields, contrary secret annotations, conflicting enum selectors, profile
+refresh overrides, and ambiguous multi-output bindings fail before allocation.
+Custom profile declarations and refresh deletion remain unsupported remotely.
+Delivery projects immutable source/grant epochs from issuer references, so
+rotation changes snapshot revisions without changing workload placeholder
+identity. Reconfiguration selects a new grant epoch and revokes that identity.
+Rotation uses the selected issuer:
 it validates complete published ownership and authoritative metadata-only owner
 checks before minting, then fences the original bundle again before returning.
 Workspace mutation exclusion prevents concurrent gateway rebinding. Neither

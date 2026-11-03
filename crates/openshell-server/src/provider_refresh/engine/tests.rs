@@ -66,6 +66,30 @@ fn names_and_storage_revisions_are_not_grant_identity_but_reauthorization_is() {
 }
 
 #[test]
+fn parked_investigation_remains_uncertain_after_failure_recording() {
+    let mut stored = state();
+    stored.status = "investigation_required".to_string();
+    stored.recovery_action = ProviderCredentialRefreshRecoveryAction::Investigate as i32;
+    stored.next_refresh_at_ms = i64::MAX;
+    for trigger in [RefreshTrigger::Automatic, RefreshTrigger::ExplicitRotation] {
+        assert_eq!(
+            grant_checkpoint(&stored)
+                .unwrap()
+                .ensure_mintable(trigger, 100)
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+    // Known-safe investigation retries retain legacy short-backoff semantics.
+    stored.next_refresh_at_ms = 101;
+    grant_checkpoint(&stored)
+        .unwrap()
+        .ensure_mintable(RefreshTrigger::ExplicitRotation, 100)
+        .unwrap();
+}
+
+#[test]
 fn projection_preserves_receipts_tombstones_and_unknown_recovery_backoff() {
     let mut stored = state();
     let before = grant_checkpoint(&stored).unwrap();

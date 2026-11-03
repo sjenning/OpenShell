@@ -6,7 +6,9 @@
 //! Adapters reload under the distributed lease and retain revision-fenced persistence; a worker's
 //! scheduling snapshot is never sufficient authority to mint.
 
-use crate::{SecretOwner, engine::RefreshTrigger, scheduler::GrantSchedule};
+use crate::{
+    SecretOwner, engine::RefreshTrigger, minter::RecoveryAction, scheduler::GrantSchedule,
+};
 use tonic::Status;
 
 /// Immutable grant identity.
@@ -73,7 +75,9 @@ impl GrantCheckpoint {
         if matches!(
             self.status.as_str(),
             "refresh_in_progress" | "refresh_committing"
-        ) {
+        ) || (self.schedule.recovery_action == Some(RecoveryAction::Investigate)
+            && self.schedule.next_refresh_at_ms == i64::MAX)
+        {
             return Err(Status::failed_precondition(
                 "previous credential mint has an uncertain outcome; reconfigure the refresh grant",
             ));

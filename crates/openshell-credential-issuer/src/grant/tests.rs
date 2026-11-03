@@ -140,6 +140,29 @@ fn neither_trigger_can_replay_an_uncertain_exchange() {
 }
 
 #[test]
+fn parked_unknown_outcomes_cannot_be_replayed_by_manual_rotation() {
+    for status in [
+        "investigation_required",
+        "failed",
+        "parked",
+        "rotation_requested",
+    ] {
+        let mut live = checkpoint();
+        live.status = status.to_string();
+        live.schedule.recovery_action = Some(RecoveryAction::Investigate);
+        live.schedule.next_refresh_at_ms = i64::MAX;
+        live.schedule.rotation_requested = true;
+        for trigger in [RefreshTrigger::Automatic, RefreshTrigger::ExplicitRotation] {
+            for now in [100, i64::MAX] {
+                let error = live.ensure_mintable(trigger, now).unwrap_err();
+                assert_eq!(error.code(), Code::FailedPrecondition);
+                assert!(error.message().contains("uncertain outcome"));
+            }
+        }
+    }
+}
+
+#[test]
 fn automatic_admission_rechecks_the_live_retry_schedule() {
     let observed = checkpoint();
     for action in [

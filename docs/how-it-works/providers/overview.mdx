@@ -171,8 +171,9 @@ OAuth refresh-managed credentials return access tokens, never gateway-only
 refresh tokens, client secrets, or signing material. Supervisor-side,
 endpoint-specific, and SPIFFE-bound dynamic grants return `FAILED_PRECONDITION`.
 Refresh effects can persist even if another selected key causes the request to
-fail. An uncertain rotating-token exchange requires reauthorization or refresh
-reconfiguration rather than an automatic retry.
+fail. A parked, uncertain rotating-token exchange requires reauthorization or
+refresh reconfiguration after investigation. Neither scheduled refresh nor
+manual rotation replays that exchange.
 
 <Warning>
 Retrieval exports real credential values outside sandbox endpoint enforcement.

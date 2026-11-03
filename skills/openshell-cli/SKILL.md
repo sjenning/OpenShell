@@ -271,8 +271,10 @@ administrator policy, and `investigate` can mean an unrecognized issuer
 response or an interrupted mint with an uncertain outcome. The gateway parks
 `reauthorize` records until a manual rotate or reconfiguration. It retries
 `fix_configuration` records hourly so externally repaired configuration can
-recover without rapid token-endpoint traffic. The existing access credential
-remains usable only until its recorded expiry.
+recover without rapid token-endpoint traffic. A parked `investigate` record
+also rejects manual rotation: its mint outcome is unknown. Investigate, then
+reconfigure with a valid grant rather than replaying the exchange. The existing
+access credential remains usable only until its recorded expiry.
 
 `refresh_in_progress` and `refresh_committing` can indicate active work. Check
 gateway health and refresh status again before treating them as failures;

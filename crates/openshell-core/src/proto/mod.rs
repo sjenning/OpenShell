@@ -60,10 +60,21 @@ pub mod extension {
     rust_2018_idioms
 )]
 pub mod credentials {
+    pub mod store {
+        pub use super::super::generated::openshell::credentials::store::v1;
+    }
+    pub mod refresh {
+        pub use super::super::generated::openshell::credentials::refresh::v1;
+    }
+    pub mod minter {
+        pub use super::super::generated::openshell::credentials::minter::v1;
+    }
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/openshell.credentials.v1.rs"));
     }
 }
+
+mod issuer_debug;
 
 pub mod test {
     pub use super::generated::openshell::test::v1::*;

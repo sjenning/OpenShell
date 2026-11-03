@@ -567,6 +567,7 @@ mod tests {
         let mut isolation_methods = BTreeSet::new();
         let mut sandbox_protocol_methods = BTreeSet::new();
         let mut supervisor_host_methods = BTreeSet::new();
+        let mut issuer_methods = BTreeSet::new();
         for file in &public.file {
             let package = file.package.as_deref().unwrap_or_default();
             for service in &file.service {
@@ -596,6 +597,19 @@ mod tests {
                     assert_eq!(service_name, "SupervisorHost");
                     supervisor_host_methods.extend(service.method.iter().map(|method| {
                         method.name.as_deref().expect("supervisor host method name")
+                    }));
+                }
+                if matches!(
+                    package,
+                    "openshell.credentials.store.v1"
+                        | "openshell.credentials.refresh.v1"
+                        | "openshell.credentials.minter.v1"
+                ) {
+                    issuer_methods.extend(service.method.iter().map(|method| {
+                        format!(
+                            "{package}.{service_name}/{}",
+                            method.name.as_deref().expect("issuer method name")
+                        )
                     }));
                 }
                 if !matches!(
@@ -636,6 +650,33 @@ mod tests {
             BTreeSet::from(["Exchange", "Mediate"])
         );
         assert_eq!(supervisor_host_methods, BTreeSet::from(["Attach"]));
+        assert_eq!(
+            issuer_methods,
+            BTreeSet::from(
+                [
+                    "openshell.credentials.store.v1.CredentialStore/GetCapabilities",
+                    "openshell.credentials.store.v1.CredentialStore/PutSecret",
+                    "openshell.credentials.store.v1.CredentialStore/DeleteSecret",
+                    "openshell.credentials.store.v1.CredentialStore/ResolveSecrets",
+                    "openshell.credentials.store.v1.CredentialStore/WatchSecrets",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/ListStrategies",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/CreateGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/GetGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/DeleteGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/RotateGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/EnsureFresh",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/WatchGrants",
+                    "openshell.credentials.minter.v1.TokenMinter/Describe",
+                    "openshell.credentials.minter.v1.TokenMinter/Mint",
+                ]
+                .map(str::to_string)
+            )
+        );
+        assert!(
+            methods
+                .iter()
+                .all(|method| !method.contains(".credentials."))
+        );
         for signature in PROVIDER_READINESS_RPC_SIGNATURES {
             assert!(
                 methods.iter().any(|method| method == signature),
@@ -661,7 +702,8 @@ mod tests {
                 + PEER_CONFIG_RPC_SIGNATURES.len()
                 + isolation_methods.len()
                 + sandbox_protocol_methods.len()
-                + supervisor_host_methods.len(),
+                + supervisor_host_methods.len()
+                + issuer_methods.len(),
             "classify every compiled RPC"
         );
         assert_eq!(

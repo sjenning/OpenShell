@@ -100,6 +100,19 @@ explicitly. `SandboxInstanceAssignment.launch_material` carries the existing
 JSON sandbox instance registration of `openshell-supervisor-control` and is
 marked secret.
 
+## Credential issuer protocols
+
+`credential_store.proto`, `credential_refresh.proto`, and `token_minter.proto`
+define the private gateway-to-issuer and issuer-to-minter APIs. They are separate
+from gateway RPCs and are not served on the gateway listener or exported by the
+curated SDKs. Immutable IDs/references in these contracts identify internal
+resources; supplied owner metadata never replaces mTLS caller authentication.
+Secret-bearing fields carry the `secret` option, and Rust wire messages redact
+secret-bearing debug output. Watches use durable namespace-scoped event cursors,
+not per-reference value versions; reset events require complete reconciliation.
+The contracts are groundwork: defining an RPC does not enable remote mode or
+relax authorization for an existing gateway RPC.
+
 ## Isolation backend protocol
 
 [`isolation_backend.proto`](isolation_backend.proto) defines backend discovery,

@@ -50,6 +50,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the build process environment. With a caller-supplied PROTOC, leave both
     // to prost.
     let mut proto_config = tonic_prost_build::Config::new();
+    // Secret-bearing issuer messages have explicit redacted Debug impls.
+    proto_config.skip_debug([
+        ".openshell.credentials.store.v1.PutSecretRequest",
+        ".openshell.credentials.store.v1.ResolvedSecret",
+        ".openshell.credentials.refresh.v1.CreateGrantRequest",
+        ".openshell.credentials.minter.v1.MintRequest",
+        ".openshell.credentials.minter.v1.MintResponse",
+    ]);
     // Keep optional grant evidence off sandbox lifecycle futures' stacks.
     proto_config.boxed(".openshell.v1.SandboxStatus.last_token_grant_failure");
     let proto_include = if use_vendored_protoc {

@@ -1,0 +1,64 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+package openshell.credentials.minter.v1;
+
+import "google/protobuf/timestamp.proto";
+import "options.proto";
+
+// Stateless issuer-to-minter protocol. The minter never receives provider
+// identities, credential references, persistence interfaces, or scheduling state.
+// Remote services require mTLS and authorization of the issuer identity.
+service TokenMinter {
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  rpc Mint(MintRequest) returns (MintResponse);
+}
+message MaterialDescriptor { string name = 1; bool required = 2; }
+message StrategyDescriptor {
+  // External minters must use custom:<registration-name>.
+  string name = 1;
+  repeated MaterialDescriptor config = 2;
+  repeated MaterialDescriptor secret_material = 3;
+  repeated string outputs = 4;
+  repeated string rotated_secret_material = 5;
+}
+message DescribeRequest {}
+message DescribeResponse { repeated StrategyDescriptor strategies = 1; }
+message MintRequest {
+  string strategy = 1;
+  // Treat config as sensitive in generic observation: deployments may configure
+  // private endpoint names, and clients may accidentally misclassify material.
+  map<string, string> config = 2 [(openshell.options.v1.secret) = true];
+  map<string, string> secret_material = 3 [(openshell.options.v1.secret) = true];
+  // Durable issuer-allocated identity for this attempt, not an auth token.
+  string attempt_id = 4;
+}
+message MintResponse {
+  map<string, string> outputs = 1 [(openshell.options.v1.secret) = true];
+  google.protobuf.Timestamp expiration_time = 2;
+  map<string, string> rotated_secret_material = 3 [(openshell.options.v1.secret) = true];
+}
+enum RecoveryAction {
+  RECOVERY_ACTION_UNSPECIFIED = 0;
+  RECOVERY_ACTION_RETRY = 1;
+  RECOVERY_ACTION_REAUTHORIZE = 2;
+  RECOVERY_ACTION_FIX_CONFIGURATION = 3;
+  RECOVERY_ACTION_INVESTIGATE = 4;
+}
+enum RetrySchedule {
+  RETRY_SCHEDULE_UNSPECIFIED = 0;
+  RETRY_SCHEDULE_SHORT = 1;
+  RETRY_SCHEDULE_CONFIGURATION = 2;
+  RETRY_SCHEDULE_PARKED = 3;
+}
+// Encoded directly in a non-OK gRPC status's details bytes. Unknown/missing
+// details, unknown enum values, or invalid combinations must park an attempted
+// exchange, not convert it into an automatic transport retry. Messages and
+// upstream response bodies are never trusted as safe diagnostics.
+message MintFailureDetail {
+  RecoveryAction recovery_action = 1;
+  string failure_code = 2;
+  string provider_error_subtype = 3;
+  RetrySchedule retry_schedule = 4;
+}

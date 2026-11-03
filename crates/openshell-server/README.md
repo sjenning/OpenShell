@@ -236,9 +236,14 @@ Gateway configuration inputs capture versions from the state's selected provider
 read source, and provider snapshot builders resolve through the same selection.
 Both revision hashes therefore include remote rotations without rewriting
 provider records. A captured older version cannot be paired with newer values.
+Intermediate subject-token exchange also projects expiration and captures/rechecks
+versions through this selection. Metadata checks and intermediate-cache hits do
+not read issuer values; misses resolve through the selected source and recheck
+the captured version before exchanging the subject. Tests keep issuer metadata
+healthy while its value backend is unavailable and prove this ordering.
 Production still defaults to the embedded source; tests exercise injected remote
 selection over real mTLS. Remote gateway configuration, provider mutations,
-refresh routing, intermediate-token metadata projection, and watch-driven
+refresh routing, public get/list metadata projection, and watch-driven
 config-delivery fanout remain separate integration work.
 
 ## Operator credential export

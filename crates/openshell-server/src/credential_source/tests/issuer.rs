@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use futures::StreamExt;
+use openshell_core::proto::{
+    CredentialHandle,
+    credentials::v1::{
+        DeleteCredentialRequest, ResolveCredentialRequest, ResolvedCredential,
+        StoreCredentialRequest,
+    },
+};
 use openshell_credential_issuer::{
     auth::GatewayPolicy,
     backend::CredentialDriver,
@@ -18,11 +25,49 @@ use openshell_extension_core::{
     ExtensionChannelConfig, ExtensionClientIdentity, ExtensionTlsAcceptor,
 };
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, SanType};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tonic::Status;
+#[derive(Debug)]
+struct Driver {
+    inner: DbCredstoreCredentialDriver,
+    resolves: Arc<AtomicUsize>,
+    fail: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl CredentialDriver for Driver {
+    async fn store_credential(
+        &self,
+        request: StoreCredentialRequest,
+    ) -> Result<CredentialHandle, Status> {
+        self.inner.store_credential(request).await
+    }
+    async fn delete_credential(&self, request: DeleteCredentialRequest) -> Result<(), Status> {
+        self.inner.delete_credential(request).await
+    }
+    async fn resolve_credentials(
+        &self,
+        requests: Vec<ResolveCredentialRequest>,
+    ) -> Result<Vec<ResolvedCredential>, Status> {
+        self.resolves.fetch_add(requests.len(), Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("private backend failure"));
+        }
+        self.inner.resolve_credentials(requests).await
+    }
+}
 
 pub struct Issuer {
     pub raw: RemoteIssuer,
     pub watched: WatchedIssuer,
+    pub resolves: Arc<AtomicUsize>,
+    pub fail_resolves: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     _directory: tempfile::TempDir,
 }
@@ -39,10 +84,14 @@ impl Issuer {
             "key_encryption_key_path".into(),
             toml::Value::String(directory.path().join("key").display().to_string()),
         )]);
-        let driver: Arc<dyn CredentialDriver> = Arc::new(
-            DbCredstoreCredentialDriver::from_config(repository.backend_objects(), &config)
+        let resolves = Arc::new(AtomicUsize::new(0));
+        let fail_resolves = Arc::new(AtomicBool::new(false));
+        let driver: Arc<dyn CredentialDriver> = Arc::new(Driver {
+            inner: DbCredstoreCredentialDriver::from_config(repository.backend_objects(), &config)
                 .unwrap(),
-        );
+            resolves: resolves.clone(),
+            fail: fail_resolves.clone(),
+        });
         let storage =
             CredentialStorage::new(BTreeMap::from([("db".into(), driver)]), "db".into()).unwrap();
         let identity = "spiffe://test.example/gateway/source";
@@ -115,6 +164,8 @@ impl Issuer {
         Self {
             raw,
             watched,
+            resolves,
+            fail_resolves,
             task,
             _directory: directory,
         }

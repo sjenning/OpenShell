@@ -4427,7 +4427,9 @@ async fn exchange_provider_subject_token_inner(
             tonic::Code::FailedPrecondition,
         ));
     }
-    crate::credentials::references::project_expiration_times(state.store.as_ref(), &mut provider)
+    state
+        .provider_credential_source()
+        .project_expiration_metadata(state.store.as_ref(), &mut provider)
         .await
         .map_err(token_grant_dependency_status)?;
     // Validate configuration before identity acquisition, cache lookup or any
@@ -4437,10 +4439,11 @@ async fn exchange_provider_subject_token_inner(
         &provider,
         &subject_token.credential,
     )?;
-    let subject_versions =
-        crate::credentials::references::versions(state.store.as_ref(), &provider)
-            .await
-            .map_err(token_grant_dependency_status)?;
+    let subject_versions = state
+        .provider_credential_source()
+        .reference_versions(state.store.as_ref(), &provider)
+        .await
+        .map_err(token_grant_dependency_status)?;
     let subject_version = subject_versions
         .get(&subject_token.credential)
         .copied()
@@ -4473,7 +4476,7 @@ async fn exchange_provider_subject_token_inner(
         gateway_subject: &gateway_claims.sub,
     });
     let stored_subject_token = match lookup_subject_token(
-        &state.credentials,
+        state.provider_credential_source(),
         &provider,
         &subject_token.credential,
         &intermediate_cache_key,
@@ -4494,10 +4497,11 @@ async fn exchange_provider_subject_token_inner(
         }
         SubjectTokenLookup::Resolved(value) => value,
     };
-    let resolved_versions =
-        crate::credentials::references::versions(state.store.as_ref(), &provider)
-            .await
-            .map_err(token_grant_dependency_status)?;
+    let resolved_versions = state
+        .provider_credential_source()
+        .reference_versions(state.store.as_ref(), &provider)
+        .await
+        .map_err(token_grant_dependency_status)?;
     if resolved_versions
         .get(&subject_token.credential)
         .copied()
@@ -4578,7 +4582,7 @@ fn ensure_subject_token_metadata(provider: &Provider, credential_key: &str) -> R
 }
 
 async fn lookup_subject_token(
-    credentials: &crate::credentials::CredentialRuntime,
+    credentials: &dyn crate::credential_source::ProviderCredentialSource,
     provider: &Provider,
     credential_key: &str,
     cache_key: &str,
@@ -4595,7 +4599,7 @@ async fn lookup_subject_token(
 }
 
 async fn resolve_subject_token_credential(
-    credentials: &crate::credentials::CredentialRuntime,
+    credentials: &dyn crate::credential_source::ProviderCredentialSource,
     provider: &Provider,
     credential_key: &str,
 ) -> Result<String, Status> {

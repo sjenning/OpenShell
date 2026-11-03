@@ -15,6 +15,13 @@ use tonic::Status;
 
 #[async_trait]
 pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
+    /// Project current expiration without fetching secret values. Reconciled
+    /// issuer metadata is authoritative after the initial legacy version.
+    async fn project_expiration_metadata(
+        &self,
+        store: &Store,
+        provider: &mut Provider,
+    ) -> Result<(), Status>;
     /// Capture metadata without reading values. Remote implementations use only
     /// reconciled watch state, so intermediate-token cache hits never await an
     /// issuer. Unknown metadata fails closed rather than guessing version one.
@@ -31,6 +38,13 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
 }
 #[async_trait]
 impl ProviderCredentialSource for CredentialRuntime {
+    async fn project_expiration_metadata(
+        &self,
+        store: &Store,
+        provider: &mut Provider,
+    ) -> Result<(), Status> {
+        references::project_expiration_times(store, provider).await
+    }
     async fn reference_versions(
         &self,
         store: &Store,
@@ -231,6 +245,13 @@ impl RemoteProviderSource {
 }
 #[async_trait]
 impl ProviderCredentialSource for RemoteProviderSource {
+    async fn project_expiration_metadata(
+        &self,
+        _store: &Store,
+        provider: &mut Provider,
+    ) -> Result<(), Status> {
+        self.project_expiration_times(provider)
+    }
     async fn reference_versions(
         &self,
         _store: &Store,

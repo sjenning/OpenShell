@@ -30,6 +30,13 @@ fn provider() -> Provider {
 struct Source(std::sync::atomic::AtomicU64);
 #[async_trait::async_trait]
 impl crate::credential_source::ProviderCredentialSource for Source {
+    async fn project_expiration_metadata(
+        &self,
+        _store: &crate::persistence::Store,
+        _provider: &mut Provider,
+    ) -> Result<(), tonic::Status> {
+        Ok(())
+    }
     async fn reference_versions(
         &self,
         _store: &crate::persistence::Store,
@@ -200,6 +207,120 @@ async fn intermediate_cache_hit_never_resolves_subject_values_but_keeps_metadata
         .err()
         .unwrap();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn remote_subject_metadata_and_cache_hits_do_not_depend_on_available_value_storage() {
+    use crate::credential_source::{ProviderCredentialSource as _, RemoteProviderSource};
+    use openshell_core::proto::credentials::store::v1 as wire;
+    use std::sync::atomic::Ordering;
+    let issuer = crate::credential_source::tests::issuer::Issuer::start().await;
+    let source = RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap();
+    let store = test_store().await;
+    let mut provider = provider();
+    let owner = wire::SecretOwner {
+        workspace: "default".into(),
+        provider_id: provider.object_id().into(),
+        credential_key: "SUBJECT_TOKEN".into(),
+        provider: "display".into(),
+    };
+    let expiration = current_time_ms() + 60_000;
+    let stored = issuer
+        .raw
+        .put_secret(wire::PutSecretRequest {
+            owner: Some(owner.clone()),
+            value: "stored-subject".into(),
+            expiration_time: Some(openshell_core::time::timestamp_from_millis(expiration).unwrap()),
+            idempotency_key: "subject".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    provider.credential_handles.insert(
+        "SUBJECT_TOKEN".into(),
+        source.reference_handle(&stored.reference, None).unwrap(),
+    );
+    source.register_provider(&provider).unwrap();
+    issuer
+        .watched
+        .wait_synchronized(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    issuer.fail_resolves.store(true, Ordering::SeqCst);
+    source
+        .project_expiration_metadata(&store, &mut provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.credential_expiration_times["SUBJECT_TOKEN"],
+        openshell_core::time::timestamp_from_millis(expiration).unwrap()
+    );
+    assert_eq!(
+        source.reference_versions(&store, &provider).await.unwrap()["SUBJECT_TOKEN"],
+        1
+    );
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 0);
+    let key = format!("remote-subject:{}", uuid::Uuid::new_v4());
+    let token = openshell_core::oauth::OAuthTokenResponse {
+        access_token: "cached-intermediate".into(),
+        expires_in: 60,
+        token_type: "Bearer".into(),
+    };
+    INTERMEDIATE_TOKEN_CACHE.set(key.clone(), &token, expiration);
+    let SubjectTokenLookup::Cached(cached) =
+        lookup_subject_token(&source, &provider, "SUBJECT_TOKEN", &key)
+            .await
+            .unwrap()
+    else {
+        panic!("cache hit resolved issuer values")
+    };
+    assert_eq!(cached.access_token, "cached-intermediate");
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 0);
+    INTERMEDIATE_TOKEN_CACHE.set(key.clone(), &token, 1);
+    assert_eq!(
+        lookup_subject_token(&source, &provider, "SUBJECT_TOKEN", &key)
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::Unavailable
+    );
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 1);
+    issuer
+        .watched
+        .put_secret(wire::PutSecretRequest {
+            owner: Some(owner),
+            reference: stored.reference,
+            expected_version: Some(1),
+            value: "nonexpiring-subject".into(),
+            idempotency_key: "replace-subject".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    issuer
+        .watched
+        .wait_synchronized(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+    provider.credential_expiration_times.insert(
+        "SUBJECT_TOKEN".into(),
+        openshell_core::time::timestamp_from_millis(1).unwrap(),
+    );
+    source
+        .project_expiration_metadata(&store, &mut provider)
+        .await
+        .unwrap();
+    assert!(
+        !provider
+            .credential_expiration_times
+            .contains_key("SUBJECT_TOKEN")
+    );
+    assert_eq!(
+        source.reference_versions(&store, &provider).await.unwrap()["SUBJECT_TOKEN"],
+        2
+    );
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

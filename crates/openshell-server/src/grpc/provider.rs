@@ -5038,29 +5038,16 @@ pub(super) async fn handle_get_provider_refresh_status(
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
 
-    let states = if request.credential_key.trim().is_empty() {
-        crate::provider_refresh::list_refresh_states_for_provider(
+    let credentials = state
+        .provider_credential_source()
+        .refresh_statuses(
             state.store.as_ref(),
-            provider.object_id(),
-        )
-        .await?
-    } else {
-        crate::provider_refresh::get_refresh_state(
-            state.store.as_ref(),
-            &workspace,
-            provider.object_id(),
+            &provider,
             request.credential_key.trim(),
         )
-        .await?
-        .into_iter()
-        .collect()
-    };
-
+        .await?;
     Ok(Response::new(GetProviderRefreshStatusResponse {
-        credentials: states
-            .iter()
-            .map(crate::provider_refresh::refresh_status_from_state)
-            .collect(),
+        credentials,
     }))
 }
 

@@ -7,7 +7,9 @@ use crate::{
     persistence::Store,
 };
 use async_trait::async_trait;
-use openshell_core::proto::{CredentialHandle, Provider, credentials::store::v1 as wire};
+use openshell_core::proto::{
+    CredentialHandle, Provider, ProviderCredentialRefreshStatus, credentials::store::v1 as wire,
+};
 use openshell_credential_issuer::remote_issuer::WatchedIssuer;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -36,6 +38,18 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
     /// not silently gain embedded write authority.
     fn remote_mutations(&self) -> Option<&RemoteProviderSource> {
         None
+    }
+    /// Read issuer-owned refresh metadata. A selected source must not fall back
+    /// to unrelated embedded grants, even when it is otherwise read-only.
+    async fn refresh_statuses(
+        &self,
+        _store: &Store,
+        _provider: &Provider,
+        _credential_key: &str,
+    ) -> Result<Vec<ProviderCredentialRefreshStatus>, Status> {
+        Err(Status::failed_precondition(
+            "selected credential source does not support refresh metadata",
+        ))
     }
     /// Project current expiration without fetching secret values. Reconciled
     /// issuer metadata is authoritative after the initial legacy version.
@@ -69,6 +83,32 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
 }
 #[async_trait]
 impl ProviderCredentialSource for CredentialRuntime {
+    async fn refresh_statuses(
+        &self,
+        store: &Store,
+        provider: &Provider,
+        credential_key: &str,
+    ) -> Result<Vec<ProviderCredentialRefreshStatus>, Status> {
+        use openshell_core::{ObjectId as _, ObjectWorkspace as _};
+        let states = if credential_key.is_empty() {
+            crate::provider_refresh::list_refresh_states_for_provider(store, provider.object_id())
+                .await?
+        } else {
+            crate::provider_refresh::get_refresh_state(
+                store,
+                provider.object_workspace(),
+                provider.object_id(),
+                credential_key,
+            )
+            .await?
+            .into_iter()
+            .collect()
+        };
+        Ok(states
+            .iter()
+            .map(crate::provider_refresh::refresh_status_from_state)
+            .collect())
+    }
     async fn project_expiration_metadata(
         &self,
         store: &Store,
@@ -315,6 +355,14 @@ impl RemoteProviderSource {
 }
 #[async_trait]
 impl ProviderCredentialSource for RemoteProviderSource {
+    async fn refresh_statuses(
+        &self,
+        store: &Store,
+        provider: &Provider,
+        credential_key: &str,
+    ) -> Result<Vec<ProviderCredentialRefreshStatus>, Status> {
+        handoff::StaticHandoff::refresh_statuses(store, self, provider, credential_key).await
+    }
     fn remote_mutations(&self) -> Option<&RemoteProviderSource> {
         Some(self)
     }

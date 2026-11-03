@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 mod postgres;
+mod status;
 use openshell_core::proto::credentials::refresh::v1 as refresh;
 use openshell_credential_issuer::minter::{
     MaterialDescriptor, MintFailure, MintRequest, MintResponse, MinterRegistry, RecoveryAction,

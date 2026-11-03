@@ -22,6 +22,61 @@ fn scope() -> openshell_core::proto::WorkspaceSelector {
     openshell_core::proto::workspace_selector("default")
 }
 #[tokio::test]
+async fn selected_issuer_refresh_status_rpc_does_not_return_embedded_shadow_state() {
+    let mut state = test_server_state().await;
+    let issuer = Issuer::start().await;
+    let source = Arc::new(RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap());
+    Arc::get_mut(&mut state).unwrap().provider_source = Some(source);
+    let provider = handle_create_provider(
+        &state,
+        authed_request(CreateProviderRequest {
+            provider: Some(request_provider("sk-static", 0)),
+            workspace_scope: Some(scope()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .provider
+    .unwrap();
+    let shadow = crate::provider_refresh::new_refresh_state(
+        &provider,
+        "default",
+        "OPENAI_API_KEY",
+        crate::provider_refresh::NewRefreshStateConfig {
+            strategy: ProviderCredentialRefreshStrategy::try_from(1).unwrap(),
+            material: HashMap::new(),
+            secret_material_keys: Vec::new(),
+            expires_at_ms: 0,
+            token_url: String::new(),
+            scopes: Vec::new(),
+            refresh_before: None,
+            max_lifetime: None,
+            additional_output_keys: HashMap::new(),
+        },
+    )
+    .unwrap();
+    crate::provider_refresh::create_refresh_state(&state.store, &shadow)
+        .await
+        .unwrap();
+    issuer.fail_resolves.store(true, Ordering::SeqCst);
+    let reads = issuer.resolves.load(Ordering::SeqCst);
+    let status = handle_get_provider_refresh_status(
+        &state,
+        authed_request(GetProviderRefreshStatusRequest {
+            provider: "remote-provider".into(),
+            credential_key: String::new(),
+            workspace_scope: Some(scope()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(status.credentials.is_empty());
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), reads);
+}
+#[tokio::test]
 async fn selected_read_only_source_never_falls_back_to_embedded_mutations() {
     let mut state = test_server_state().await;
     let read_only = Arc::new(state.credentials.clone());

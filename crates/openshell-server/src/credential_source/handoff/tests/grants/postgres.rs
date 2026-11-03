@@ -9,6 +9,12 @@ async fn postgres_grant_publication_and_retirement_claims_are_atomic_across_conn
     let other = schema.connect_store().await;
     let (issuer, source, minter) = issuer().await;
     let (old, mut provider) = published(&store, &source).await;
+    let statuses = source
+        .refresh_statuses(&other, &provider, "TOKEN")
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].strategy_name, "custom:journal");
     let old_id = old.grant_id().unwrap().to_owned();
     let mut replacement = StaticHandoff::begin_grant(&other, &source, &provider, plan(), Some(1))
         .await

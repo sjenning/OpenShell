@@ -250,7 +250,12 @@ freshness effect, delegates EnsureFresh to the issuer only when needed, and fenc
 the final response against provider, profile, and grant version changes. Repeated
 exports reuse a sufficiently valid grant rather than reminting.
 Public provider get/list calls project expiration through the selected source
-before redaction, without resolving values or rewriting records. Version-one
+before redaction, without resolving values or rewriting records.
+Refresh-status reads also use the selected source. Remote reads validate complete
+published grant ownership, group outputs by the primary key, and project issuer
+status without resolving values or minting. Missing ownership and unsupported
+read-only metadata sources fail closed rather than consulting embedded grants;
+a final provider-binding fence rejects stale status projections. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.
 Production still defaults to the embedded source; tests exercise injected remote
 selection over real mTLS. Selected remote sources now opt in explicitly to static

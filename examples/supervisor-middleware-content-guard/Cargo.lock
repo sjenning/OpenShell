@@ -2062,9 +2062,13 @@ name = "openshell-extension-core"
 version = "0.0.0"
 dependencies = [
  "hyper-util",
+ "openshell-crypto",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tonic",
  "tower",
 ]

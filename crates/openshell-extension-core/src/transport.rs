@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod client_identity;
+pub use client_identity::ExtensionClientIdentity;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -49,6 +52,7 @@ impl std::fmt::Debug for ExtensionServerTrust {
 pub struct ExtensionChannelConfig {
     endpoint: String,
     server_trust: ExtensionServerTrust,
+    client_identity: Option<ExtensionClientIdentity>,
 }
 
 impl ExtensionChannelConfig {
@@ -56,6 +60,7 @@ impl ExtensionChannelConfig {
         Self {
             endpoint: endpoint.into(),
             server_trust: ExtensionServerTrust::default(),
+            client_identity: None,
         }
     }
 
@@ -71,6 +76,13 @@ impl ExtensionChannelConfig {
     #[must_use]
     pub fn with_custom_ca_pem(self, custom_ca_pem: impl Into<Vec<u8>>) -> Self {
         self.with_server_trust(ExtensionServerTrust::CustomCaPem(custom_ca_pem.into()))
+    }
+
+    /// Authenticate this client with mTLS. Only HTTPS endpoints are accepted.
+    #[must_use]
+    pub fn with_client_identity(mut self, identity: ExtensionClientIdentity) -> Self {
+        self.client_identity = Some(identity);
+        self
     }
 
     pub fn endpoint(&self) -> &str {
@@ -93,6 +105,7 @@ impl std::fmt::Debug for ExtensionChannelConfig {
             .debug_struct("ExtensionChannelConfig")
             .field("endpoint", &self.endpoint)
             .field("server_trust", &self.server_trust)
+            .field("client_identity", &self.client_identity)
             .finish()
     }
 }
@@ -105,6 +118,10 @@ pub enum TransportError {
     UnsupportedScheme,
     #[error("custom CA certificates require an https:// extension endpoint")]
     CustomCaRequiresHttps,
+    #[error("client identity requires an https:// extension endpoint")]
+    ClientIdentityRequiresHttps,
+    #[error("could not configure extension mTLS identity or trust")]
+    ClientIdentity,
     #[error("unix extension endpoint must contain an absolute socket path")]
     InvalidUnixPath,
     #[error("unix extension endpoints are not supported on this platform")]
@@ -119,6 +136,9 @@ pub enum TransportError {
 
 pub async fn connect_channel(config: &ExtensionChannelConfig) -> Result<Channel, TransportError> {
     validate_config(config)?;
+    if config.client_identity.is_some() {
+        return client_identity::connect(config).await;
+    }
     if let Some(path) = config.endpoint.strip_prefix("unix://") {
         return connect_unix(PathBuf::from(path)).await;
     }
@@ -145,6 +165,9 @@ fn validate_config(config: &ExtensionChannelConfig) -> Result<(), TransportError
     let is_unix = config.endpoint.starts_with("unix://");
     if !is_https && !is_http && !is_unix {
         return Err(TransportError::UnsupportedScheme);
+    }
+    if config.client_identity.is_some() && !is_https {
+        return Err(TransportError::ClientIdentityRequiresHttps);
     }
     if !matches!(&config.server_trust, ExtensionServerTrust::PlatformRoots) && !is_https {
         return Err(TransportError::CustomCaRequiresHttps);
@@ -203,7 +226,7 @@ mod tests {
     use super::*;
 
     #[derive(Clone)]
-    struct NoopGrpcService;
+    pub(super) struct NoopGrpcService;
 
     impl NamedService for NoopGrpcService {
         const NAME: &'static str = "openshell.test.Noop";

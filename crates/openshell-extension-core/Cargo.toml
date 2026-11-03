@@ -11,6 +11,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+openshell-crypto = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+tokio-rustls = { workspace = true }
 hyper-util = { workspace = true, features = ["tokio"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -19,10 +23,9 @@ tonic = { workspace = true, features = ["channel", "tls-native-roots"] }
 tower = { workspace = true }
 
 [dev-dependencies]
-openshell-crypto = { workspace = true }
+tempfile = "3"
 http = { workspace = true }
 rcgen = { workspace = true }
-rustls = { workspace = true }
 serde_json = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true, features = ["server", "tls-native-roots"] }

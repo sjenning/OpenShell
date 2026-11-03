@@ -18,5 +18,6 @@ pub use jwt::{
 };
 pub use store::ExtensionCredentialStore;
 pub use transport::{
-    ExtensionChannelConfig, ExtensionServerTrust, TransportError, connect_channel,
+    ExtensionChannelConfig, ExtensionClientIdentity, ExtensionServerTrust, TransportError,
+    connect_channel,
 };

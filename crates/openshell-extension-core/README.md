@@ -18,6 +18,16 @@ SPIFFE X.509-SVID or public-key pinning support to be added once without
 changing middleware and interceptor clients independently. Unix sockets retain
 their local operating-system access boundary.
 
+`ExtensionClientIdentity` adds outbound mTLS using inline PEM or certificate/key
+files. Identity-bearing channels require HTTPS and never downgrade to plaintext.
+File sources are read on every TLS connection, including channel redials; a
+partial, malformed, or missing replacement fails closed rather than reusing old
+credentials. Existing sessions retain their negotiated identity until reconnect.
+Certificate/key paths and contents are redacted in debug output. Server CA and
+DNS verification remain mandatory. The mTLS connector constructs TLS through
+`openshell-crypto` and negotiates HTTP/2; legacy identity-free tonic TLS remains
+dependency-owned. SPIFFE Workload API sourcing is not implemented yet.
+
 Middleware- or interceptor-specific protobuf clients, policy selection,
 orchestration, and lifecycle management stay in their owning crates. Gateway
 signing authority also stays in `openshell-server`. This ownership rule keeps

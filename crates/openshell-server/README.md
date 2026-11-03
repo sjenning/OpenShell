@@ -221,6 +221,22 @@ identity, owner/version metadata, and unexpired subject metadata; a backend outa
 does not force a value read for an otherwise valid cached token. Cache misses
 resolve the subject and recheck its captured version before exchanging it.
 
+### Provider read sources
+
+`credential_source::ProviderCredentialSource` separates snapshot version capture
+and value resolution from backend selection. CredentialRuntime implements the
+embedded path. RemoteProviderSource accepts only versioned issuer-reference
+handles pinned to its registration and immutable provider/workspace/key owner.
+It uses reconciled local metadata, preserves pending/expired output behavior,
+and rechecks observed versions after resolution. Inline credentials and legacy
+or differently registered handles never fall back to local drivers. Internal
+secret storage remains an independent local interface.
+
+Snapshot readers accept this boundary and source-aware record loading captures
+the same versions used for resolution. This read adapter does not yet enable
+remote gateway configuration, remote provider mutations/refresh configuration,
+or config-delivery fanout. Those integration points remain separate work.
+
 ## Operator credential export
 
 `GetProviderCredentials` exports selected profile-declared runtime environment

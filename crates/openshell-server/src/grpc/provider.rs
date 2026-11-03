@@ -1037,6 +1037,7 @@ async fn load_provider_environment_record(
     store: &Store,
     workspace: &str,
     name: &str,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
 ) -> Result<Option<ProviderEnvironmentRecord>, Status> {
     let Some(record) = store
         .get_by_name(Provider::object_type(), workspace, name)
@@ -1049,7 +1050,10 @@ async fn load_provider_environment_record(
         .map_err(|e| Status::internal(format!("failed to decode provider '{name}': {e}")))?;
     let refresh_states =
         crate::provider_refresh::list_refresh_states_for_provider(store, &record.id).await?;
-    let credential_versions = crate::credentials::references::versions(store, &provider).await?;
+    let credential_versions = match source {
+        Some(source) => source.reference_versions(store, &provider).await?,
+        None => crate::credentials::references::versions(store, &provider).await?,
+    };
     Ok(Some(ProviderEnvironmentRecord {
         name: name.to_string(),
         object_id: record.id,
@@ -1066,12 +1070,13 @@ async fn load_optional_provider_environment_records(
     store: &Store,
     workspace: &str,
     provider_names: &[String],
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
 ) -> Result<Vec<Option<ProviderEnvironmentRecord>>, Status> {
     // Providers are independent, so load them concurrently.
     futures::future::try_join_all(
         provider_names
             .iter()
-            .map(|name| load_provider_environment_record(store, workspace, name)),
+            .map(|name| load_provider_environment_record(store, workspace, name, source)),
     )
     .await
 }
@@ -1081,7 +1086,16 @@ pub(super) async fn load_provider_environment_records(
     workspace: &str,
     provider_names: &[String],
 ) -> Result<Vec<ProviderEnvironmentRecord>, Status> {
-    load_optional_provider_environment_records(store, workspace, provider_names)
+    load_provider_environment_records_with_source(store, workspace, provider_names, None).await
+}
+
+pub(super) async fn load_provider_environment_records_with_source(
+    store: &Store,
+    workspace: &str,
+    provider_names: &[String],
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
+) -> Result<Vec<ProviderEnvironmentRecord>, Status> {
+    load_optional_provider_environment_records(store, workspace, provider_names, source)
         .await?
         .into_iter()
         .zip(provider_names)
@@ -1102,7 +1116,7 @@ pub(super) async fn load_existing_provider_environment_records<'a>(
     let mut records = Vec::with_capacity(provider_names.len());
     let mut missing = Vec::new();
     for (record, name) in
-        load_optional_provider_environment_records(store, workspace, provider_names)
+        load_optional_provider_environment_records(store, workspace, provider_names, None)
             .await?
             .into_iter()
             .zip(provider_names)
@@ -1174,7 +1188,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
     catalog: &EffectiveProviderProfileCatalog,
     records: &[ProviderEnvironmentRecord],
     policy_bindings: &HashMap<String, Vec<StaticCredentialEndpointBinding>>,
-    credentials: &crate::credentials::CredentialRuntime,
+    credentials: &dyn crate::credential_source::ProviderCredentialSource,
     sandbox_id: Option<&str>,
 ) -> Result<ProviderEnvironment, Status> {
     if records.is_empty() {

@@ -240,6 +240,10 @@ impl WatchedIssuer {
             _workers: Arc::new(Workers(vec![secrets.abort_handle(), grants.abort_handle()])),
         }
     }
+    #[must_use]
+    pub fn capabilities(&self) -> &store::GetCapabilitiesResponse {
+        self.inner.client.capabilities()
+    }
     pub fn changes(&self) -> broadcast::Receiver<IssuerChange> {
         self.inner.changes.subscribe()
     }

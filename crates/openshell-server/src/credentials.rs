@@ -77,7 +77,7 @@ const CREDENTIAL_DRIVER_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub use openshell_credential_issuer::backend::CredentialDriver;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ResolvedProviderCredentials {
     pub values: HashMap<String, String>,
     pub expires_at_ms: HashMap<String, i64>,
@@ -87,6 +87,17 @@ pub struct ResolvedProviderCredentials {
     /// already passed. Values stay withheld, but create-time consumers need
     /// the identities to fail closed instead of silently omitting credentials.
     pub expired_keys: HashSet<String>,
+}
+
+impl std::fmt::Debug for ResolvedProviderCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedProviderCredentials")
+            .field("values", &"<redacted>")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("versions", &self.versions)
+            .field("expired_keys", &self.expired_keys)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -20,6 +20,7 @@ mod compute;
 mod config_delivery;
 pub mod config_file;
 mod config_update_operation;
+pub mod credential_source;
 mod credentials;
 mod defaults;
 mod gateway_listener;

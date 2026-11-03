@@ -3,7 +3,9 @@
 
 use super::super::{
     INTERMEDIATE_TOKEN_CACHE, IntermediateTokenCacheKeyInput, SubjectTokenLookup,
-    get_provider_record, intermediate_token_cache_key, list_provider_records, lookup_subject_token,
+    get_provider_record, intermediate_token_cache_key, list_provider_records,
+    load_provider_environment_records_with_source, lookup_subject_token,
+    resolve_provider_environment_from_records_with_policy_bindings_and_credentials,
 };
 use crate::credentials::{CredentialRuntime, references};
 use crate::persistence::{current_time_ms, test_store};
@@ -22,6 +24,104 @@ fn provider() -> Provider {
         }),
         ..Default::default()
     }
+}
+
+#[derive(Debug)]
+struct Source(std::sync::atomic::AtomicU64);
+#[async_trait::async_trait]
+impl crate::credential_source::ProviderCredentialSource for Source {
+    async fn reference_versions(
+        &self,
+        _store: &crate::persistence::Store,
+        provider: &Provider,
+    ) -> Result<HashMap<String, u64>, tonic::Status> {
+        Ok(provider
+            .credential_handles
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    self.0.load(std::sync::atomic::Ordering::SeqCst),
+                )
+            })
+            .collect())
+    }
+    async fn resolve_provider_handles(
+        &self,
+        provider: &Provider,
+        _now: i64,
+    ) -> Result<crate::credentials::ResolvedProviderCredentials, tonic::Status> {
+        let version = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::credentials::ResolvedProviderCredentials {
+            values: provider
+                .credential_handles
+                .keys()
+                .map(|key| (key.clone(), format!("source-{version}")))
+                .collect(),
+            versions: provider
+                .credential_handles
+                .keys()
+                .map(|key| (key.clone(), version))
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+#[tokio::test]
+async fn snapshot_reader_uses_one_source_for_capture_and_resolution_and_fences_changed_versions() {
+    let store = test_store().await;
+    let mut provider = provider();
+    provider.r#type = "custom".into();
+    provider.credential_handles.insert(
+        "TOKEN".into(),
+        openshell_core::proto::CredentialHandle {
+            driver: "not-an-embedded-driver".into(),
+            handle: "unreadable".into(),
+            metadata: HashMap::new(),
+        },
+    );
+    store.put_message(&provider).await.unwrap();
+    let names = vec!["provider".into()];
+    let source = Source(std::sync::atomic::AtomicU64::new(2));
+    let records =
+        load_provider_environment_records_with_source(&store, "default", &names, Some(&source))
+            .await
+            .unwrap();
+    assert_eq!(records[0].credential_versions["TOKEN"], 2);
+    let catalog = crate::provider_profile_sources::ProviderProfileSources::with_default_sources()
+        .snapshot_catalog(&store, "default")
+        .await
+        .unwrap();
+    let first = resolve_provider_environment_from_records_with_policy_bindings_and_credentials(
+        &catalog,
+        &records,
+        &HashMap::new(),
+        &source,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.environment["TOKEN"], "source-2");
+    source.0.store(3, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        resolve_provider_environment_from_records_with_policy_bindings_and_credentials(
+            &catalog,
+            &records,
+            &HashMap::new(),
+            &source,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::Aborted
+    );
+    let current =
+        load_provider_environment_records_with_source(&store, "default", &names, Some(&source))
+            .await
+            .unwrap();
+    assert_eq!(current[0].resource_version, records[0].resource_version);
+    assert_eq!(current[0].credential_versions["TOKEN"], 3);
 }
 
 #[test]

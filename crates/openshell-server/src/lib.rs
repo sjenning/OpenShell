@@ -450,6 +450,20 @@ impl ServerState {
     ) -> &dyn credential_source::ProviderCredentialSource {
         self.provider_source.as_deref().unwrap_or(&self.credentials)
     }
+    pub(crate) fn remote_provider_mutations(
+        &self,
+    ) -> std::result::Result<Option<&credential_source::RemoteProviderSource>, tonic::Status> {
+        self.provider_source
+            .as_ref()
+            .map(|source| {
+                source.remote_mutations().ok_or_else(|| {
+                    tonic::Status::failed_precondition(
+                        "selected provider source does not support mutations",
+                    )
+                })
+            })
+            .transpose()
+    }
     /// Create new server state.
     #[must_use]
     #[allow(clippy::too_many_arguments)]

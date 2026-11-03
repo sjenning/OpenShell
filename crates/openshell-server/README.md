@@ -249,8 +249,16 @@ Public provider get/list calls project expiration through the selected source
 before redaction, without resolving values or rewriting records. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.
 Production still defaults to the embedded source; tests exercise injected remote
-selection over real mTLS. Remote gateway configuration, provider mutations,
-refresh routing, and watch-driven config-delivery fanout remain separate work.
+selection over real mTLS. Selected remote sources now opt in explicitly to static
+provider create/update/delete routing through the handoff journal; a selected
+read-only source cannot fall back to embedded mutation storage. Partial updates
+and metadata-only changes preserve untouched issuer bindings, and deletion claims
+retirement without waiting for physical cleanup. Legacy inline/driver records
+cannot be implicitly adopted on update. Internal secret storage remains local.
+Issuer refresh configure/rotate/delete currently fail explicitly under remote
+selection rather than persisting refresh material locally. Production remote
+gateway configuration, grant routing, export routing, and watch-driven
+config-delivery fanout remain separate work.
 
 ### Static credential handoff journal
 

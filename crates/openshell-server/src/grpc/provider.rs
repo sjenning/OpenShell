@@ -141,12 +141,25 @@ pub(super) async fn create_provider_record_with_catalog(
     create_provider_record_validating(store, workspace, catalog, provider, None).await
 }
 
+mod issuer_mutations;
+
+#[cfg(test)]
 async fn create_provider_record_validating(
+    store: &Store,
+    workspace: &str,
+    catalog: &EffectiveProviderProfileCatalog,
+    provider: Provider,
+    credentials: Option<&crate::credentials::CredentialRuntime>,
+) -> Result<Provider, Status> {
+    create_provider_record_with_source(store, workspace, catalog, provider, credentials, None).await
+}
+async fn create_provider_record_with_source(
     store: &Store,
     workspace: &str,
     catalog: &EffectiveProviderProfileCatalog,
     mut provider: Provider,
     credentials: Option<&crate::credentials::CredentialRuntime>,
+    remote: Option<&crate::credential_source::RemoteProviderSource>,
 ) -> Result<Provider, Status> {
     use crate::persistence::{ObjectName, current_time_ms};
 
@@ -215,6 +228,21 @@ async fn create_provider_record_validating(
     }
 
     let credentials_to_store = provider.credentials.clone();
+    if let Some(source) = remote {
+        let mut handoff =
+            issuer_mutations::stage(store, source, &mut provider, &credentials_to_store, None)
+                .await?;
+        validate_provider_fields(&provider)?;
+        let version =
+            issuer_mutations::publish(store, source, &provider, None, None, handoff.as_mut())
+                .await?;
+        provider
+            .metadata
+            .as_mut()
+            .ok_or_else(|| Status::internal("provider metadata missing"))?
+            .resource_version = version;
+        return Ok(redact_provider_credentials(provider));
+    }
     store_provider_credentials_if_configured(
         credentials,
         &mut provider,
@@ -399,6 +427,26 @@ async fn update_provider_record_validating(
     clear_credential_expiration_keys: &[String],
     credentials: Option<&crate::credentials::CredentialRuntime>,
 ) -> Result<Provider, Status> {
+    update_provider_record_with_source(
+        store,
+        workspace,
+        catalog,
+        provider,
+        clear_credential_expiration_keys,
+        credentials,
+        None,
+    )
+    .await
+}
+async fn update_provider_record_with_source(
+    store: &Store,
+    workspace: &str,
+    catalog: &EffectiveProviderProfileCatalog,
+    provider: Provider,
+    clear_credential_expiration_keys: &[String],
+    credentials: Option<&crate::credentials::CredentialRuntime>,
+    remote: Option<&crate::credential_source::RemoteProviderSource>,
+) -> Result<Provider, Status> {
     use crate::persistence::{ObjectId, ObjectName};
 
     if provider.object_name().is_empty() {
@@ -442,6 +490,10 @@ async fn update_provider_record_validating(
     reject_refresh_owned_credential_updates(store, existing.object_id(), &provider.credentials)
         .await?;
 
+    if let Some(source) = remote {
+        source.register_provider(&existing)?;
+    }
+    let credentials = if remote.is_some() { None } else { credentials };
     let current_version = existing.metadata.as_ref().map_or(0, |m| m.resource_version);
 
     let cas_version = if expected_resource_version == 0 {
@@ -482,6 +534,18 @@ async fn update_provider_record_validating(
     // strand legacy records whose stored type predates current limits. See
     // #1347.
     super::validation::validate_object_metadata(candidate.metadata.as_ref(), "provider")?;
+    let mut remote_handoff = if let Some(source) = remote {
+        issuer_mutations::stage(
+            store,
+            source,
+            &mut candidate,
+            &updated_credential_values,
+            Some(cas_version),
+        )
+        .await?
+    } else {
+        None
+    };
     let credential_update = prepare_provider_credential_update(
         credentials,
         candidate.object_name(),
@@ -521,6 +585,17 @@ async fn update_provider_record_validating(
         )
         .await?;
 
+        if let Some(source) = remote {
+            return issuer_mutations::publish(
+                store,
+                source,
+                &candidate,
+                Some(&existing),
+                Some(cas_version),
+                remote_handoff.as_mut(),
+            )
+            .await;
+        }
         let labels_map = candidate.object_labels();
         let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
             None
@@ -542,6 +617,7 @@ async fn update_provider_record_validating(
                 WriteCondition::MatchResourceVersion(cas_version),
             )
             .await
+            .map(|result| result.resource_version)
             .map_err(provider_update_persistence_error_to_status)
     }
     .await;
@@ -583,7 +659,7 @@ async fn update_provider_record_validating(
 
     // Update resource_version from successful write
     if let Some(metadata) = candidate.metadata.as_mut() {
-        metadata.resource_version = result.resource_version;
+        metadata.resource_version = result;
     }
 
     Ok(redact_provider_credentials(candidate))
@@ -602,11 +678,21 @@ pub(super) async fn delete_provider_record(
     delete_provider_record_with_credentials(store, workspace, &credentials, name).await
 }
 
+#[cfg(test)]
 pub(super) async fn delete_provider_record_with_credentials(
     store: &Store,
     workspace: &str,
     credentials: &crate::credentials::CredentialRuntime,
     name: &str,
+) -> Result<bool, Status> {
+    delete_provider_record_with_source(store, workspace, credentials, name, None).await
+}
+async fn delete_provider_record_with_source(
+    store: &Store,
+    workspace: &str,
+    credentials: &crate::credentials::CredentialRuntime,
+    name: &str,
+    remote: Option<&crate::credential_source::RemoteProviderSource>,
 ) -> Result<bool, Status> {
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
@@ -628,6 +714,25 @@ pub(super) async fn delete_provider_record_with_credentials(
         )));
     }
 
+    if let Some(source) = remote {
+        source.register_provider(&provider)?;
+        let owned = crate::credential_source::handoff::StaticHandoff::published_for_provider(
+            store, source, &provider,
+        )
+        .await?;
+        crate::credential_source::handoff::StaticHandoff::delete_provider(
+            store,
+            source,
+            provider.object_id(),
+            provider
+                .metadata
+                .as_ref()
+                .map_or(0, |metadata| metadata.resource_version),
+            &owned,
+        )
+        .await?;
+        return Ok(true);
+    }
     crate::provider_refresh::delete_refresh_states_for_provider_with_credentials(
         store,
         credentials,
@@ -2790,15 +2895,20 @@ pub(super) async fn handle_create_provider(
         .await?;
     let profile = resolve_provider_create_profile(&catalog, &mut provider)?;
     validate_provider_create_credentials(&profile, &provider)?;
-    if state.credentials.stores_provider_credentials() && !provider.credentials.is_empty() {
+    let remote = state.remote_provider_mutations()?;
+    if remote.is_none()
+        && state.credentials.stores_provider_credentials()
+        && !provider.credentials.is_empty()
+    {
         state.compute.ensure_workspace(&workspace).await?;
     }
-    let result = create_provider_record_validating(
+    let result = create_provider_record_with_source(
         state.store.as_ref(),
         &workspace,
         &catalog,
         provider,
         Some(&state.credentials),
+        remote,
     )
     .await;
     match result {
@@ -4142,7 +4252,11 @@ pub(super) async fn handle_update_provider(
     provider
         .credential_expiration_times
         .extend(req.credential_expiration_times);
-    if state.credentials.stores_provider_credentials() && !provider.credentials.is_empty() {
+    let remote = state.remote_provider_mutations()?;
+    if remote.is_none()
+        && state.credentials.stores_provider_credentials()
+        && !provider.credentials.is_empty()
+    {
         state.compute.ensure_workspace(&workspace).await?;
     }
     // Freeze this operation's target identities before updating authority.
@@ -4156,13 +4270,14 @@ pub(super) async fn handle_update_provider(
         .provider_profile_sources
         .snapshot_catalog(state.store.as_ref(), &workspace)
         .await?;
-    let result = update_provider_record_validating(
+    let result = update_provider_record_with_source(
         state.store.as_ref(),
         &workspace,
         &catalog,
         provider,
         &req.clear_credential_expiration_keys,
         Some(&state.credentials),
+        remote,
     )
     .await;
     match result {
@@ -5137,6 +5252,11 @@ pub(super) async fn handle_configure_provider_refresh(
         refresh_defaults.as_ref(),
         &additional_output_keys,
     )?;
+    if state.remote_provider_mutations()?.is_some() {
+        return Err(Status::unimplemented(
+            "remote issuer refresh routing is not configured",
+        ));
+    }
     validate_refresh_material(&request.material, refresh_defaults.as_ref())?;
     let mut secret_material_keys: HashSet<String> =
         request.secret_material_keys.iter().cloned().collect();
@@ -5404,6 +5524,11 @@ pub(super) async fn handle_rotate_provider_credential(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    if state.remote_provider_mutations()?.is_some() {
+        return Err(Status::unimplemented(
+            "remote issuer refresh routing is not configured",
+        ));
+    }
     let refresh_state = crate::provider_refresh::refresh_provider_credential(
         state.store.as_ref(),
         &workspace,
@@ -5487,6 +5612,11 @@ pub(super) async fn handle_delete_provider_refresh(
         credential_key,
     )
     .await?;
+    if state.remote_provider_mutations()?.is_some() {
+        return Err(Status::unimplemented(
+            "remote issuer refresh routing is not configured",
+        ));
+    }
     let Some(refresh_state) = existing_refresh_state else {
         return Ok(Response::new(DeleteProviderRefreshResponse {
             outcome: super::deletion_outcome(
@@ -5565,11 +5695,12 @@ pub(super) async fn handle_delete_provider(
         .map_err(|e| super::persistence_error_to_status(e, "acquire provider mutation lock"))?;
     let name = req.name;
     let provider_profile = provider_profile_for_name(state.store.as_ref(), &workspace, &name).await;
-    let result = delete_provider_record_with_credentials(
+    let result = delete_provider_record_with_source(
         state.store.as_ref(),
         &workspace,
         &state.credentials,
         &name,
+        state.remote_provider_mutations()?,
     )
     .await;
     match result {
@@ -5652,6 +5783,7 @@ fn telemetry_provider_profile(provider_type: &str) -> TelemetryProviderProfile {
 
 #[cfg(test)]
 mod tests {
+    mod issuer_mutations;
     mod reference_versions;
     mod strategy_names;
 

@@ -32,6 +32,11 @@ impl CredentialReadPurpose {
 }
 #[async_trait]
 pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
+    /// Opt in to issuer-owned mutation routing. Read-only injected sources do
+    /// not silently gain embedded write authority.
+    fn remote_mutations(&self) -> Option<&RemoteProviderSource> {
+        None
+    }
     /// Project current expiration without fetching secret values. Reconciled
     /// issuer metadata is authoritative after the initial legacy version.
     async fn project_expiration_metadata(
@@ -274,6 +279,9 @@ impl RemoteProviderSource {
 }
 #[async_trait]
 impl ProviderCredentialSource for RemoteProviderSource {
+    fn remote_mutations(&self) -> Option<&RemoteProviderSource> {
+        Some(self)
+    }
     async fn project_expiration_metadata(
         &self,
         _store: &Store,

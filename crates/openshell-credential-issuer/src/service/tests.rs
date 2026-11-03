@@ -20,6 +20,7 @@ use wire::credential_store_server::CredentialStore as _;
 
 pub(super) mod mtls;
 mod postgres;
+mod reservations;
 mod watch;
 
 const A: &str = "spiffe://test.example/gateway/a";

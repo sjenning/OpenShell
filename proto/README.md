@@ -115,7 +115,12 @@ but do not by themselves complete client reconciliation. Metadata inspection
 returns versions, pending-value availability, expiration, and zero cache TTL
 without backend value reads. Reserved outputs reject ordinary resolution until
 first publication; reservations never stand in for fabricated secret values.
-Capabilities advertise that support and message/batch limits.
+Capabilities advertise that support and message/batch limits. The additive
+`ReserveSecret` capability allocates an immutable pending identity with a
+value-free idempotency intent. A caller can journal the returned reference before
+sending a conditional value fill, or replay allocation without retaining the
+value. Original reservation receipts survive fill/deletion; tombstones fence
+late fills rather than allowing resurrection.
 
 The issuer library hosts authenticated store, refresh, and custom-minter
 services. These contracts do not enable a gateway remote-source mode or relax

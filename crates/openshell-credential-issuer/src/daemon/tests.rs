@@ -133,9 +133,31 @@ async fn configured_daemon_authenticates_stores_and_reopens_its_own_encrypted_da
     let client = RemoteIssuer::connect(&fixture.client).await.unwrap();
     assert_eq!(client.list_strategies().await.unwrap().strategies.len(), 4);
     assert!(RemoteIssuer::connect(&fixture.unknown).await.is_err());
+    let reservation = wire::ReserveSecretRequest {
+        owner: Some(owner()),
+        idempotency_key: "reserve".into(),
+    };
+    let reserved = client.reserve_secret(reservation.clone()).await.unwrap();
+    assert_eq!(reserved.version, 1);
+    let metadata = client
+        .resolve_secrets(wire::ResolveSecretsRequest {
+            purpose: wire::ResolvePurpose::MetadataInspection as i32,
+            secrets: vec![wire::ResolveSecretRequest {
+                request_id: "pending".into(),
+                owner: Some(owner()),
+                reference: reserved.reference.clone(),
+                expected_version: Some(1),
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(metadata.secrets[0].pending_value);
+    assert!(metadata.secrets[0].value.is_empty());
     let stored = client
         .put_secret(wire::PutSecretRequest {
             owner: Some(owner()),
+            reference: reserved.reference.clone(),
+            expected_version: Some(1),
             value: "not-in-sqlite-plaintext".into(),
             idempotency_key: "put".into(),
             ..Default::default()
@@ -153,13 +175,14 @@ async fn configured_daemon_authenticates_stores_and_reopens_its_own_encrypted_da
     );
     let (stop, task) = fixture.start().await;
     let client = RemoteIssuer::connect(&fixture.client).await.unwrap();
+    assert_eq!(client.reserve_secret(reservation).await.unwrap(), reserved);
     let result = client
         .resolve_secrets(wire::ResolveSecretsRequest {
             secrets: vec![wire::ResolveSecretRequest {
                 request_id: "one".into(),
                 owner: Some(owner()),
                 reference: stored.reference,
-                expected_version: Some(1),
+                expected_version: Some(2),
             }],
             purpose: wire::ResolvePurpose::SandboxDelivery as i32,
         })

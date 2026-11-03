@@ -303,7 +303,7 @@ impl ProviderCredentialSource for RemoteProviderSource {
             result.versions.insert(key.clone(), value.version);
             if value.pending_value {
                 return Err(Status::failed_precondition(
-                    "provider output is awaiting its first mint",
+                    "provider credential is awaiting its first value",
                 ));
             }
             let expiration = Self::expiration(provider, key, value)?;

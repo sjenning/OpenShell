@@ -23,6 +23,7 @@ use tonic::{Request, Response, Status};
 mod grants;
 mod maintenance;
 mod mutations;
+mod reservations;
 pub use grants::CredentialRefreshService;
 mod watch;
 
@@ -257,7 +258,7 @@ impl Runtime {
             }
             if state.pending_value && purpose != wire::ResolvePurpose::MetadataInspection {
                 return Err(Status::failed_precondition(
-                    "issuer credential output is awaiting its first mint",
+                    "issuer credential reference is awaiting its first value",
                 ));
             }
             if item
@@ -361,7 +362,30 @@ impl wire::credential_store_server::CredentialStore for CredentialStoreService {
             max_batch_size: u32::try_from(BATCH_LIMIT).expect("bounded batch size"),
             max_response_bytes: u32::try_from(MESSAGE_LIMIT).expect("bounded message size"),
             supports_metadata_inspection: true,
+            supports_pending_reservations: true,
         }))
+    }
+    async fn reserve_secret(
+        &self,
+        request: Request<wire::ReserveSecretRequest>,
+    ) -> Result<Response<wire::ReserveSecretResponse>, Status> {
+        let scope = self.runtime.policy.authenticate(&request)?;
+        let request = request.into_inner();
+        scope.authorize_owner(&owner(request.owner.as_ref())?)?;
+        if request.encoded_len() > MESSAGE_LIMIT {
+            return Err(Status::resource_exhausted("issuer request exceeds limit"));
+        }
+        let key = idempotency(&request.idempotency_key)?;
+        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+        let runtime = self.runtime.clone();
+        let response = self
+            .runtime
+            .coordinator
+            .run(&coordination, async move {
+                runtime.reserve(scope, request, key).await
+            })
+            .await?;
+        Ok(Response::new(response))
     }
     async fn put_secret(
         &self,

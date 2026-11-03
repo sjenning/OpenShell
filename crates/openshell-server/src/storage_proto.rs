@@ -655,6 +655,7 @@ mod tests {
             BTreeSet::from(
                 [
                     "openshell.credentials.store.v1.CredentialStore/GetCapabilities",
+                    "openshell.credentials.store.v1.CredentialStore/ReserveSecret",
                     "openshell.credentials.store.v1.CredentialStore/PutSecret",
                     "openshell.credentials.store.v1.CredentialStore/DeleteSecret",
                     "openshell.credentials.store.v1.CredentialStore/ResolveSecrets",

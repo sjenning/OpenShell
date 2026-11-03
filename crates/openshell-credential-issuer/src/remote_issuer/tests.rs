@@ -30,6 +30,22 @@ impl CredentialStore for FaultyStore {
             max_batch_size: 64,
             max_response_bytes: 1024 * 1024,
             supports_metadata_inspection: true,
+            supports_pending_reservations: self.0.mode.load(Ordering::SeqCst) != 90,
+        }))
+    }
+    async fn reserve_secret(
+        &self,
+        _: Request<store::ReserveSecretRequest>,
+    ) -> Result<Response<store::ReserveSecretResponse>, Status> {
+        self.0.puts.fetch_add(1, Ordering::SeqCst);
+        let mode = self.0.mode.load(Ordering::SeqCst);
+        Ok(Response::new(store::ReserveSecretResponse {
+            reference: if mode == 91 {
+                String::new()
+            } else {
+                "reserved-id".into()
+            },
+            version: if mode == 92 { 2 } else { 1 },
         }))
     }
     async fn put_secret(
@@ -187,6 +203,48 @@ async fn insecure_configuration_and_incompatible_protocols_never_fall_back() {
         tonic::Code::FailedPrecondition
     );
 }
+#[tokio::test]
+async fn reservation_capability_and_initial_version_are_validated_without_retries() {
+    let server = Server::start().await;
+    server.faults.mode.store(90, Ordering::SeqCst);
+    let legacy = RemoteIssuer::discover(server.channel.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        legacy
+            .reserve_secret(store::ReserveSecretRequest::default())
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    assert_eq!(server.faults.puts.load(Ordering::SeqCst), 0);
+    server.faults.mode.store(0, Ordering::SeqCst);
+    let client = RemoteIssuer::discover(server.channel.clone())
+        .await
+        .unwrap();
+    for mode in [91, 92] {
+        server.faults.mode.store(mode, Ordering::SeqCst);
+        assert!(
+            client
+                .reserve_secret(store::ReserveSecretRequest::default())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(server.faults.puts.load(Ordering::SeqCst), 2);
+    server.faults.mode.store(0, Ordering::SeqCst);
+    assert_eq!(
+        client
+            .reserve_secret(store::ReserveSecretRequest::default())
+            .await
+            .unwrap()
+            .version,
+        1
+    );
+    assert_eq!(server.faults.puts.load(Ordering::SeqCst), 3);
+}
+
 #[tokio::test]
 async fn remote_mutation_errors_are_sanitized_and_never_retried() {
     let server = Server::start().await;

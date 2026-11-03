@@ -333,6 +333,18 @@ impl WatchedIssuer {
         cache::record(&self.inner, &request, &mut response, before)?;
         Ok(response)
     }
+    pub async fn reserve_secret(
+        &self,
+        request: store::ReserveSecretRequest,
+    ) -> Result<store::ReserveSecretResponse, Status> {
+        let owner = request.owner.clone();
+        let result = self.inner.client.reserve_secret(request).await;
+        self.inner.invalidate_values()?;
+        if let (Ok(response), Some(owner)) = (&result, owner) {
+            self.track_secret(owner, response.reference.clone())?;
+        }
+        result
+    }
     pub async fn put_secret(
         &self,
         request: store::PutSecretRequest,

@@ -122,6 +122,28 @@ impl RemoteIssuer {
             .map(Response::into_inner)
             .map_err(failure)
     }
+    /// Allocate without values, so a gateway can durably journal ownership
+    /// before sending a conditional fill. No automatic mutation replay.
+    pub async fn reserve_secret(
+        &self,
+        message: store::ReserveSecretRequest,
+    ) -> Result<store::ReserveSecretResponse, Status> {
+        if !self.capabilities.supports_pending_reservations {
+            return Err(Status::failed_precondition(
+                "remote issuer does not support pending reservations",
+            ));
+        }
+        let mut client = self.store.clone();
+        let result = self
+            .call(message, ORDINARY, move |request| async move {
+                client.reserve_secret(request).await
+            })
+            .await?;
+        if !validation::id(&result.reference) || result.version != 1 {
+            return Err(invalid());
+        }
+        Ok(result)
+    }
     pub async fn put_secret(
         &self,
         message: store::PutSecretRequest,

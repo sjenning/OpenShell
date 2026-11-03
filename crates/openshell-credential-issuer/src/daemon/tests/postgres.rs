@@ -49,8 +49,20 @@ async fn postgres_configured_daemons_share_versioned_values_and_exact_mutation_r
         provider_id: unique.clone(),
         ..owner()
     };
+    let reservation = wire::ReserveSecretRequest {
+        owner: Some(owner.clone()),
+        idempotency_key: format!("reserve-{unique}"),
+    };
+    let (one, two) = tokio::join!(
+        a.reserve_secret(reservation.clone()),
+        b.reserve_secret(reservation)
+    );
+    let reserved = one.unwrap();
+    assert_eq!(two.unwrap(), reserved);
     let request = wire::PutSecretRequest {
         owner: Some(owner.clone()),
+        reference: reserved.reference,
+        expected_version: Some(1),
         value: "first-replica".into(),
         idempotency_key: format!("put-{unique}"),
         ..Default::default()
@@ -61,14 +73,14 @@ async fn postgres_configured_daemons_share_versioned_values_and_exact_mutation_r
         .put_secret(wire::PutSecretRequest {
             owner: Some(owner.clone()),
             reference: original.reference.clone(),
-            expected_version: Some(1),
+            expected_version: Some(2),
             value: "second-replica".into(),
             idempotency_key: format!("replace-{unique}"),
             ..Default::default()
         })
         .await
         .unwrap();
-    assert_eq!(updated.version, 2);
+    assert_eq!(updated.version, 3);
     let response = a
         .resolve_secrets(wire::ResolveSecretsRequest {
             purpose: wire::ResolvePurpose::SandboxDelivery as i32,
@@ -76,7 +88,7 @@ async fn postgres_configured_daemons_share_versioned_values_and_exact_mutation_r
                 request_id: "read".into(),
                 owner: Some(owner),
                 reference: original.reference,
-                expected_version: Some(2),
+                expected_version: Some(3),
             }],
         })
         .await

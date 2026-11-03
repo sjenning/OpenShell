@@ -47,7 +47,7 @@ pub struct ReferenceState {
     pub backing: Vec<u8>,
     pub expiration_time_ms: Option<i64>,
     pub revoked: bool,
-    /// Reserved output identity awaiting its first mint. Legacy records have
+    /// Reserved identity awaiting its first value. Legacy records have
     /// values; an empty backing is valid only while this flag is true.
     #[serde(default)]
     pub pending_value: bool,

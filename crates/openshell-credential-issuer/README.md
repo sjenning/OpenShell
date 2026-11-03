@@ -316,6 +316,24 @@ The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. Remote-source caching exists separately; gateway
 mode selection and mutation/delivery wiring remain pending.
 
+### Value-free static reservations
+
+`ReserveSecret` allocates an immutable, pending version-one reference and a
+value-free idempotency receipt in one native transaction. It never allocates a
+backend value or secret-dependent fingerprint. Replays return the original
+binding even after fill or revocation; display-name changes are ignored, while
+another owner or operation cannot reuse the key. Capabilities advertise support
+additively, so read-only clients can still connect to earlier issuers.
+
+A gateway can persist a value-free reservation intent, replay that intent after
+an uncertain allocation response, then journal the known reference before
+sending a conditional `PutSecret(expected_version = 1)`. First fill publishes
+version two. Revoking the known pending identity fences a late fill through the
+same native reference CAS and permanent tombstone. The gateway need not persist
+the provider value to discover or clean up an ambiguous fill. This is the
+issuer-side handoff primitive; gateway mutation journaling is not wired yet.
+The existing backing-allocation-to-candidate-journal crash window remains.
+
 ## CredentialRefresh RPC host
 
 `service::CredentialRefreshService` hosts all seven refresh RPCs alongside a

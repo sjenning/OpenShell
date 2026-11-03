@@ -70,18 +70,21 @@ impl GatewayPolicy {
         self.scope_for_identity(certificate_identity(leaf)?)
     }
 
+    // Trusted background enumeration only; request handlers must authenticate
+    // the TLS peer rather than selecting identity from supplied metadata.
+    pub(crate) fn configured_scopes(&self) -> Result<Vec<GatewayScope>, Status> {
+        self.bindings
+            .keys()
+            .cloned()
+            .map(|identity| self.scope_for_identity(identity))
+            .collect()
+    }
+
     fn scope_for_identity(&self, identity: String) -> Result<GatewayScope, Status> {
         let workspaces = self.bindings.get(&identity).ok_or_else(|| {
             Status::permission_denied("gateway identity is not authorized by issuer")
         })?;
-        let digest = openshell_crypto::sha256(
-            format!("openshell.credential-issuer.namespace.v1\0{identity}").as_bytes(),
-        )
-        .map_err(|_| Status::unavailable("issuer identity namespace unavailable"))?;
-        let mut namespace = String::with_capacity(64);
-        for byte in digest {
-            write!(namespace, "{byte:02x}").expect("writing to String cannot fail");
-        }
+        let namespace = identity_namespace(&identity)?;
         Ok(GatewayScope {
             identity,
             namespace,
@@ -205,11 +208,23 @@ impl GatewayScope {
     }
 }
 
+fn identity_namespace(identity: &str) -> Result<String, Status> {
+    let digest = openshell_crypto::sha256(
+        format!("openshell.credential-issuer.namespace.v1\0{identity}").as_bytes(),
+    )
+    .map_err(|_| Status::unavailable("issuer identity namespace unavailable"))?;
+    let mut namespace = String::with_capacity(64);
+    for byte in digest {
+        write!(namespace, "{byte:02x}").expect("writing String cannot fail");
+    }
+    Ok(namespace)
+}
+
 #[cfg(test)]
 pub(crate) fn test_scope(identity: &str) -> GatewayScope {
     GatewayScope {
         identity: identity.to_string(),
-        namespace: format!("test-namespace:{identity}"),
+        namespace: identity_namespace(identity).unwrap(),
         workspaces: BTreeSet::from(["default".to_string()]),
     }
 }

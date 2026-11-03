@@ -32,6 +32,7 @@ sqlx = { workspace = true, features = ["any"] }
 tracing = { workspace = true }
 serde = { workspace = true }
 tonic = { workspace = true }
+tokio-stream = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 

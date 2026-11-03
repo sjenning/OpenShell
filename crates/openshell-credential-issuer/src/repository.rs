@@ -359,6 +359,18 @@ impl ScopedRepository {
             last_sequence,
         })
     }
+    pub async fn current_sequence(&self) -> Result<u64, Status> {
+        let row =
+            sqlx::query("SELECT sequence FROM issuer_sequences WHERE namespace=$1 AND creator=$2")
+                .bind(&self.namespace)
+                .bind(&self.creator)
+                .fetch_optional(&self.repository.pool)
+                .await
+                .map_err(unavailable)?;
+        row.map(|row| unsigned(row.try_get("sequence").map_err(unavailable)?))
+            .transpose()
+            .map(|value| value.unwrap_or(0))
+    }
     pub async fn events_after(&self, sequence: u64, limit: u32) -> Result<Vec<Event>, Status> {
         if limit == 0 || limit > 1024 {
             return Err(Status::invalid_argument("invalid issuer event page size"));
@@ -381,6 +393,27 @@ impl ScopedRepository {
                 })
             })
             .collect()
+    }
+    pub async fn try_refresh_lease(&self, grant: &str) -> Result<Option<RefreshLease>, Status> {
+        if !valid_key(grant) {
+            return Err(Status::invalid_argument("invalid issuer grant lock key"));
+        }
+        let Some(pool) = &self.repository.lock_pool else {
+            return Ok(Some(RefreshLease { _transaction: None }));
+        };
+        let mut tx = pool.begin().await.map_err(unavailable)?;
+        let row =
+            sqlx::query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired")
+                .bind(format!("{}:{grant}", self.namespace))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(unavailable)?;
+        if !row.try_get::<bool, _>("acquired").map_err(unavailable)? {
+            return Ok(None);
+        }
+        Ok(Some(RefreshLease {
+            _transaction: Some(tx),
+        }))
     }
     pub async fn acquire_refresh_lease(&self, grant: &str) -> Result<RefreshLease, Status> {
         if !valid_key(grant) {

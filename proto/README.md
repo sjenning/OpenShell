@@ -110,8 +110,14 @@ resources; supplied owner metadata never replaces mTLS caller authentication.
 Secret-bearing fields carry the `secret` option, and Rust wire messages redact
 secret-bearing debug output. Watches use durable namespace-scoped event cursors,
 not per-reference value versions; reset events require complete reconciliation.
-The contracts are groundwork: defining an RPC does not enable remote mode or
-relax authorization for an existing gateway RPC.
+Value-free checkpoint frames advance replay progress, including filtered events,
+but do not by themselves complete client reconciliation. Metadata inspection
+returns only versions/expiration and zero cache TTL without backend value reads.
+Capabilities advertise that support and message/batch limits.
+
+The issuer library hosts authenticated store and custom-minter services. These
+contracts do not enable a gateway remote-source mode or relax authorization for
+an existing gateway RPC; refresh hosting and deployment wiring remain separate.
 
 ## Isolation backend protocol
 

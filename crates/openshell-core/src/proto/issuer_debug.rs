@@ -96,6 +96,7 @@ mod tests {
             sequence: 99,
             reset_required: false,
             revoked: true,
+            checkpoint: false,
         };
         assert_eq!(
             store::WatchSecretsResponse::decode(watch.encode_to_vec().as_slice()).unwrap(),

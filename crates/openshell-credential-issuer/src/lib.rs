@@ -16,6 +16,7 @@ pub mod refresh;
 pub mod remote_minter;
 pub mod repository;
 pub mod scheduler;
+pub mod service;
 pub mod storage;
 
 use std::sync::Arc;

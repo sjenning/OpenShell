@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tonic::Status;
 
-const KIND: &str = "credential-reference-v1";
+pub(crate) const KIND: &str = "credential-reference-v1";
 #[derive(Debug, Clone)]
 pub struct ReferenceRepository {
     store: ScopedRepository,

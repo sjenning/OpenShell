@@ -114,7 +114,8 @@ pool, release on cancellation/drop, and cannot starve data commits by occupying
 the data pool. SQLite relies on shared engine-local exclusion and durable CAS;
 use PostgreSQL for multiple issuer replicas. Schema initialization rejects newer
 versions and serializes PostgreSQL migrations across startup replicas. The
-repository is not yet wired to the store/refresh RPC hosts.
+repository backs the CredentialStore RPC host. The CredentialRefresh host remains
+unimplemented.
 
 `Repository::backend_objects` adapts the encrypted database driver into a
 reserved physical-object partition that authenticated gateway scopes cannot
@@ -227,6 +228,42 @@ diagnostics. Configured minter services remain responsible for authenticating
 and authorizing issuer identities. Gateway custom-profile/configuration wiring
 and a hosted minter server adapter remain future work.
 
+## CredentialStore RPC host
+
+`service::CredentialStoreService` serves the private store contract through
+`into_service()` over a mandatory-client-auth listener. Start
+`spawn_maintenance()` to retry owned cleanup. Every RPC authenticates its TLS
+peer; value access additionally checks workspace, durable creator, and immutable
+owner. All batch members pass authorization before any backend value read.
+Resolution captures versions, resolves immutable backings, then rechecks the
+whole snapshot. No partial result escapes a failed sibling or version fence.
+
+Put/delete use bounded, detached coordination plus PostgreSQL leases, durable
+idempotency receipts, and atomic reference/event publication. Reusing a key with
+different intent fails. Intent fingerprints that include secret input stay
+encrypted in the credential backend, not as unkeyed plaintext hashes in the
+metadata database. Audit-only display names do not select storage or identity.
+
+Known staged candidates are journaled. Publication consumes their revision-one
+journal rows in its native transaction; cleanup first claims a row by advancing
+its revision, fencing even a late publisher that lost its lease. Retired values
+remain reference-owned until confirmed deletion. Cleanup currently enumerates
+configured gateway/workspace scopes. Disabled scopes remain retained for later
+reconciliation, and a general backend orphan scanner for the allocation-to-journal
+crash window is still missing. The host does not claim crash-proof allocation
+recovery for drivers without preallocation/discovery.
+
+Metadata inspection returns versions and expiration without backend reads or
+values. Value responses bound cache TTL by effective expiration and configured
+TTL. Watches replay durable namespace-wide sequences, begin/reset with full
+reconciliation, and use value-free checkpoint/heartbeat frames after replay or
+filtered events. A checkpoint alone does not complete client reconciliation.
+Unknown cursors reset; stream errors require clients to invalidate caches and
+fail closed. The journal currently retains all events.
+
+The service is a library host, not yet a standalone command or gateway remote
+source. It does not yet implement refresh-grant RPCs or source-side caching.
+
 ## Hosted minters
 
 `hosted_minter::HostedMinter` hosts one registered `custom:<name>` through the
@@ -267,7 +304,8 @@ supplied owner never permits access to another gateway's object. Missing TLS,
 unknown or ambiguous identities, unconfigured workspaces, and wildcard workspace
 bindings fail closed. Services must authenticate every operation, select storage
 by that namespace, and check the bound owner before reading values or mutating
-state. The policy primitives do not yet host store/refresh RPCs.
+state. CredentialStoreService applies these checks to its hosted operations;
+the refresh RPC host remains pending.
 
 ## Verification
 
@@ -275,7 +313,7 @@ state. The policy primitives do not yet host store/refresh RPCs.
 cargo test -p openshell-credential-issuer
 # Against a disposable PostgreSQL database (creates issuer-owned tables):
 OPENSHELL_TEST_ISSUER_POSTGRES_URL=postgres://localhost/issuer_test \
-  cargo test -p openshell-credential-issuer repository::tests::postgres:: -- --ignored
+  cargo test -p openshell-credential-issuer postgres -- --ignored
 cargo test -p openshell-server --lib --features prebuilt-z3 credentials::references::tests
 cargo test -p openshell-server --lib --features prebuilt-z3 grpc::policy::reference_tests
 cargo test -p openshell-server --lib --features prebuilt-z3 provider_refresh::

@@ -357,6 +357,24 @@ service pools to coalesce mints, replay intents, recover known results and
 complete cleanup. These library hosts are not yet a standalone binary,
 deployment configuration, or gateway remote source.
 
+## Remote issuer client
+
+`remote_issuer::RemoteIssuer` is a private-CA HTTPS/mTLS client for all store and
+refresh operations. Connection discovery requires protocol one, bounded batch
+and response sizes, watch support, expiration, and metadata inspection. Calls
+have bounded admission, message sizes, and deadlines. Mutations are never
+replayed automatically; a caller recovering an ambiguous result must retain and
+reuse its original idempotency intent.
+
+The client rejects partial/duplicate resolution batches, mismatched versions,
+secret-bearing metadata, changed fixed output sets, malformed catalogs/status,
+and invalid watch frames. It subtracts elapsed request time from cache budgets
+and clamps them to expiration. Errors contain static diagnostics without remote
+messages or details. Watch connections resume from durable namespace cursors;
+reset/checkpoint frames do not reconcile caller state. Broken, malformed, or
+stalled streams terminate and require a new watch. This is a transport adapter,
+not yet the gateway source, cache, or reconciliation controller.
+
 ## Hosted minters
 
 `hosted_minter::HostedMinter` hosts one registered `custom:<name>` through the

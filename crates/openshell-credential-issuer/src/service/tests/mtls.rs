@@ -82,18 +82,20 @@ impl Server {
         wire::credential_store_client::CredentialStoreClient::new(self.channel(identity).await)
     }
     pub(in crate::service) async fn channel(&self, identity: &str) -> Channel {
+        connect_channel(&self.config(identity)).await.unwrap()
+    }
+    pub(in crate::service) fn config(&self, identity: &str) -> ExtensionChannelConfig {
         let key = openshell_crypto::pki::generate_keypair().unwrap();
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.subject_alt_names = vec![SanType::URI(identity.try_into().unwrap())];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let cert = openshell_crypto::pki::signed_by(params, &key, &self.ca, &self.key).unwrap();
-        let config = ExtensionChannelConfig::new(self.endpoint.clone())
+        ExtensionChannelConfig::new(self.endpoint.clone())
             .with_custom_ca_pem(self.ca.pem())
             .with_client_identity(ExtensionClientIdentity::Pem {
                 certificate: cert.pem().into_bytes(),
                 private_key: key.serialize_pem().unwrap().into_bytes(),
-            });
-        connect_channel(&config).await.unwrap()
+            })
     }
 }
 

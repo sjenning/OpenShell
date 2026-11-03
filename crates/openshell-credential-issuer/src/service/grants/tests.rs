@@ -34,6 +34,7 @@ use std::{
 mod mtls;
 mod postgres;
 mod recovery;
+mod remote_client;
 
 const A: &str = "spiffe://test.example/gateway/a";
 const B: &str = "spiffe://test.example/gateway/b";

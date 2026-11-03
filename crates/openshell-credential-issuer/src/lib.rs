@@ -14,6 +14,7 @@ pub mod hosted_minter;
 pub mod mint_spool;
 pub mod minter;
 pub mod refresh;
+pub mod remote_issuer;
 pub mod remote_minter;
 pub mod repository;
 pub mod scheduler;

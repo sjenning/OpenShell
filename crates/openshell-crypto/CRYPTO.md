@@ -46,8 +46,10 @@ the backend does not modify provider policy.
 Runtime TLS configuration uses the facade's `try_client_builder` and
 `try_server_builder` APIs (including explicit protocol-version variants). A
 provider with no usable cipher suites or compatible key-exchange groups produces
-a configuration error without panic or fallback. The older infallible builders
-are compatibility helpers, not the runtime error-handling contract.
+a configuration error without panic or fallback. Client-certificate verification
+uses `try_client_certificate_verifier` with explicit trust roots and the same
+selected provider; it never enables anonymous client authentication. The older
+infallible builders are compatibility helpers, not the runtime error-handling contract.
 
 ## Contributor rules and coverage
 

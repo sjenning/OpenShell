@@ -87,6 +87,17 @@ pub fn try_server_builder_with_protocol_versions(
         .with_protocol_versions(versions)
 }
 
+/// Require client certificates verified with the selected configuration provider.
+///
+/// Empty trust stores fail; anonymous authentication is never enabled here.
+pub fn try_client_certificate_verifier(
+    roots: Arc<rustls::RootCertStore>,
+) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>, rustls::server::VerifierBuilderError>
+{
+    rustls::server::WebPkiClientVerifier::builder_with_provider(roots, configuration_provider())
+        .build()
+}
+
 /// Compatibility client builder. Use [`try_client_builder`] in runtime code.
 ///
 /// # Panics

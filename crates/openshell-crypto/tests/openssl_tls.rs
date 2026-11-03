@@ -52,12 +52,7 @@ fn tls12_and_tls13_enforce_server_and_client_authentication() {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(ca.der().clone()).unwrap();
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
-        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots.clone()),
-            tls::configuration_provider(),
-        )
-        .build()
-        .unwrap();
+        let verifier = tls::try_client_certificate_verifier(Arc::new(roots.clone())).unwrap();
         let server = tls::try_server_builder_with_protocol_versions(&[version])
             .unwrap()
             .with_client_cert_verifier(verifier)

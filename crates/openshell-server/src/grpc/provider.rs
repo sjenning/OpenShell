@@ -5511,10 +5511,16 @@ pub(super) async fn handle_rotate_provider_credential(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
-    if state.remote_provider_mutations()?.is_some() {
-        return Err(Status::unimplemented(
-            "remote issuer refresh routing is not configured",
-        ));
+    if let Some(source) = state.remote_provider_mutations()? {
+        return issuer_mutations::rotate(
+            state,
+            source,
+            &workspace,
+            provider_name,
+            credential_key,
+            &replay_facts,
+        )
+        .await;
     }
     let refresh_state = crate::provider_refresh::refresh_provider_credential(
         state.store.as_ref(),

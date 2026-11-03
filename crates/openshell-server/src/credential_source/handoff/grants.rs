@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 use tonic::Status;
+pub(super) mod publication;
 mod status;
 /// Value-free immutable request recipe. Never add configuration or material here.
 #[derive(Debug, Clone, Serialize, Deserialize)]

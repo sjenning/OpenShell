@@ -155,7 +155,8 @@ fences roll back outputs, grant state, receipts, and events together.
 
 `service::CredentialRefreshService` composes this adapter with the shared engine
 and autonomous recovery/sweep. Gateway source selection is explicit; public
-remote grant mutation routing remains pending.
+remote grant configure/delete routing remains pending; existing grants can be
+rotated through the selected issuer with metadata-only gateway replay.
 
 ## Refresh coordination and minters
 
@@ -316,8 +317,8 @@ fail closed. The journal currently retains all events.
 The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. The gateway has selected-source delivery, static
 mutation journaling, and operator-export adapters. Gateway TOML source selection
-also starts delivery invalidation and cleanup reconciliation; public grant
-mutation routing remains pending.
+also starts delivery invalidation and cleanup reconciliation. Public grant
+rotation uses that source; grant configure/delete routing remains pending.
 
 ### Value-free static reservations
 

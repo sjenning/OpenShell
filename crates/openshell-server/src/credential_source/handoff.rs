@@ -14,6 +14,7 @@ use tonic::Status;
 mod grants;
 mod partial;
 pub use grants::GrantPlan;
+pub(crate) use grants::publication::PublishedGrant;
 mod recovery;
 mod retirement;
 pub use recovery::{HandoffPage, HandoffReconciler, RecoveryPage};

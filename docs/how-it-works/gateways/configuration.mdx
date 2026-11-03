@@ -141,8 +141,10 @@ registration name and authority stable, and configure every gateway replica
 consistently. Removing or changing the table is not a migration mechanism.
 
 Remote mode supports static provider create/update/delete, delivery, operator
-export, and refresh-status reads. Public refresh configure/rotate/delete remain
-unsupported in this experimental mode. SSH host keys and supervisor launch
+export, refresh-status reads, and rotation of existing issuer-backed grants.
+Public refresh configure/delete remain unsupported in this experimental mode.
+Use a stable request ID when retrying a rotation; replay returns metadata without
+minting again and refuses replaced or retired grant bindings. SSH host keys and supervisor launch
 secrets remain in the gateway's local credential store. The embedded provider
 refresh worker does not run in remote mode.
 

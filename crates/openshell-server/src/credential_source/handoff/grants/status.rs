@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Project issuer metadata, never embedded refresh state or secret values.
+use super::publication::PublishedGrant;
 use super::{Provider, RemoteProviderSource, StaticHandoff, Store, invalid};
 use openshell_core::{
     ObjectId as _, ObjectName as _, ObjectWorkspace as _,
@@ -82,7 +83,6 @@ impl StaticHandoff {
         }
         let mut result = Vec::new();
         for handoff in selected {
-            let grant = handoff.state.grant.as_ref().ok_or_else(invalid)?;
             let status = source
                 .client
                 .get_grant(refresh::GetGrantRequest {
@@ -91,29 +91,11 @@ impl StaticHandoff {
                 .await?
                 .status
                 .ok_or_else(invalid)?;
-            let strategy = if grant.plan.strategy.starts_with("custom:") {
-                ProviderCredentialRefreshStrategy::Unspecified
-            } else {
-                openshell_providers::resolve_refresh_strategy(0, &grant.plan.strategy)
-                    .map_err(|_| invalid())?
-            };
-            result.push(ProviderCredentialRefreshStatus {
-                provider: provider.object_name().into(),
-                provider_id: provider.object_id().into(),
-                credential_key: grant.plan.credential_key.clone(),
-                strategy: strategy as i32,
-                strategy_name: grant.plan.strategy.clone(),
-                status: if status.state == "pending" || status.state == "reserved" {
-                    "configured".into()
-                } else {
-                    status.state
-                },
-                expiration_time: status.expiration_time,
-                next_refresh_time: status.next_refresh_time,
-                recovery_action: recovery(status.recovery_action)?,
-                failure_code: status.failure_code,
-                ..Default::default()
-            });
+            result.push(
+                handoff
+                    .published_grant(provider)?
+                    .project_status(provider, status)?,
+            );
         }
         let current = store
             .get_message::<Provider>(provider.object_id())
@@ -130,5 +112,42 @@ impl StaticHandoff {
         }
         result.sort_by(|a, b| a.credential_key.cmp(&b.credential_key));
         Ok(result)
+    }
+}
+impl PublishedGrant {
+    pub(crate) fn project_status(
+        &self,
+        provider: &Provider,
+        status: refresh::GrantStatus,
+    ) -> Result<ProviderCredentialRefreshStatus, Status> {
+        if status.grant != self.grant
+            || provider.object_id() != self.provider_id
+            || provider.object_workspace() != self.workspace
+        {
+            return Err(invalid());
+        }
+        let strategy = if self.strategy_name.starts_with("custom:") {
+            ProviderCredentialRefreshStrategy::Unspecified
+        } else {
+            openshell_providers::resolve_refresh_strategy(0, &self.strategy_name)
+                .map_err(|_| invalid())?
+        };
+        Ok(ProviderCredentialRefreshStatus {
+            provider: provider.object_name().into(),
+            provider_id: self.provider_id.clone(),
+            credential_key: self.credential_key.clone(),
+            strategy: strategy as i32,
+            strategy_name: self.strategy_name.clone(),
+            status: if matches!(status.state.as_str(), "pending" | "reserved") {
+                "configured".into()
+            } else {
+                status.state
+            },
+            expiration_time: status.expiration_time,
+            next_refresh_time: status.next_refresh_time,
+            recovery_action: recovery(status.recovery_action)?,
+            failure_code: status.failure_code,
+            ..Default::default()
+        })
     }
 }

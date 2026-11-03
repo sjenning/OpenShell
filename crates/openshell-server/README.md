@@ -269,9 +269,15 @@ read-only source cannot fall back to embedded mutation storage. Partial updates
 and metadata-only changes preserve untouched issuer bindings, and deletion claims
 retirement without waiting for physical cleanup. Legacy inline/driver records
 cannot be implicitly adopted on update. Internal secret storage remains local.
-Issuer refresh configure/rotate/delete currently fail explicitly under remote
-selection rather than persisting refresh material locally. Grant mutation routing
-remains separate work.
+Issuer refresh configure/delete currently fail explicitly under remote selection
+rather than persisting refresh material locally. Rotation uses the selected issuer:
+it validates complete published ownership and authoritative metadata-only owner
+checks before minting, then fences the original bundle again before returning.
+Workspace mutation exclusion prevents concurrent gateway rebinding. Neither
+provider records nor local refresh state are rewritten. Request-ID replay retains
+only an explicit scalar status allowlist and a published grant proof, revalidates
+all siblings and the epoch locally, and never calls the issuer or mints again.
+Retired, missing, rebound, or deleted ownership makes replay unavailable.
 `credential_source::delivery_watch` bridges issuer value/grant changes, Unknown,
 consumer lag, and reconciliation recovery to local push-session invalidation.
 Each replica observes its own watches, so the bridge does not echo peer fanout.
@@ -299,7 +305,7 @@ identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
 Static RPC adapters use this infrastructure when a remote source is explicitly
-selected; grant RPC adapters remain pending. The
+selected; grant configure/delete adapters remain pending. The
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+mod issuer_refresh;
 use crate::auth::identity::{Identity, IdentityProvider};
 use crate::auth::principal::UserPrincipal;
 use crate::grpc::mutation_replay::tests::reason;

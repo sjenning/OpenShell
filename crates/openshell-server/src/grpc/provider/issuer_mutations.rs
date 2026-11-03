@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Remote static provider mutations never enter local credential storage.
+//! Remote provider mutations never enter local credential storage.
+mod refresh;
 use crate::{
     credential_source::{RemoteProviderSource, handoff::StaticHandoff},
     persistence::{AtomicWrite, Store},
 };
 use openshell_core::{ObjectId as _, ObjectName as _, ObjectWorkspace as _, proto::Provider};
 use prost::Message as _;
+pub(super) use refresh::rotate;
 use std::collections::HashMap;
 use tonic::Status;
 pub(super) async fn stage(

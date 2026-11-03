@@ -4,8 +4,10 @@
 //! Explicit replay recipes. Never serialize a whole public request or response:
 //! sandbox specs, provider credentials and refresh material can contain secrets.
 
+mod issuer_refresh;
 #[cfg(test)]
 pub(super) mod tests;
+use issuer_refresh::IssuerRefresh;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -89,6 +91,7 @@ pub struct Facts(Arc<Mutex<WriteFacts>>);
 struct WriteFacts {
     references: Vec<Reference>,
     refresh: Option<Refresh>,
+    issuer_refresh: Option<IssuerRefresh>,
     global: bool,
 }
 
@@ -117,6 +120,15 @@ impl Facts {
         Ok(())
     }
 
+    pub(crate) fn issuer_refresh(
+        &self,
+        binding: crate::credential_source::handoff::PublishedGrant,
+        status: &openshell_core::proto::ProviderCredentialRefreshStatus,
+    ) -> Result<(), Status> {
+        self.0.lock().map_err(|_| uncertain())?.issuer_refresh =
+            Some(IssuerRefresh::capture(binding, status)?);
+        Ok(())
+    }
     pub(crate) fn refresh(
         &self,
         state: &StoredProviderCredentialRefreshState,
@@ -198,6 +210,7 @@ pub(in crate::grpc) enum Outcome {
         cleared: u32,
     },
     Refresh(Refresh),
+    IssuerRefresh(Box<IssuerRefresh>),
 }
 
 /// Replay retains immutable operation identities, never a fresh target snapshot
@@ -845,12 +858,23 @@ macro_rules! refresh_mutation {
             $method,
             $handler,
             Admin,
-            |response: &Response<$resp>| Ok(Outcome::Refresh(
-                facts(response)?.refresh.ok_or_else(uncertain)?
-            )),
+            |response: &Response<$resp>| {
+                let facts = facts(response)?;
+                match (facts.refresh, facts.issuer_refresh) {
+                    (Some(local), None) => Ok(Outcome::Refresh(local)),
+                    (None, Some(remote)) => Ok(Outcome::IssuerRefresh(Box::new(remote))),
+                    _ => Err(uncertain()),
+                }
+            },
             async |store: &Store, outcome: Outcome| {
-                let Outcome::Refresh(reference) = outcome else {
-                    return Err(replay_unavailable());
+                let reference = match outcome {
+                    Outcome::Refresh(reference) => reference,
+                    Outcome::IssuerRefresh(remote) => {
+                        return Ok($resp {
+                            status: Some(remote.restore(store).await?),
+                        });
+                    }
+                    _ => return Err(replay_unavailable()),
                 };
                 let state: StoredProviderCredentialRefreshState =
                     live(store, &reference.id).await?;

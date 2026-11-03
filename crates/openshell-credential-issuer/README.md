@@ -84,6 +84,15 @@ namespace and immutable owner metadata (or retain the original physical owner
 with its backing). Do not pass a mutable display name or rely on extra request
 fields that a particular driver does not enforce.
 
+`storage::CredentialStorage` supplies that namespace-bound addressing for new
+issuer-owned backings. It projects authenticated namespace, immutable owner, and
+storage purpose into safe physical names, stages fresh objects, preserves the
+backend's opaque handle separately from its configured registration, validates
+batch correlation and expiration, and sanitizes backend diagnostics. Different
+gateways cannot resolve or delete one another's backing even when their supplied
+logical owner fields match. This wrapper is separate from the gateway's legacy
+local runtime and does not rewrite existing backend identities.
+
 ## Standalone persistence
 
 `repository::Repository` owns a separate, versioned SQLite/PostgreSQL schema.

@@ -48,7 +48,7 @@ impl ProviderCredentialSource for CredentialRuntime {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 const DRIVER: &str = "credential-issuer";
 #[derive(Serialize, Deserialize)]

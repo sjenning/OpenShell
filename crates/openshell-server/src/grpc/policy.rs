@@ -1971,10 +1971,11 @@ async fn current_effective_policy_for_sandbox(
         .as_ref()
         .map(|spec| spec.providers.clone())
         .unwrap_or_default();
-    let records = super::provider::load_provider_environment_records(
+    let records = super::provider::load_provider_environment_records_with_source(
         state.store.as_ref(),
         workspace,
         &provider_names,
+        Some(state.provider_credential_source()),
     )
     .await?;
     current_effective_policy_from_records(state, catalog, sandbox, sandbox_id, &records)
@@ -2403,10 +2404,11 @@ async fn validate_policy_credential_bindings_for_sandbox(
     if bindings.is_empty() && !has_signing {
         return Ok(bindings);
     }
-    let records = super::provider::load_provider_environment_records(
+    let records = super::provider::load_provider_environment_records_with_source(
         state.store.as_ref(),
         workspace,
         provider_names,
+        Some(state.provider_credential_source()),
     )
     .await?;
     validate_policy_credential_binding_context(catalog, &records, policy, &bindings)?;
@@ -2549,6 +2551,7 @@ async fn validate_provider_composition_for_existing_sandboxes(
                 state.store.as_ref(),
                 &workspace,
                 provider_names,
+                Some(state.provider_credential_source()),
             )
             .await?;
             if !missing.is_empty() {
@@ -3806,10 +3809,11 @@ pub(super) async fn resolve_sandbox_create_runtime_inputs(
         .provider_profile_sources
         .snapshot_catalog(state.store.as_ref(), workspace)
         .await?;
-    let provider_records = super::provider::load_provider_environment_records(
+    let provider_records = super::provider::load_provider_environment_records_with_source(
         state.store.as_ref(),
         workspace,
         provider_names,
+        Some(state.provider_credential_source()),
     )
     .await?;
     let (effective_policy, _) = current_effective_policy_from_records(
@@ -3968,7 +3972,7 @@ pub async fn build_provider_environment_snapshot_from_inputs(
             provider_profile_catalog,
             provider_records,
             &policy_credential_bindings,
-            &state.credentials,
+            state.provider_credential_source(),
             Some(&sandbox_id),
         )
         .await?;
@@ -7577,10 +7581,11 @@ async fn sandbox_policy_merge_validation_data_with_catalog(
 ) -> Result<SandboxPolicyMergeValidationData, Status> {
     let global_settings = load_global_settings(state.store.as_ref()).await?;
     let composition_enabled = provider_policy_composition_enabled_in(&global_settings)?;
-    let records = super::provider::load_provider_environment_records(
+    let records = super::provider::load_provider_environment_records_with_source(
         state.store.as_ref(),
         workspace,
         provider_names,
+        Some(state.provider_credential_source()),
     )
     .await?;
     let ProviderPolicyContext {

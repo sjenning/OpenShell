@@ -8,7 +8,7 @@ use crate::{
 use openshell_core::{Config, proto::ObjectMeta};
 use openshell_credential_issuer::remote_issuer::IssuerChange;
 use std::time::Duration;
-mod issuer;
+pub mod issuer;
 fn provider() -> Provider {
     Provider {
         metadata: Some(ObjectMeta {

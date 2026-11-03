@@ -1112,11 +1112,12 @@ pub(super) async fn load_existing_provider_environment_records<'a>(
     store: &Store,
     workspace: &str,
     provider_names: &'a [String],
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
 ) -> Result<(Vec<ProviderEnvironmentRecord>, Vec<&'a str>), Status> {
     let mut records = Vec::with_capacity(provider_names.len());
     let mut missing = Vec::new();
     for (record, name) in
-        load_optional_provider_environment_records(store, workspace, provider_names, None)
+        load_optional_provider_environment_records(store, workspace, provider_names, source)
             .await?
             .into_iter()
             .zip(provider_names)

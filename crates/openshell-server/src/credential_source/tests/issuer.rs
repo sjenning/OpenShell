@@ -20,7 +20,7 @@ use openshell_extension_core::{
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, SanType};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-pub(super) struct Issuer {
+pub struct Issuer {
     pub raw: RemoteIssuer,
     pub watched: WatchedIssuer,
     task: tokio::task::JoinHandle<()>,

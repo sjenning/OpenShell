@@ -232,10 +232,14 @@ and rechecks observed versions after resolution. Inline credentials and legacy
 or differently registered handles never fall back to local drivers. Internal
 secret storage remains an independent local interface.
 
-Snapshot readers accept this boundary and source-aware record loading captures
-the same versions used for resolution. This read adapter does not yet enable
-remote gateway configuration, remote provider mutations/refresh configuration,
-or config-delivery fanout. Those integration points remain separate work.
+Gateway configuration inputs capture versions from the state's selected provider
+read source, and provider snapshot builders resolve through the same selection.
+Both revision hashes therefore include remote rotations without rewriting
+provider records. A captured older version cannot be paired with newer values.
+Production still defaults to the embedded source; tests exercise injected remote
+selection over real mTLS. Remote gateway configuration, provider mutations,
+refresh routing, intermediate-token metadata projection, and watch-driven
+config-delivery fanout remain separate integration work.
 
 ## Operator credential export
 

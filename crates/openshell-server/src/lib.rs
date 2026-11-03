@@ -325,6 +325,10 @@ pub struct ServerState {
     /// Credential-driver selection and resolution runtime.
     pub credentials: credentials::CredentialRuntime,
 
+    /// Provider read selection. None preserves embedded behavior; internal
+    /// secrets never use this interface. Remote startup/mutations are separate.
+    provider_source: Option<Arc<dyn credential_source::ProviderCredentialSource>>,
+
     /// In-memory sandbox correlation index.
     pub sandbox_index: SandboxIndex,
 
@@ -441,6 +445,11 @@ fn is_benign_connection_close(error: &(dyn std::error::Error + 'static)) -> bool
 }
 
 impl ServerState {
+    pub(crate) fn provider_credential_source(
+        &self,
+    ) -> &dyn credential_source::ProviderCredentialSource {
+        self.provider_source.as_deref().unwrap_or(&self.credentials)
+    }
     /// Create new server state.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -506,6 +515,7 @@ impl ServerState {
             store,
             compute,
             credentials,
+            provider_source: None,
             sandbox_index,
             sandbox_watch_bus,
             tracing_log_bus,

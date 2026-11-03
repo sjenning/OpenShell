@@ -14,7 +14,9 @@ use openshell_core::proto::Sandbox;
 use tonic::Status;
 
 use super::super::StoredSettings;
-use super::super::provider::{ProviderEnvironmentRecord, load_provider_environment_records};
+use super::super::provider::{
+    ProviderEnvironmentRecord, load_provider_environment_records_with_source,
+};
 use super::load_global_settings;
 use crate::ServerState;
 use crate::persistence::{ObjectId, ObjectWorkspace, PolicyRecord};
@@ -59,7 +61,12 @@ pub async fn load_sandbox_config_inputs(
         state
             .provider_profile_sources
             .snapshot_catalog(store, workspace),
-        load_provider_environment_records(store, workspace, provider_names),
+        load_provider_environment_records_with_source(
+            store,
+            workspace,
+            provider_names,
+            Some(state.provider_credential_source())
+        ),
         load_global_settings(store),
         async {
             store

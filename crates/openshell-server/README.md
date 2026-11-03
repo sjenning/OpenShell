@@ -266,8 +266,13 @@ retirement without waiting for physical cleanup. Legacy inline/driver records
 cannot be implicitly adopted on update. Internal secret storage remains local.
 Issuer refresh configure/rotate/delete currently fail explicitly under remote
 selection rather than persisting refresh material locally. Production remote
-gateway configuration, grant mutation routing, and watch-driven config-delivery
-fanout remain separate work.
+gateway configuration and grant mutation routing remain separate work.
+`credential_source::delivery_watch` bridges issuer value/grant changes, Unknown,
+consumer lag, and reconciliation recovery to local push-session invalidation.
+Each replica observes its own watches, so the bridge does not echo peer fanout.
+Unchanged health updates do not trigger rebuild loops. Dropping its guard stops
+forwarding without canceling issuer-admitted work. Production startup wiring
+remains separate.
 
 ### Credential handoff ownership journal
 

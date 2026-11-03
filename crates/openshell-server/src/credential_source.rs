@@ -133,6 +133,7 @@ impl ProviderCredentialSource for CredentialRuntime {
     }
 }
 
+pub mod delivery_watch;
 pub mod handoff;
 
 #[cfg(test)]

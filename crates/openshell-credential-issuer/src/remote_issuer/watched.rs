@@ -247,6 +247,12 @@ impl WatchedIssuer {
     pub fn changes(&self) -> broadcast::Receiver<IssuerChange> {
         self.inner.changes.subscribe()
     }
+    /// Observe reconciliation boundaries as well as value-free change events.
+    /// A healthy transition requires consumers to rebuild snapshots that failed
+    /// while metadata was unknown, even if no value version changed.
+    pub fn health_changes(&self) -> watch::Receiver<WatchHealth> {
+        self.inner.health.subscribe()
+    }
     pub fn health(&self) -> Result<WatchHealth, Status> {
         Ok(self.inner.lock()?.health)
     }

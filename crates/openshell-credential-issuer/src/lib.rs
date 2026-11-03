@@ -44,8 +44,26 @@ pub struct ReferenceState {
     pub backing: Vec<u8>,
     pub expiration_time_ms: Option<i64>,
     pub revoked: bool,
+    /// Reserved output identity awaiting its first mint. Legacy records have
+    /// values; an empty backing is valid only while this flag is true.
+    #[serde(default)]
+    pub pending_value: bool,
     /// Retired handles remain owned until their backend deletion succeeds.
     pub pending_deletions: Vec<Vec<u8>>,
+}
+
+impl ReferenceState {
+    pub fn reserved(owner: SecretOwner) -> Self {
+        Self {
+            owner,
+            version: 1,
+            backing: Vec::new(),
+            expiration_time_ms: None,
+            revoked: false,
+            pending_value: true,
+            pending_deletions: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +171,37 @@ impl ReferenceRegistry {
             .transpose()
     }
 
+    /// Reserve an immutable output identity without allocating a fake value.
+    /// Native adapters can prepare several reserved states and grant bindings
+    /// in one transaction using `ReferenceState::reserved`.
+    pub async fn reserve(
+        &self,
+        reference: &str,
+        owner: &SecretOwner,
+    ) -> Result<ReferenceState, Status> {
+        if reference.is_empty()
+            || owner.workspace.is_empty()
+            || owner.provider_id.is_empty()
+            || owner.credential_key.is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "credential reservation identity is incomplete",
+            ));
+        }
+        for _ in 0..RETRIES {
+            if let Some(state) = self.observe(reference, owner).await? {
+                return Ok(state);
+            }
+            let state = ReferenceState::reserved(owner.clone());
+            match self.store.compare_and_swap(reference, None, &state).await {
+                Ok(()) => return Ok(state),
+                Err(error) if is_conflict(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Status::aborted("credential reservation conflicted"))
+    }
+
     /// Idempotently adopt an existing handle as version one. An existing
     /// tombstone is authoritative and must never be recreated as a live epoch.
     pub async fn adopt(
@@ -184,6 +233,7 @@ impl ReferenceRegistry {
                 backing: backing.clone(),
                 expiration_time_ms: None,
                 revoked: false,
+                pending_value: false,
                 pending_deletions: Vec::new(),
             };
             match self.store.compare_and_swap(reference, None, &state).await {
@@ -271,10 +321,11 @@ impl ReferenceRegistry {
                 ));
             }
             state.version = next_version(state.version)?;
-            state.pending_deletions.push(std::mem::replace(
-                &mut state.backing,
-                replacement.backing.clone(),
-            ));
+            let retired = std::mem::replace(&mut state.backing, replacement.backing.clone());
+            if !retired.is_empty() {
+                state.pending_deletions.push(retired);
+            }
+            state.pending_value = false;
             state.expiration_time_ms = replacement.expiration_time_ms;
             writes.push(ReferenceWrite {
                 reference: replacement.reference.clone(),
@@ -323,7 +374,9 @@ impl ReferenceRegistry {
             }
             state.version = next_version(state.version)?;
             state.revoked = true;
-            state.pending_deletions.push(state.backing.clone());
+            if !state.backing.is_empty() {
+                state.pending_deletions.push(state.backing.clone());
+            }
             match self
                 .store
                 .compare_and_swap(reference, Some(record.revision), &state)
@@ -416,7 +469,11 @@ impl ReferenceRegistry {
 }
 
 fn authorize(state: &ReferenceState, owner: &SecretOwner) -> Result<(), Status> {
-    if state.version == 0 || state.backing.is_empty() {
+    if state.version == 0
+        || state.pending_value != state.backing.is_empty()
+        || (state.pending_value && state.expiration_time_ms.is_some())
+        || state.pending_deletions.iter().any(Vec::is_empty)
+    {
         return Err(Status::data_loss("invalid credential reference state"));
     }
     if &state.owner != owner {

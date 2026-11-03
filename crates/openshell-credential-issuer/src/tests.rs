@@ -5,6 +5,7 @@ use super::*;
 use std::{collections::HashMap, sync::Mutex};
 
 mod batches;
+mod reservations;
 
 #[derive(Debug, Default)]
 struct MemoryStore(Mutex<HashMap<String, StoredReference>>);

@@ -120,6 +120,7 @@ fn same_value(a: &ReferenceState, b: &ReferenceState) -> bool {
         && a.backing == b.backing
         && a.expiration_time_ms == b.expiration_time_ms
         && a.revoked == b.revoked
+        && a.pending_value == b.pending_value
 }
 fn unexpired(expiration: Option<i64>, now: i64) -> Result<(), Status> {
     if expiration.is_some_and(|expiration| expiration <= now) {
@@ -211,6 +212,11 @@ impl Runtime {
             if state.revoked {
                 return Err(Status::not_found("issuer credential reference is revoked"));
             }
+            if state.pending_value && purpose != wire::ResolvePurpose::MetadataInspection {
+                return Err(Status::failed_precondition(
+                    "issuer credential output is awaiting its first mint",
+                ));
+            }
             if item
                 .expected_version
                 .is_some_and(|version| version != state.version)
@@ -245,6 +251,7 @@ impl Runtime {
                     .transpose()
                     .map_err(|_| Status::data_loss("invalid issuer expiration metadata"))?,
                 cache_ttl: None,
+                pending_value: state.pending_value,
             });
         }
         for (item, state) in &snapshots {

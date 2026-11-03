@@ -390,6 +390,7 @@ async fn claiming_an_abandoned_candidate_fences_late_publication_before_backend_
         backing: backing.clone(),
         expiration_time_ms: None,
         revoked: false,
+        pending_value: false,
         pending_deletions: Vec::new(),
     };
     let refs = runtime.repository.references(&scope);
@@ -507,6 +508,69 @@ async fn expiration_and_explicit_versions_are_enforced_without_hiding_metadata()
         .unwrap();
     assert_eq!(metadata.secrets[0].version, 2);
     assert!(metadata.secrets[0].value.is_empty());
+}
+
+#[tokio::test]
+async fn reserved_grant_outputs_have_metadata_but_no_readable_fake_values() {
+    let fixture = Fixture::new().await;
+    let runtime = fixture.runtime();
+    let scope = test_scope(A);
+    let supplied = owner(Some(&wire_owner())).unwrap();
+    let refs = runtime.repository.references(&scope);
+    refs.registry()
+        .reserve("reserved", &supplied)
+        .await
+        .unwrap();
+    let metadata = runtime
+        .resolve(
+            &scope,
+            resolve("reserved", wire::ResolvePurpose::MetadataInspection),
+        )
+        .await
+        .unwrap();
+    assert!(metadata.secrets[0].pending_value);
+    assert!(metadata.secrets[0].value.is_empty());
+    assert_eq!(metadata.secrets[0].version, 1);
+    assert_eq!(
+        runtime
+            .resolve(
+                &scope,
+                resolve("reserved", wire::ResolvePurpose::SandboxDelivery)
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(fixture.driver.resolves.load(Ordering::SeqCst), 0);
+    let backing = runtime
+        .storage
+        .stage(&scope, &supplied, VALUE_PURPOSE, "first-mint".to_string())
+        .await
+        .unwrap();
+    refs.registry()
+        .replace("reserved", &supplied, 1, backing, None)
+        .await
+        .unwrap();
+    let response = runtime
+        .resolve(
+            &scope,
+            resolve("reserved", wire::ResolvePurpose::SandboxDelivery),
+        )
+        .await
+        .unwrap();
+    assert!(!response.secrets[0].pending_value);
+    assert_eq!(response.secrets[0].version, 2);
+    assert_eq!(response.secrets[0].value, "first-mint");
+    assert!(
+        refs.load("reserved")
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+            .pending_deletions
+            .is_empty()
+    );
 }
 
 #[tokio::test]

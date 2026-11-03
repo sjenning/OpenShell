@@ -253,8 +253,15 @@ reconciliation, and a general backend orphan scanner for the allocation-to-journ
 crash window is still missing. The host does not claim crash-proof allocation
 recovery for drivers without preallocation/discovery.
 
-Metadata inspection returns versions and expiration without backend reads or
-values. Value responses bound cache TTL by effective expiration and configured
+`ReferenceRegistry::reserve` and `ReferenceState::reserved` allocate pending
+output identities at version one without fake backend values. Metadata
+inspection exposes the pending flag; ordinary resolution fails until the first
+mint atomically publishes version two. First publication and revocation of an
+unminted reservation never queue empty/fake handles for deletion. Existing
+metadata defaults to materialized values, preserving legacy version-one adoption.
+
+Metadata inspection returns versions, availability, and expiration without backend
+reads or values. Value responses bound cache TTL by effective expiration and configured
 TTL. Watches replay durable namespace-wide sequences, begin/reset with full
 reconciliation, and use value-free checkpoint/heartbeat frames after replay or
 filtered events. A checkpoint alone does not complete client reconciliation.

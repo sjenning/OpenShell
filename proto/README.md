@@ -112,7 +112,9 @@ secret-bearing debug output. Watches use durable namespace-scoped event cursors,
 not per-reference value versions; reset events require complete reconciliation.
 Value-free checkpoint frames advance replay progress, including filtered events,
 but do not by themselves complete client reconciliation. Metadata inspection
-returns only versions/expiration and zero cache TTL without backend value reads.
+returns versions, pending-value availability, expiration, and zero cache TTL
+without backend value reads. Reserved outputs reject ordinary resolution until
+first publication; reservations never stand in for fabricated secret values.
 Capabilities advertise that support and message/batch limits.
 
 The issuer library hosts authenticated store and custom-minter services. These

@@ -185,10 +185,11 @@ impl Runtime {
                 .version
                 .checked_add(1)
                 .ok_or_else(|| Status::resource_exhausted("issuer credential version exhausted"))?;
-            if !state.pending_deletions.contains(&state.backing) {
+            if !state.backing.is_empty() && !state.pending_deletions.contains(&state.backing) {
                 state.pending_deletions.push(state.backing.clone());
             }
             state.backing = backing;
+            state.pending_value = false;
             state
         } else {
             ReferenceState {
@@ -197,6 +198,7 @@ impl Runtime {
                 backing,
                 expiration_time_ms: None,
                 revoked: false,
+                pending_value: false,
                 pending_deletions: Vec::new(),
             }
         };
@@ -306,7 +308,7 @@ impl Runtime {
                 .checked_add(1)
                 .ok_or_else(|| Status::resource_exhausted("issuer credential version exhausted"))?;
             state.revoked = true;
-            if !state.pending_deletions.contains(&state.backing) {
+            if !state.backing.is_empty() && !state.pending_deletions.contains(&state.backing) {
                 state.pending_deletions.push(state.backing.clone());
             }
         }

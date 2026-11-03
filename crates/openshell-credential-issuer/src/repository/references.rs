@@ -67,18 +67,21 @@ impl ReferenceRepository {
                 }
                 let same_value = old.state.backing == state.backing
                     && old.state.expiration_time_ms == state.expiration_time_ms
-                    && old.state.revoked == state.revoked;
+                    && old.state.revoked == state.revoked
+                    && old.state.pending_value == state.pending_value;
                 let valid_transition = if state.version == old.state.version {
                     same_value
                 } else {
                     !old.state.revoked && old.state.version.checked_add(1) == Some(state.version)
                 };
-                if !valid_transition {
+                if !valid_transition || (!old.state.pending_value && state.pending_value) {
                     return Err(Status::failed_precondition(
                         "invalid credential reference version transition",
                     ));
                 }
-                if (!same_value && (old.state.backing != state.backing || state.revoked))
+                if (!same_value
+                    && !old.state.backing.is_empty()
+                    && (old.state.backing != state.backing || state.revoked))
                     && !state.pending_deletions.contains(&old.state.backing)
                 {
                     return Err(Status::failed_precondition(

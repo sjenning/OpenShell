@@ -5239,11 +5239,6 @@ pub(super) async fn handle_configure_provider_refresh(
         refresh_defaults.as_ref(),
         &additional_output_keys,
     )?;
-    if state.remote_provider_mutations()?.is_some() {
-        return Err(Status::unimplemented(
-            "remote issuer refresh routing is not configured",
-        ));
-    }
     validate_refresh_material(&request.material, refresh_defaults.as_ref())?;
     let mut secret_material_keys: HashSet<String> =
         request.secret_material_keys.iter().cloned().collect();
@@ -5316,6 +5311,25 @@ pub(super) async fn handle_configure_provider_refresh(
                 .to_proto(refresh.max_lifetime_seconds)
         }),
     };
+    if let Some(source) = state.remote_provider_mutations()? {
+        return issuer_mutations::configure(
+            state,
+            source,
+            &provider,
+            issuer_mutations::Configuration {
+                credential_key: credential_key.into(),
+                strategy,
+                material: request.material,
+                token_url,
+                scopes,
+                refresh_before,
+                max_lifetime,
+                additional_outputs: additional_output_keys,
+            },
+            &replay_facts,
+        )
+        .await;
+    }
     let existing_refresh_state = crate::provider_refresh::get_refresh_state(
         state.store.as_ref(),
         &workspace,

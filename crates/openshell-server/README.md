@@ -269,8 +269,15 @@ read-only source cannot fall back to embedded mutation storage. Partial updates
 and metadata-only changes preserve untouched issuer bindings, and deletion claims
 retirement without waiting for physical cleanup. Legacy inline/driver records
 cannot be implicitly adopted on update. Internal secret storage remains local.
-Issuer refresh configure/delete currently fail explicitly under remote selection
-rather than persisting refresh material locally. Rotation uses the selected issuer:
+Builtin refresh configuration uses shared profile, material, and attached-sandbox
+collision validation, then reserves and initializes an issuer grant before
+atomically replacing the entire output epoch. Configuration and material never
+enter local refresh state or handoff records. The issuer's pinned descriptor
+classifies both encrypted input groups. New references are pending until issuer
+scheduling or explicit freshness publishes values; old values/expiry metadata do
+not seed the new epoch. Reconfiguration retires complete old bundles, and a
+request-ID replay cannot select the replacement epoch. Custom configuration and
+refresh deletion remain unsupported remotely. Rotation uses the selected issuer:
 it validates complete published ownership and authoritative metadata-only owner
 checks before minting, then fences the original bundle again before returning.
 Workspace mutation exclusion prevents concurrent gateway rebinding. Neither
@@ -305,7 +312,8 @@ identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
 Static RPC adapters use this infrastructure when a remote source is explicitly
-selected; grant configure/delete adapters remain pending. The
+selected. Builtin grant configuration uses `prepare_grant`; custom configuration
+and refresh deletion remain pending. The
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;
@@ -355,9 +363,9 @@ one bundle; partial retirement fails before the provider transaction commits.
 Metadata-only updates preserve the bundle without reading values. Recovery
 replays the grant reservation, deletes the known grant, and forgets the journal
 only after confirmed issuer revocation. A cleanup revision claim fences late
-initialization/mint completion from gateway publication. These grant preparation
-primitives remain library-only; they do not yet enable public refresh mutations
-under remote selection.
+initialization/mint completion from gateway publication. Public builtin refresh
+configuration uses pending preparation, while callers needing initial fresh
+outputs can use the library's first-value-required fill path.
 
 ## Operator credential export
 

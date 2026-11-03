@@ -155,8 +155,9 @@ fences roll back outputs, grant state, receipts, and events together.
 
 `service::CredentialRefreshService` composes this adapter with the shared engine
 and autonomous recovery/sweep. Gateway source selection is explicit; public
-remote grant configure/delete routing remains pending; existing grants can be
-rotated through the selected issuer with metadata-only gateway replay.
+builtin grant configuration and rotation use the selected issuer with value-free
+gateway journals and metadata-only replay. Custom configuration and refresh
+deletion remain pending.
 
 ## Refresh coordination and minters
 
@@ -318,7 +319,8 @@ The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. The gateway has selected-source delivery, static
 mutation journaling, and operator-export adapters. Gateway TOML source selection
 also starts delivery invalidation and cleanup reconciliation. Public grant
-rotation uses that source; grant configure/delete routing remains pending.
+configuration for builtin strategies and rotation use that source; custom
+configuration and refresh deletion remain pending.
 
 ### Value-free static reservations
 
@@ -366,7 +368,9 @@ mint. Configuration can be initialized once; another operation cannot replace
 it, change the epoch, or rebind outputs. Exact completed initialization replays
 even after minting/deletion, without reinitializing or minting. Deleting a reserved
 grant revokes its pending outputs and permanently fences late initialization.
-These issuer primitives do not yet route gateway grant configuration RPCs.
+Gateway builtin refresh configuration uses these primitives and publishes
+pending references without requesting an upstream mint. It never persists the
+configuration or material in gateway refresh records.
 
 Store and grant mutations share the gateway's durable idempotency namespace.
 Rotation claims its intent with the pre-mint uncertainty marker, before any

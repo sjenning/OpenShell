@@ -238,8 +238,8 @@ openshell provider refresh rotate my-provider --credential-key ACCESS_TOKEN
 
 Prefer `--secret-material-env KEY[=ENVVAR]` for secret refresh material. `--material KEY=VALUE` is for non-secret material; `--secret-material-key` marks supplied material keys as secret.
 
-The gateway stores secret refresh material through its active credential driver.
-With Vault selected, refresh tokens, client secrets, and private keys live in
+In embedded mode, the gateway stores secret refresh material through its active
+credential driver. With Vault selected, refresh tokens, client secrets, and private keys live in
 Vault alongside injectable provider credentials; refresh state contains only
 opaque handles. A credential-backend read or write failure makes refresh fail
 closed rather than falling back to inline storage. Before OpenShell 0.1.0, the
@@ -248,6 +248,16 @@ credential backends. Reconfigure affected grants after upgrading, and remove or
 reconfigure credentials while the original backend remains available before
 changing backends. Do not run mixed gateway versions against the same refresh
 records.
+
+With an explicitly configured remote credential issuer, builtin refresh
+configuration sends configuration/material only to issuer-owned encrypted
+storage. It replaces the output epoch with pending references rather than
+copying old values/expirations. Delivery waits for the issuer scheduler or
+`provider refresh rotate` to publish first values. For SDK/API clients, reuse a
+stable request ID for configuration/rotation retries; replay returns metadata without reminting,
+and fails if that epoch was retired or replaced. Remote custom configuration and
+refresh deletion remain unsupported. Consult the installed CLI help and published
+gateway configuration reference before selecting this experimental mode.
 
 Gateway-managed refresh credentials use an identity-stable workload handle.
 Routine automatic refresh and `provider refresh rotate` update the access token

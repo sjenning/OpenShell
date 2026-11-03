@@ -165,11 +165,14 @@ metadata reconciliation within `startup_timeout_seconds` (default 30, range
 1–300), without reading values. Existing inline credentials, local driver handles,
 and embedded refresh grants require explicit migration; never remove the table
 or disable TLS verification to bypass that failure. Internal SSH/launch secrets
-still need the local credential store. Public refresh configure/delete are
-currently unsupported remotely; rotation requires complete published grant
-ownership and issuer metadata authorization. Reuse the same request ID when
-retrying a rotation; a retired or replaced bundle makes replay unavailable,
-never permission to remint. Watch changes invalidate local push delivery,
+still need the local credential store. Builtin refresh configuration publishes a
+new pending epoch without copying old values/expirations; delivery waits for the
+issuer's first mint. Rotate explicitly rather than changing source selection to
+force readiness. Custom configuration and refresh deletion remain unsupported
+remotely. Rotation requires complete published grant ownership and issuer
+metadata authorization. Reuse the same request ID when retrying configuration or
+rotation; a retired or replaced bundle makes replay unavailable, never permission
+to remint. Watch changes invalidate local push delivery,
 and the handoff reconciler retries owned cleanup with `cleanup_idle_seconds`
 (default 300, range 60–3600); do not delete ownership journals to clear warnings.
 See the published gateway configuration reference for the experimental mode.

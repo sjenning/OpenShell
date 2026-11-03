@@ -275,7 +275,11 @@ not change them, so set labels during creation.
 Provider refresh stores non-injectable refresh material separately from the
 provider's current credential values. The gateway can mint OAuth2 refresh-token
 tokens, OAuth2 client credentials tokens, Google service account JWT tokens, and
-AWS STS temporary credentials for sandbox injection.
+AWS STS temporary credentials for sandbox injection. With an explicitly selected
+[remote credential issuer](/how-it-works/gateways/configuration#remote-credential-issuer),
+the issuer owns that material and minting instead. Remote configuration creates
+pending output references; rotate to request first values without waiting for
+its scheduler.
 
 For credential-driver-backed outputs, refresh advances established reference
 versions without changing the provider's resource version or sandbox placeholder

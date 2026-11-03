@@ -88,6 +88,8 @@ impl ProviderCredentialSource for CredentialRuntime {
     }
 }
 
+pub mod handoff;
+
 #[cfg(test)]
 pub(crate) mod tests;
 

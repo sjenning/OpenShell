@@ -252,6 +252,33 @@ Production still defaults to the embedded source; tests exercise injected remote
 selection over real mTLS. Remote gateway configuration, provider mutations,
 refresh routing, and watch-driven config-delivery fanout remain separate work.
 
+### Static credential handoff journal
+
+`credential_source::handoff::StaticHandoff` provides the gateway-local,
+value-free ownership primitive for remote static credential mutations. It writes
+`credential_issuer_handoff_v1` before contacting the issuer, reserves every
+reference before sending any value, and journals a one-shot Filling phase before
+value transmission. Interrupted or failed fills recover only through revocation;
+they cannot mix values from a new request into an old partial attempt. No provider
+value or secret-dependent whole-request fingerprint enters this journal.
+
+A ready handoff verifies the complete version-two metadata batch and joins its
+Published marker with the exact provider create/update in one gateway transaction.
+The provider payload must contain only the expected issuer bindings and no inline
+values. Cleanup first claims the journal revision, then replays value-free
+reservations to discover lost allocation responses and revokes every known
+identity. It retains ownership through uncertain cleanup responses. A late owner
+cannot publish after that claim, even before remote revocation finishes.
+
+This is a library primitive, not production mutation routing or a background
+reconciler. Published journals deliberately refuse abort: retirement after later
+provider updates/deletion remains separate work. Labeled providers fail closed
+until atomic provider label-index writes are supported. The issuer's independent
+backing-allocation-to-candidate-journal crash window is not closed by this gateway
+journal. Real mTLS tests cover round trips, ambiguous allocation recovery,
+one-shot fill failure, cleanup/publication fences, rollback, immutable ownership,
+and rejection of inline values or unsupported label-index changes.
+
 ## Operator credential export
 
 `GetProviderCredentials` exports selected profile-declared runtime environment

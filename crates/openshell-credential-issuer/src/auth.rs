@@ -62,37 +62,15 @@ impl GatewayPolicy {
     /// Only TLS connection info is authoritative. Forged identity headers and
     /// owner metadata cannot select a different gateway namespace.
     pub fn authenticate<T>(&self, request: &Request<T>) -> Result<GatewayScope, Status> {
-        if let Some(peer) = request
-            .extensions()
-            .get::<openshell_extension_core::ExtensionPeer>()
-        {
-            return self.scope_for_verified_certificate(peer.certificate_der());
-        }
-        let info = request
-            .extensions()
-            .get::<TlsConnectInfo<TcpConnectInfo>>()
-            .ok_or_else(|| Status::unauthenticated("issuer requires mutual TLS"))?;
-        let certificates = info
-            .peer_certs()
-            .ok_or_else(|| Status::unauthenticated("issuer requires a client certificate"))?;
-        let leaf = certificates
-            .first()
-            .ok_or_else(|| Status::unauthenticated("issuer requires a client certificate"))?;
-        self.scope_for_verified_certificate(leaf.as_ref())
+        self.scope_for_identity(verified_identity(request)?)
     }
 
-    // DER parsing extracts identity only; cryptographic verification belongs to
-    // the TLS listener. Keep this entry point private to prevent header adapters
-    // from treating arbitrary client-provided bytes as an authenticated peer.
+    #[cfg(test)]
     fn scope_for_verified_certificate(&self, leaf: &[u8]) -> Result<GatewayScope, Status> {
-        let certificate = spiffe::cert::Certificate::try_from(leaf)
-            .map_err(|_| Status::unauthenticated("invalid issuer client certificate"))?;
-        let identity = certificate
-            .spiffe_id()
-            .map_err(|_| {
-                Status::unauthenticated("issuer client certificate requires one SPIFFE URI SAN")
-            })?
-            .to_string();
+        self.scope_for_identity(certificate_identity(leaf)?)
+    }
+
+    fn scope_for_identity(&self, identity: String) -> Result<GatewayScope, Status> {
         let workspaces = self.bindings.get(&identity).ok_or_else(|| {
             Status::permission_denied("gateway identity is not authorized by issuer")
         })?;
@@ -110,6 +88,73 @@ impl GatewayPolicy {
             workspaces: workspaces.clone(),
         })
     }
+}
+
+/// Exact issuer identities permitted to call a stateless minter. This is a
+/// different authorization role from gateway workspace access.
+#[derive(Debug, Clone)]
+pub struct IssuerPolicy {
+    identities: BTreeSet<String>,
+}
+
+impl IssuerPolicy {
+    pub fn new(identities: Vec<String>) -> Result<Self, Status> {
+        if identities.is_empty()
+            || identities.iter().any(|identity| {
+                identity
+                    .parse::<spiffe::SpiffeId>()
+                    .map_or(true, |parsed| parsed.to_string() != *identity)
+            })
+        {
+            return Err(Status::invalid_argument(
+                "minter requires explicit canonical issuer identities",
+            ));
+        }
+        Ok(Self {
+            identities: identities.into_iter().collect(),
+        })
+    }
+    pub fn authenticate<T>(&self, request: &Request<T>) -> Result<String, Status> {
+        let identity = verified_identity(request)?;
+        if !self.identities.contains(&identity) {
+            return Err(Status::permission_denied(
+                "issuer identity is not authorized by minter",
+            ));
+        }
+        Ok(identity)
+    }
+}
+
+// DER parsing extracts identity only; verification belongs to the listener.
+// Never expose an entry point accepting unverified request-supplied bytes.
+fn certificate_identity(leaf: &[u8]) -> Result<String, Status> {
+    let certificate = spiffe::cert::Certificate::try_from(leaf)
+        .map_err(|_| Status::unauthenticated("invalid issuer client certificate"))?;
+    certificate
+        .spiffe_id()
+        .map(|id| id.to_string())
+        .map_err(|_| {
+            Status::unauthenticated("issuer client certificate requires one SPIFFE URI SAN")
+        })
+}
+fn verified_identity<T>(request: &Request<T>) -> Result<String, Status> {
+    if let Some(peer) = request
+        .extensions()
+        .get::<openshell_extension_core::ExtensionPeer>()
+    {
+        return certificate_identity(peer.certificate_der());
+    }
+    let info = request
+        .extensions()
+        .get::<TlsConnectInfo<TcpConnectInfo>>()
+        .ok_or_else(|| Status::unauthenticated("issuer requires mutual TLS"))?;
+    let certificates = info
+        .peer_certs()
+        .ok_or_else(|| Status::unauthenticated("issuer requires a client certificate"))?;
+    let leaf = certificates
+        .first()
+        .ok_or_else(|| Status::unauthenticated("issuer requires a client certificate"))?;
+    certificate_identity(leaf.as_ref())
 }
 
 impl GatewayScope {

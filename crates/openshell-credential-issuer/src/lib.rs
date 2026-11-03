@@ -10,6 +10,7 @@ pub mod backend;
 pub mod builtins;
 pub mod engine;
 pub mod grant;
+pub mod hosted_minter;
 pub mod minter;
 pub mod refresh;
 pub mod remote_minter;

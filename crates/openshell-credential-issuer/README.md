@@ -199,6 +199,30 @@ diagnostics. Configured minter services remain responsible for authenticating
 and authorizing issuer identities. Gateway custom-profile/configuration wiring
 and a hosted minter server adapter remain future work.
 
+## Hosted minters
+
+`hosted_minter::HostedMinter` hosts one registered `custom:<name>` through the
+private TokenMinter service. Use `into_service()` with a mandatory-client-auth
+listener such as `ExtensionTlsAcceptor`. `auth::IssuerPolicy` supplies a separate
+exact allowlist of issuer certificate identities; gateway workspace permissions
+and request identity headers do not grant minter access.
+
+The adapter pins the descriptor once, rejects undeclared inputs before invoking
+the implementation, bounds messages to 1 MiB and concurrent exchanges to 1–64,
+and returns explicitly classified overload before admitting an exchange.
+Admitted work survives caller disconnect. A 110-second response deadline leaves
+time for the remote client's two-minute deadline; timeout, panic, invalid output,
+and invalid failure classifications report investigation/parked. A timed-out
+exchange retains its executor slot until completion. The host does not persist
+results, replay requests, or promise exactly-once execution. Implementations may
+use the supplied durable attempt ID for upstream-supported idempotency.
+
+Only validated action/schedule/status combinations cross the protocol. Arbitrary
+plugin/upstream messages, status details, failure codes, and error subtypes are
+replaced with static local classifications. Minters receive only attempt-local
+config and material, not provider records, reference handles, or storage APIs.
+The adapter is a library host, not yet a standalone deployment command.
+
 ## Remote caller authorization
 
 `auth::GatewayPolicy` maps exact certificate SPIFFE URI identities to explicit

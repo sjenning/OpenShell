@@ -271,8 +271,12 @@ identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
 This is a library primitive, not production mutation routing or a background
-reconciler. Published journals deliberately refuse abort: retirement after later
-provider updates/deletion remains separate work. Publication derives the label
+reconciler. Published journals refuse direct abort. `publish_replacing` joins
+old-journal retirement claims to the replacement transaction, and `delete_provider`
+joins them to provider deletion. Both require complete immutable ownership of the
+current static bindings. Cleanup reloads those committed claims before issuer
+revocation; it never infers permission from a missing provider or a display name.
+Stale ownership rolls back the whole mutation. Publication derives the label
 index from the validated provider payload; payload, labels, and journal commit
 or roll back together, including clearing removed labels. The issuer's independent
 backing-allocation-to-candidate-journal crash window is not closed by this gateway

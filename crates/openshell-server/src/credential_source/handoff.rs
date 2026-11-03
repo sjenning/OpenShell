@@ -11,6 +11,8 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tonic::Status;
+mod retirement;
+
 const KIND: &str = "credential_issuer_handoff_v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
@@ -349,6 +351,19 @@ impl StaticHandoff {
         source: &RemoteProviderSource,
         provider_write: AtomicWrite,
     ) -> Result<(), Status> {
+        self.publish_replacing(store, source, provider_write, &[])
+            .await
+    }
+    /// Publish a replacement and claim old journals for retirement atomically.
+    /// Reload claimed journals before calling abort; stale published owners may
+    /// neither delete the old values nor republish their previous bindings.
+    pub async fn publish_replacing(
+        &mut self,
+        store: &Store,
+        source: &RemoteProviderSource,
+        provider_write: AtomicWrite,
+        retiring: &[Self],
+    ) -> Result<(), Status> {
         self.source(source)?;
         if self.state.phase != Phase::Ready {
             return Err(invalid());
@@ -380,6 +395,41 @@ impl StaticHandoff {
             || provider.object_name() != self.state.provider_name
             || !provider.credentials.is_empty()
             || provider.credential_handles != self.handles(source)?
+        {
+            return Err(invalid());
+        }
+        let mut writes = if let Some(expected) = expected {
+            let row = store
+                .get("provider", &self.state.provider_id)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| Status::not_found("handoff provider not found"))?;
+            if row.resource_version != expected {
+                return Err(Status::aborted("handoff provider changed"));
+            }
+            let old = Provider::decode(row.payload.as_slice()).map_err(|_| invalid())?;
+            if old.object_id() != self.state.provider_id
+                || old.object_workspace() != self.state.workspace
+                || row.workspace != self.state.workspace
+            {
+                return Err(invalid());
+            }
+            retirement::claims(source, &old, retiring)?
+        } else {
+            if !retiring.is_empty() {
+                return Err(invalid());
+            }
+            Vec::new()
+        };
+        if retiring
+            .iter()
+            .flat_map(|old| old.state.slots.values())
+            .any(|old| {
+                self.state
+                    .slots
+                    .values()
+                    .any(|new| new.reference == old.reference)
+            })
         {
             return Err(invalid());
         }
@@ -439,18 +489,14 @@ impl StaticHandoff {
         };
         let mut published = self.state.clone();
         published.phase = Phase::Published;
-        store
-            .write_atomically(&[
-                provider_write,
-                AtomicWrite::Update {
-                    object_type: KIND.into(),
-                    id: self.state.id.clone(),
-                    payload: encode(&published)?,
-                    expected_version: self.revision,
-                },
-            ])
-            .await
-            .map_err(storage)?;
+        writes.push(provider_write);
+        writes.push(AtomicWrite::Update {
+            object_type: KIND.into(),
+            id: self.state.id.clone(),
+            payload: encode(&published)?,
+            expected_version: self.revision,
+        });
+        store.write_atomically(&writes).await.map_err(storage)?;
         self.state = published;
         self.revision = self.revision.checked_add(1).ok_or_else(invalid)?;
         Ok(())

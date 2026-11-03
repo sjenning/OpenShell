@@ -145,7 +145,7 @@ async fn publication_rejects_values_or_changed_source_and_updates_label_indexes(
     payload.credential_handles = replacement.handles(&source).unwrap();
     payload.metadata.as_mut().unwrap().labels.clear();
     replacement
-        .publish(
+        .publish_replacing(
             &store,
             &source,
             AtomicWrite::Update {
@@ -154,6 +154,7 @@ async fn publication_rejects_values_or_changed_source_and_updates_label_indexes(
                 payload: payload.encode_to_vec(),
                 expected_version: 1,
             },
+            &[handoff],
         )
         .await
         .unwrap();

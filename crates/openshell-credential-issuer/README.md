@@ -399,6 +399,9 @@ execution.
 
 `spawn_worker()` performs serialized scheduling, known-result recovery, orphaned
 attempt parking, and owned cleanup, including store reference/candidate cleanup.
+Retired-material backend deletion failures retain cleanup ownership for a later
+sweep without suppressing live scheduled refresh or known-result recovery.
+Coordination, ownership, and persistence failures still fail closed.
 Parked unknown outcomes reject scheduled and manual minting. A late known result
 for the same immutable attempt can recover without minting again, but cannot
 cross deletion or an epoch change. Grant deletion revokes all outputs atomically
@@ -470,6 +473,18 @@ missing members. After reading, watch observations fence the entire result befor
 cache publication. Budgets subtract RPC/processing time and expire at the earlier
 monotonic TTL or wall-clock credential expiration. Limits are 512 cached values,
 eight MiB of value bytes, 4,096 tracked references, and 1,024 tracked grants.
+Terminal tracked entries are reclaimed under capacity pressure, including
+logically deleted grants awaiting physical cleanup; live bindings are never
+evicted. Authenticated status reads can still report `deleting` without restoring
+active tracking. Allocating mutations reserve tracking capacity for their
+complete output bundle before contacting the issuer, so a historical tombstone
+does not impose a process-lifetime quota or turn a committed allocation into a
+local capacity error. Per-registration observation tokens prevent old in-flight
+reads from restoring metadata after a terminal entry was reclaimed and
+registered again. Revocation remains durable at the issuer. Independent secret
+and grant metadata epochs prevent cross-stream starvation; a distinct recovery
+notification follows complete reconciliation without treating idle checkpoints
+as value changes.
 Metadata retains no value buffers or audit display names. Idle expired values
 are pruned on checkpoints.
 

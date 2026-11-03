@@ -278,6 +278,13 @@ For credential-driver-backed outputs, rotation advances credential versions
 without changing the provider's resource version. Inspect refresh status and
 sandbox provider readiness rather than watching that resource version for a
 change. Provider get/list responses show current credential expiration.
+After versioned rotation, expiration-only edits that change or clear the
+issuer-owned expiration fail. Replace a static value in the same update to set
+a new expiration; rotate while refresh owns it. When reconfiguring refresh,
+omit explicit expiration to retain the current issuer-owned expiration; a differing
+expiration fails before changing refresh configuration.
+Deleting refresh does not extend a versioned credential's lifetime. Status tables
+show registered custom strategy names rather than the legacy unspecified enum.
 
 While gateway-managed refresh is configured, `provider update --credential`
 cannot replace or delete the refresh-owned primary credential or any co-minted

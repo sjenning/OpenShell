@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use super::{
-    CachedCredential, Inner, VALUE_BYTES, VALUES, WatchHealth, refresh, same_owner, store,
+    CachedCredential, Inner, VALUE_BYTES, VALUES, refresh, same_owner, store, tracking::Observation,
 };
 use prost::Message;
 use std::{
@@ -115,7 +115,7 @@ pub(super) fn record(
     inner: &Inner,
     request: &store::ResolveSecretsRequest,
     response: &mut store::ResolveSecretsResponse,
-    before: WatchHealth,
+    before: &Observation,
 ) -> Result<(), Status> {
     let received = Instant::now();
     let inputs: HashMap<_, _> = request
@@ -123,16 +123,10 @@ pub(super) fn record(
         .iter()
         .map(|value| (value.request_id.as_str(), value))
         .collect();
-    for value in &response.secrets {
-        let input = inputs.get(value.request_id.as_str()).ok_or_else(invalid)?;
-        inner.track_secret(
-            input.owner.clone().ok_or_else(invalid)?,
-            input.reference.clone(),
-        )?;
-    }
     let mut state = inner.lock()?;
-    let unchanged = before.generation == state.health.generation;
-    let healthy = unchanged && before.synchronized() && state.health.synchronized();
+    let unchanged = before.value_generation == state.value_generation;
+    let metadata_unchanged = before.metadata_generation == state.secret_generation;
+    let healthy = unchanged && before.health.synchronized() && state.health.synchronized();
     // A watch observation after RPC admission fences the whole returned batch.
     for value in &response.secrets {
         let input = inputs.get(value.request_id.as_str()).ok_or_else(invalid)?;
@@ -145,7 +139,11 @@ pub(super) fn record(
                 "issuer credential expired during resolution",
             ));
         }
-        let entry = state.secrets.get(&input.reference).ok_or_else(invalid)?;
+        let entry = state
+            .secrets
+            .get(&input.reference)
+            .filter(|entry| before.secret_matches(&input.reference, entry))
+            .ok_or_else(|| Status::aborted("issuer reference binding changed during resolution"))?;
         if entry.version > value.version || entry.gone {
             return Err(Status::aborted(
                 "issuer reference changed during resolution",
@@ -155,17 +153,27 @@ pub(super) fn record(
     let now = Instant::now();
     for value in &mut response.secrets {
         let input = inputs.get(value.request_id.as_str()).ok_or_else(invalid)?;
-        if unchanged {
-            let entry = state
-                .secrets
-                .get_mut(&input.reference)
-                .ok_or_else(invalid)?;
+        let entry = state
+            .secrets
+            .get_mut(&input.reference)
+            .ok_or_else(invalid)?;
+        let changed = entry.metadata.is_none() || entry.version < value.version;
+        // An old epoch cannot publish metadata, but its authenticated version
+        // is still a floor for newer-epoch requests already in flight. Without
+        // it, a delayed older response could restore a value we know is stale.
+        if entry.version < value.version {
             entry.version = value.version;
+            entry.metadata = None;
+        }
+        if metadata_unchanged {
             let mut metadata = value.clone();
             metadata.value = String::new();
             metadata.request_id = String::new();
             metadata.cache_ttl = Some(prost_types::Duration::default());
             entry.metadata = Some(metadata);
+        }
+        if changed {
+            state.secrets_reconciled = false;
         }
         let mut ttl = value
             .cache_ttl
@@ -227,13 +235,59 @@ pub(super) fn record(
     inner.health.send_replace(state.health);
     Ok(())
 }
-pub(super) fn grant(inner: &Inner, status: &refresh::GrantStatus) -> Result<(), Status> {
-    inner.track_grant(status.grant.clone())?;
+pub(super) fn grant(
+    inner: &Inner,
+    status: &refresh::GrantStatus,
+    before: &Observation,
+) -> Result<(), Status> {
     let mut state = inner.lock()?;
-    let entry = state.grants.get_mut(&status.grant).ok_or_else(invalid)?;
-    if !entry.gone && entry.version <= status.version {
-        entry.version = status.version;
-        entry.metadata = Some(status.clone());
+    let unchanged = before.metadata_generation == state.grant_generation;
+    let entry = state
+        .grants
+        .get_mut(&status.grant)
+        .filter(|entry| before.grant_matches(&status.grant, entry))
+        .ok_or_else(|| Status::aborted("issuer grant binding changed during inspection"))?;
+    if entry.gone {
+        // A terminal status is still a valid authenticated GetGrant response;
+        // it must not restore a locally retired binding to active tracking.
+        if !matches!(status.state.as_str(), "deleting" | "deleted" | "detached") {
+            return Err(Status::aborted("issuer grant changed during inspection"));
+        }
+        if entry.terminal {
+            return Ok(());
+        }
+        // Missing/denied was provisional. An explicit terminal response must
+        // upgrade that fence so resets cannot make the binding active again.
+    }
+    if entry.version > status.version {
+        return Err(Status::aborted("issuer grant changed during inspection"));
+    }
+    if matches!(status.state.as_str(), "deleting" | "deleted" | "detached") {
+        // Terminal observations cannot resurrect metadata, even across a reset.
+        state.retire_grant(&status.grant, status.version);
+        if status.state != "detached" {
+            // An authenticated terminal read may beat the secret watch's
+            // revocations. Fence in-flight candidates even if no output has
+            // been cached yet; emptiness is not proof that no RPC is pending.
+            state.clear_values();
+            state.secret_generation = state.secret_generation.wrapping_add(1);
+            state.secrets_reconciled = false;
+            for secret in state.secrets.values_mut() {
+                secret.metadata = None;
+            }
+        }
+    } else {
+        let changed = entry.metadata.is_none() || entry.version < status.version;
+        if entry.version < status.version {
+            entry.version = status.version;
+            entry.metadata = None;
+        }
+        if unchanged {
+            entry.metadata = Some(status.clone());
+        }
+        if changed {
+            state.grants_reconciled = false;
+        }
     }
     inner.health.send_replace(state.health);
     Ok(())

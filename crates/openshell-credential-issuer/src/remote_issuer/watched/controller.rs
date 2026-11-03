@@ -1,67 +1,58 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use super::{ChangeKind, Inner, IssuerChange, cache, refresh, store};
+use super::{ChangeKind, Inner, IssuerChange, cache, refresh, store, tracking::Observation};
 use std::{sync::Arc, time::Duration};
 use tonic::{Code, Status};
-fn missing(error: &Status) -> bool {
+pub(super) fn missing(error: &Status) -> bool {
     matches!(error.code(), Code::NotFound | Code::PermissionDenied)
+}
+fn reconciled(result: Result<(), Status>) -> Result<(), Status> {
+    match result {
+        // A concurrent mutation/retirement won. Leave its metadata unknown;
+        // the next checkpoint inspects the current binding instead.
+        Err(error) if error.code() == Code::Aborted => Ok(()),
+        result => result,
+    }
 }
 async fn reconcile_secret(
     inner: &Inner,
     inputs: Vec<store::ResolveSecretRequest>,
+    before: &Observation,
 ) -> Result<(), Status> {
     let request = store::ResolveSecretsRequest {
         secrets: inputs.clone(),
         purpose: store::ResolvePurpose::MetadataInspection as i32,
     };
-    match inner.client.resolve_secrets(request).await {
-        Ok(response) => {
-            let mut state = inner.lock()?;
-            for value in response.secrets {
-                let input = inputs
-                    .iter()
-                    .find(|input| input.request_id == value.request_id)
-                    .ok_or_else(super::super::invalid)?;
-                if let Some(entry) = state.secrets.get_mut(&input.reference)
-                    && !entry.gone
-                    && value.version >= entry.version
-                {
-                    entry.version = value.version;
-                    entry.metadata = Some(value);
-                }
-            }
-            Ok(())
-        }
+    match inner.client.resolve_secrets(request.clone()).await {
+        Ok(mut response) => reconciled(cache::record(inner, &request, &mut response, before)),
         Err(error) if missing(&error) => {
             // The wire batch is all-or-nothing. Identify individually missing
             // bindings; never turn one tombstone into unrelated revocations.
             for input in inputs {
-                match inner
-                    .client
-                    .resolve_secrets(store::ResolveSecretsRequest {
-                        secrets: vec![input.clone()],
-                        purpose: store::ResolvePurpose::MetadataInspection as i32,
-                    })
-                    .await
-                {
-                    Ok(response) => {
-                        let mut state = inner.lock()?;
-                        if let Some(entry) = state.secrets.get_mut(&input.reference) {
-                            let value = response
-                                .secrets
-                                .into_iter()
-                                .next()
-                                .ok_or_else(super::super::invalid)?;
-                            if !entry.gone && value.version >= entry.version {
-                                entry.version = value.version;
-                                entry.metadata = Some(value);
-                            }
-                        }
+                let request = store::ResolveSecretsRequest {
+                    secrets: vec![input.clone()],
+                    purpose: store::ResolvePurpose::MetadataInspection as i32,
+                };
+                match inner.client.resolve_secrets(request.clone()).await {
+                    Ok(mut response) => {
+                        reconciled(cache::record(inner, &request, &mut response, before))?;
                     }
                     Err(error) if missing(&error) => {
-                        if let Some(entry) = inner.lock()?.secrets.get_mut(&input.reference) {
-                            entry.gone = true;
-                            entry.metadata = None;
+                        let mut state = inner.lock()?;
+                        if before.metadata_generation == state.secret_generation
+                            && state.secrets.get(&input.reference).is_some_and(|entry| {
+                                !entry.gone && before.secret_matches(&input.reference, entry)
+                            })
+                        {
+                            state.retire_secret(&input.reference, 0);
+                            // A denied/missing registration may become authorized
+                            // after reconnect. Only explicit terminal observations
+                            // survive resets permanently.
+                            state
+                                .secrets
+                                .get_mut(&input.reference)
+                                .expect("checked binding")
+                                .terminal = false;
                         }
                     }
                     Err(error) => return Err(error),
@@ -74,47 +65,62 @@ async fn reconcile_secret(
 }
 async fn reconcile_secrets(inner: &Inner) -> Result<(), Status> {
     cache::prune(inner)?;
-    let inputs: Vec<_> = inner
-        .lock()?
-        .secrets
-        .iter()
-        .filter(|(_, entry)| !entry.gone && entry.metadata.is_none())
-        .map(|(reference, entry)| store::ResolveSecretRequest {
-            request_id: reference.clone(),
-            owner: Some(entry.owner.clone()),
-            reference: reference.clone(),
-            expected_version: None,
-        })
-        .collect();
+    let (inputs, before) = {
+        let state = inner.lock()?;
+        let inputs: Vec<_> = state
+            .secrets
+            .iter()
+            .filter(|(_, entry)| !entry.gone && entry.metadata.is_none())
+            .map(|(reference, entry)| store::ResolveSecretRequest {
+                request_id: reference.clone(),
+                owner: Some(entry.owner.clone()),
+                reference: reference.clone(),
+                expected_version: None,
+            })
+            .collect();
+        let before = state.secret_observation(inputs.iter().map(|input| input.reference.clone()));
+        (inputs, before)
+    };
     let batch = usize::try_from(inner.client.capabilities().max_batch_size)
         .map_err(|_| super::super::invalid())?;
     for inputs in inputs.chunks(batch) {
-        reconcile_secret(inner, inputs.to_vec()).await?;
+        reconcile_secret(inner, inputs.to_vec(), &before).await?;
     }
     Ok(())
 }
 async fn reconcile_grants(inner: &Inner) -> Result<(), Status> {
-    let grants: Vec<_> = inner
-        .lock()?
-        .grants
-        .iter()
-        .filter(|(_, entry)| !entry.gone && entry.metadata.is_none())
-        .map(|(id, _)| id.clone())
-        .collect();
+    let (grants, before) = {
+        let state = inner.lock()?;
+        let grants: Vec<_> = state
+            .grants
+            .iter()
+            .filter(|(_, entry)| !entry.gone && entry.metadata.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let before = state.grant_observation(grants.iter().cloned());
+        (grants, before)
+    };
     for id in grants {
         match inner
             .client
             .get_grant(refresh::GetGrantRequest { grant: id.clone() })
             .await
         {
-            Ok(response) => cache::grant(
+            Ok(response) => reconciled(cache::grant(
                 inner,
                 response.status.as_ref().ok_or_else(super::super::invalid)?,
-            )?,
+                &before,
+            ))?,
             Err(error) if missing(&error) => {
-                if let Some(entry) = inner.lock()?.grants.get_mut(&id) {
-                    entry.gone = true;
-                    entry.metadata = None;
+                let mut state = inner.lock()?;
+                if before.metadata_generation == state.grant_generation
+                    && state
+                        .grants
+                        .get(&id)
+                        .is_some_and(|entry| !entry.gone && before.grant_matches(&id, entry))
+                {
+                    state.retire_grant(&id, 0);
+                    state.grants.get_mut(&id).expect("checked binding").terminal = false;
                 }
             }
             Err(error) => return Err(error),
@@ -122,9 +128,14 @@ async fn reconcile_grants(inner: &Inner) -> Result<(), Status> {
     }
     Ok(())
 }
-fn secret_event(inner: &Inner, event: &store::WatchSecretsResponse) -> Result<(), Status> {
+pub(super) fn secret_event(
+    inner: &Inner,
+    event: &store::WatchSecretsResponse,
+) -> Result<(), Status> {
     let mut state = inner.lock()?;
-    state.health.generation = state.health.generation.wrapping_add(1);
+    state.secret_generation = state.secret_generation.wrapping_add(1);
+    state.secrets_reconciled = false;
+    state.values_changed();
     state
         .values
         .retain(|(reference, _), _| reference != &event.reference);
@@ -139,6 +150,7 @@ fn secret_event(inner: &Inner, event: &store::WatchSecretsResponse) -> Result<()
         entry.version = event.version;
         entry.metadata = None;
         entry.gone |= event.revoked;
+        entry.terminal |= event.revoked;
     }
     drop(state);
     inner.send(IssuerChange::Secret {
@@ -148,17 +160,21 @@ fn secret_event(inner: &Inner, event: &store::WatchSecretsResponse) -> Result<()
     });
     Ok(())
 }
-fn grant_event(inner: &Inner, event: &refresh::WatchGrantsResponse) -> Result<(), Status> {
+pub(super) fn grant_event(
+    inner: &Inner,
+    event: &refresh::WatchGrantsResponse,
+) -> Result<(), Status> {
     let mut state = inner.lock()?;
-    state.health.generation = state.health.generation.wrapping_add(1);
-    state.values.clear();
-    state.bytes = 0;
+    state.grant_generation = state.grant_generation.wrapping_add(1);
+    state.grants_reconciled = false;
+    state.clear_values();
     if let Some(entry) = state.grants.get_mut(&event.grant)
         && event.version >= entry.version
     {
         entry.version = event.version;
         entry.metadata = None;
         entry.gone |= event.deleted;
+        entry.terminal |= event.deleted;
     }
     drop(state);
     inner.send(IssuerChange::Grant {

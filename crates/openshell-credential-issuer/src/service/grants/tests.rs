@@ -37,6 +37,7 @@ mod postgres;
 mod recovery;
 mod remote_client;
 mod reservations;
+mod retired_cleanup;
 mod shutdown;
 mod watched_client;
 

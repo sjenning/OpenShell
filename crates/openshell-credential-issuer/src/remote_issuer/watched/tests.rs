@@ -64,24 +64,34 @@ fn response(reference: &str, value: &str) -> store::ResolveSecretsResponse {
         }],
     }
 }
+mod lifecycle;
+mod mutations;
+mod reconciliation;
+mod recovery;
 #[tokio::test]
 async fn disconnects_resets_and_late_rpc_candidates_never_restore_stale_cached_values() {
     let inner = inner();
-    let before = inner.lock().unwrap().health;
-    cache::record(&inner, &request("ref"), &mut response("ref", "old"), before).unwrap();
+    let before = inner.observe_secrets(&request("ref")).unwrap();
+    cache::record(
+        &inner,
+        &request("ref"),
+        &mut response("ref", "old"),
+        &before,
+    )
+    .unwrap();
     assert!(cache::get(&inner, &request("ref")).unwrap().is_some());
     inner.unknown(ChangeKind::Secrets).unwrap();
     assert!(cache::get(&inner, &request("ref")).unwrap().is_none());
     inner.ready(ChangeKind::Secrets).unwrap();
     let mut late = response("ref", "old");
-    cache::record(&inner, &request("ref"), &mut late, before).unwrap();
+    cache::record(&inner, &request("ref"), &mut late, &before).unwrap();
     assert_eq!(late.secrets[0].cache_ttl.as_ref().unwrap().seconds, 0);
     assert!(cache::get(&inner, &request("ref")).unwrap().is_none());
     assert!(inner.lock().unwrap().secrets["ref"].metadata.is_none());
     inner.unknown(ChangeKind::Grants).unwrap();
-    let disconnected = inner.lock().unwrap().health;
+    let disconnected = inner.observe_secrets(&request("ref")).unwrap();
     let mut fresh = response("ref", "fresh");
-    cache::record(&inner, &request("ref"), &mut fresh, disconnected).unwrap();
+    cache::record(&inner, &request("ref"), &mut fresh, &disconnected).unwrap();
     assert_eq!(fresh.secrets[0].cache_ttl.as_ref().unwrap().seconds, 0);
     assert!(inner.lock().unwrap().secrets["ref"].metadata.is_some());
     inner.ready(ChangeKind::Grants).unwrap();
@@ -90,7 +100,6 @@ async fn disconnects_resets_and_late_rpc_candidates_never_restore_stale_cached_v
 #[tokio::test]
 async fn one_changed_sibling_fences_the_entire_result_before_cache_publication() {
     let inner = inner();
-    let before = inner.lock().unwrap().health;
     let mut inputs = request("one");
     inputs.secrets.extend(request("two").secrets);
     let mut values = response("one", "first");
@@ -100,6 +109,7 @@ async fn one_changed_sibling_fences_the_entire_result_before_cache_publication()
             .track_secret(input.owner.clone().unwrap(), input.reference.clone())
             .unwrap();
     }
+    let before = inner.observe_secrets(&inputs).unwrap();
     inner
         .lock()
         .unwrap()
@@ -108,7 +118,7 @@ async fn one_changed_sibling_fences_the_entire_result_before_cache_publication()
         .unwrap()
         .version = 2;
     assert_eq!(
-        cache::record(&inner, &inputs, &mut values, before)
+        cache::record(&inner, &inputs, &mut values, &before)
             .unwrap_err()
             .code(),
         Code::Aborted
@@ -119,12 +129,12 @@ async fn one_changed_sibling_fences_the_entire_result_before_cache_publication()
 #[tokio::test]
 async fn cache_keys_include_immutable_owner_purpose_and_pinned_versions() {
     let inner = inner();
-    let before = inner.lock().unwrap().health;
+    let before = inner.observe_secrets(&request("ref")).unwrap();
     cache::record(
         &inner,
         &request("ref"),
         &mut response("ref", "value"),
-        before,
+        &before,
     )
     .unwrap();
     let mut other = request("ref");
@@ -147,12 +157,12 @@ async fn cache_keys_include_immutable_owner_purpose_and_pinned_versions() {
 #[tokio::test]
 async fn a_partial_cache_or_oversized_request_cannot_bypass_whole_batch_limits() {
     let inner = Arc::new(inner());
-    let before = inner.lock().unwrap().health;
+    let before = inner.observe_secrets(&request("ref")).unwrap();
     cache::record(
         &inner,
         &request("ref"),
         &mut response("ref", "value"),
-        before,
+        &before,
     )
     .unwrap();
     let mut partial = request("ref");
@@ -183,16 +193,17 @@ async fn a_partial_cache_or_oversized_request_cannot_bypass_whole_batch_limits()
 #[tokio::test]
 async fn cache_bytes_entries_and_retained_metadata_are_bounded() {
     let inner = inner();
-    let before = inner.lock().unwrap().health;
     let large = "x".repeat(512 * 1024);
     for number in 0..20 {
         let id = format!("large-{number}");
-        cache::record(&inner, &request(&id), &mut response(&id, &large), before).unwrap();
+        let before = inner.observe_secrets(&request(&id)).unwrap();
+        cache::record(&inner, &request(&id), &mut response(&id, &large), &before).unwrap();
     }
     assert!(inner.lock().unwrap().bytes <= VALUE_BYTES);
     for number in 0..520 {
         let id = format!("small-{number}");
-        cache::record(&inner, &request(&id), &mut response(&id, "v"), before).unwrap();
+        let before = inner.observe_secrets(&request(&id)).unwrap();
+        cache::record(&inner, &request(&id), &mut response(&id, "v"), &before).unwrap();
     }
     let state = inner.lock().unwrap();
     assert!(state.values.len() <= VALUES);

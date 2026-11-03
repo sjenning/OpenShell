@@ -69,11 +69,13 @@ async fn configure_names_are_canonicalized_before_durable_grant_creation() {
     assert_eq!(before.strategy, builtin);
     assert!(before.secret_material_handles.contains_key("client_secret"));
     assert!(!before.material.contains_key("client_secret"));
-    for (strategy, strategy_name) in [
-        (1, name),
-        (i32::MAX, name),
-        (builtin, "custom:acme"),
-        (0, "custom:acme"),
+    for (strategy, strategy_name, expected) in [
+        (1, name, Code::InvalidArgument),
+        (i32::MAX, name, Code::InvalidArgument),
+        (builtin, "custom:acme", Code::InvalidArgument),
+        // A valid custom selector needs an explicitly selected remote issuer;
+        // it is no longer an unknown strategy in the public API.
+        (0, "custom:acme", Code::FailedPrecondition),
     ] {
         let error = handle_configure_provider_refresh(
             &state,
@@ -81,7 +83,7 @@ async fn configure_names_are_canonicalized_before_durable_grant_creation() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.code(), expected);
         assert_eq!(
             crate::provider_refresh::get_refresh_state(
                 &state.store,

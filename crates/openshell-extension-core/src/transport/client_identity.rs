@@ -140,9 +140,13 @@ pub(super) async fn connect(config: &ExtensionChannelConfig) -> Result<Channel, 
     // Validate material before returning a channel as well as on every redial.
     // http only disables tonic's TLS layer; this connector always performs TLS.
     tls_config(config).await?;
+    let origin = standard_endpoint(&config.endpoint)?.uri().clone();
     let config = config.clone();
     let uri = config.endpoint.replacen("https://", "http://", 1);
     standard_endpoint(&uri)?
+        // Keep the HTTPS scheme and original authority in HTTP/2 requests even
+        // though the connector URI bypasses tonic's own TLS layer.
+        .origin(origin)
         .connect_with_connector(service_fn(move |uri: Uri| {
             let config = config.clone();
             async move {

@@ -158,14 +158,26 @@ pub async fn project_expiration_times(
     store: &Store,
     provider: &mut Provider,
 ) -> Result<(), Status> {
+    capture_metadata(store, provider).await.map(|_| ())
+}
+
+/// Capture each reference's version and expiration from the same observation.
+/// A subsequent value read must still fence these versions before delivery.
+pub async fn capture_metadata(
+    store: &Store,
+    provider: &mut Provider,
+) -> Result<HashMap<String, u64>, Status> {
     let registry = new_registry(Arc::new(store.clone()));
+    let mut versions = HashMap::new();
     for (key, handle) in &provider.credential_handles {
-        if let Some(state) = registry
+        let state = registry
             .inspect(
                 &reference_key(handle)?,
                 &owner(provider_scope(provider, key)),
             )
-            .await?
+            .await?;
+        versions.insert(key.clone(), state.as_ref().map_or(1, |state| state.version));
+        if let Some(state) = state
             && state.version > 1
         {
             match state.expiration_time_ms.filter(|_| !state.revoked) {
@@ -182,6 +194,41 @@ pub async fn project_expiration_times(
                     provider.credential_expiration_times.remove(key);
                 }
             }
+        }
+    }
+    Ok(versions)
+}
+
+/// Later reference versions own their expiration. Do not acknowledge an
+/// expiration-only edit that resolution would silently ignore. Replacing or
+/// removing the value establishes a new reference and may set a new expiration.
+pub async fn reject_ineffective_expiration_updates(
+    store: &Store,
+    existing: &Provider,
+    update: &Provider,
+    clear_keys: &[String],
+) -> Result<(), Status> {
+    let keys: HashSet<_> = update
+        .credential_expiration_times
+        .keys()
+        .chain(clear_keys)
+        .filter(|key| {
+            existing.credential_handles.contains_key(*key) && !update.credentials.contains_key(*key)
+        })
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut projected = existing.clone();
+    let versions = capture_metadata(store, &mut projected).await?;
+    for key in keys {
+        if versions.get(key).is_some_and(|version| *version > 1)
+            && update.credential_expiration_times.get(key)
+                != projected.credential_expiration_times.get(key)
+        {
+            return Err(Status::failed_precondition(format!(
+                "credential expiration for '{key}' is issuer-owned; replace a static credential value or rotate refresh to establish a new expiration"
+            )));
         }
     }
     Ok(())

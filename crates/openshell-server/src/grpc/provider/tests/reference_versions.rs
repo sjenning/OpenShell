@@ -14,6 +14,8 @@ use openshell_core::{Config, ObjectId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod expiration_authority;
+
 fn provider() -> Provider {
     Provider {
         metadata: Some(ObjectMeta {

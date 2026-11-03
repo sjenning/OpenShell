@@ -191,9 +191,11 @@ Revocation tombstones fence stale references even when backend deletion fails.
 Retired handles remain durably owned until cleanup succeeds.
 
 Both configuration snapshots hash captured credential versions; provider delivery
-rejects a resolution whose version changed after capture. Rotation within a
-reference therefore changes the environment revision without changing provider
-records or placeholder identities. The refresh worker uses shared issuer
+captures each version and its expiration from the same metadata observation and
+rejects a resolution whose version changed after capture. Collision validation
+uses that expiration projection, including after refresh deletion. Rotation
+within a reference therefore changes the environment revision without changing
+provider records or placeholder identities. The refresh worker uses shared issuer
 coordination and a stateless minter registry. `RefreshEngine` owns attempt
 orchestration behind minter, refresh-state-store, and post-commit sink traits;
 the issuer also owns all four stateless built-in protocol implementations.
@@ -210,10 +212,10 @@ receipt in one transaction without modifying provider records. The transaction
 checks the provider's resource version and every captured output version. First
 mint and legacy inline outputs still use provider-record publication to establish
 references. Reconfiguration clears old mint receipts so its first mint allocates
-new references for the new authorization epoch. The issuer now supplies native
-store/refresh library hosts and a bounded mTLS remote client. Moving the remaining
-embedded adapters, gateway remote-source wiring, and standalone deployment remain
-future work.
+new references for the new authorization epoch. The issuer supplies native
+store/refresh library hosts, an authenticated standalone service, and a bounded
+mTLS remote client. Moving the remaining embedded adapters and standalone
+deployment packaging remain future work.
 
 Intermediate subject-token exchange checks its versioned intermediate-token cache
 before resolving stored subject values. Cache hits still require live attachment,
@@ -257,6 +259,14 @@ status without resolving values or minting. Missing ownership and unsupported
 read-only metadata sources fail closed rather than consulting embedded grants;
 a final provider-binding fence rejects stale status projections. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.
+Expiration-only mutations that would change or clear an established reference's
+issuer-owned expiration fail before publication rather than silently succeeding.
+Replacing a static value can set a new expiration; version-one legacy references
+retain provider-authored expiration edits. Embedded refresh reconfiguration
+rejects differing explicit versioned expirations before staging material or
+changing the grant; omitting expiration preserves the current reference's
+expiration until rotation. Provider update responses project expiration before
+publication without rewriting stored metadata or adding a post-commit failure.
 The gateway defaults to the embedded source. An explicit
 `[openshell.gateway.credential_issuer]` table selects remote provider delivery,
 mutation, export, and status adapters over private-CA mTLS. Startup registers
@@ -441,8 +451,9 @@ sweep adapters enumerate durable grants, perform maintenance, and publish change
   recovery classifications and parks malformed responses. Custom Rust minters
   use `custom:<name>`. Public profiles and configure requests accept exact
   built-in `strategy_name` selectors; a specified enum must agree. Status exposes
-  canonical names for legacy grants. Unregistered custom names are rejected;
-  custom registration and remote services are not yet implemented.
+  canonical names for legacy grants and registered names for custom grants.
+  Remote configure accepts registered single-output custom minters; custom
+  profile declarations and multi-output custom configure remain unsupported.
 - Existing generation/CAS fencing remains active for deletion and
   reconfiguration. An ambiguous rotating-token exchange is parked for recovery
   rather than automatically consuming the grant again.

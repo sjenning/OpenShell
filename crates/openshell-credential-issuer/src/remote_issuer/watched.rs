@@ -12,8 +12,10 @@ use tokio::sync::{broadcast, watch};
 use tonic::Status;
 mod cache;
 mod controller;
+mod mutations;
 #[cfg(test)]
 mod tests;
+mod tracking;
 const REFERENCES: usize = 4096;
 const GRANTS: usize = 1024;
 const VALUES: usize = 512;
@@ -42,6 +44,7 @@ pub enum IssuerChange {
 pub struct WatchHealth {
     pub secrets: bool,
     pub grants: bool,
+    /// Notification epoch, including completed metadata reconciliation.
     pub generation: u64,
 }
 impl WatchHealth {
@@ -56,11 +59,15 @@ struct Secret {
     metadata: Option<store::ResolvedSecret>,
     version: u64,
     gone: bool,
+    terminal: bool,
+    binding: Arc<()>,
 }
 struct Grant {
     metadata: Option<refresh::GrantStatus>,
     version: u64,
     gone: bool,
+    terminal: bool,
+    binding: Arc<()>,
 }
 struct CachedCredential {
     value: store::ResolvedSecret,
@@ -74,6 +81,15 @@ struct State {
     grants: BTreeMap<String, Grant>,
     values: BTreeMap<(String, i32), CachedCredential>,
     bytes: usize,
+    // Completion notifications must not invalidate in-flight values. Metadata
+    // uses independent epochs so the controllers cannot starve each other.
+    value_generation: u64,
+    secret_generation: u64,
+    grant_generation: u64,
+    secrets_reconciled: bool,
+    grants_reconciled: bool,
+    reserved_secrets: usize,
+    reserved_grants: usize,
 }
 struct Inner {
     client: RemoteIssuer,
@@ -107,6 +123,17 @@ fn same_owner(a: &store::SecretOwner, b: &store::SecretOwner) -> bool {
         && a.provider_id == b.provider_id
         && a.credential_key == b.credential_key
 }
+impl State {
+    fn values_changed(&mut self) {
+        self.value_generation = self.value_generation.wrapping_add(1);
+        self.health.generation = self.health.generation.wrapping_add(1);
+    }
+    fn clear_values(&mut self) {
+        self.values_changed();
+        self.values.clear();
+        self.bytes = 0;
+    }
+}
 impl Inner {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>, Status> {
         self.state.lock().map_err(|_| unavailable())
@@ -114,82 +141,26 @@ impl Inner {
     fn send(&self, change: IssuerChange) {
         let _ = self.changes.send(change);
     }
-    fn track_secret(&self, mut owner: store::SecretOwner, reference: String) -> Result<(), Status> {
-        // Display names are audit-only and must not inflate retained bindings.
-        owner.provider = String::new();
-        if !validation::id(&reference)
-            || !validation::id(&owner.workspace)
-            || !validation::id(&owner.provider_id)
-            || !validation::id(&owner.credential_key)
-        {
-            return Err(Status::invalid_argument("invalid issuer reference binding"));
-        }
-        let mut state = self.lock()?;
-        if let Some(old) = state.secrets.get(&reference) {
-            return if same_owner(&owner, &old.owner) {
-                Ok(())
-            } else {
-                Err(Status::failed_precondition(
-                    "issuer reference owner changed",
-                ))
-            };
-        }
-        if state.secrets.len() >= REFERENCES {
-            return Err(Status::resource_exhausted(
-                "issuer tracked reference limit reached",
-            ));
-        }
-        state.secrets.insert(
-            reference,
-            Secret {
-                owner,
-                metadata: None,
-                version: 0,
-                gone: false,
-            },
-        );
-        Ok(())
-    }
-    fn track_grant(&self, grant: String) -> Result<(), Status> {
-        if !validation::id(&grant) {
-            return Err(Status::invalid_argument("invalid issuer grant binding"));
-        }
-        let mut state = self.lock()?;
-        if !state.grants.contains_key(&grant) {
-            if state.grants.len() >= GRANTS {
-                return Err(Status::resource_exhausted(
-                    "issuer tracked grant limit reached",
-                ));
-            }
-            state.grants.insert(
-                grant,
-                Grant {
-                    metadata: None,
-                    version: 0,
-                    gone: false,
-                },
-            );
-        }
-        Ok(())
-    }
     fn unknown(&self, kind: ChangeKind) -> Result<(), Status> {
         let mut state = self.lock()?;
-        state.health.generation = state.health.generation.wrapping_add(1);
-        state.values.clear();
-        state.bytes = 0;
+        state.clear_values();
         match kind {
             ChangeKind::Secrets => {
                 state.health.secrets = false;
+                state.secret_generation = state.secret_generation.wrapping_add(1);
+                state.secrets_reconciled = false;
                 for entry in state.secrets.values_mut() {
                     entry.metadata = None;
-                    entry.gone = false;
+                    entry.gone &= entry.terminal;
                 }
             }
             ChangeKind::Grants => {
                 state.health.grants = false;
+                state.grant_generation = state.grant_generation.wrapping_add(1);
+                state.grants_reconciled = false;
                 for entry in state.grants.values_mut() {
                     entry.metadata = None;
-                    entry.gone = false;
+                    entry.gone &= entry.terminal;
                 }
             }
         }
@@ -200,18 +171,42 @@ impl Inner {
     }
     fn ready(&self, kind: ChangeKind) -> Result<(), Status> {
         let mut state = self.lock()?;
-        match kind {
-            ChangeKind::Secrets => state.health.secrets = true,
-            ChangeKind::Grants => state.health.grants = true,
+        let recovered = match kind {
+            ChangeKind::Secrets => {
+                state.health.secrets = true;
+                let complete = state
+                    .secrets
+                    .values()
+                    .all(|entry| entry.gone || entry.metadata.is_some());
+                let recovered = complete && !state.secrets_reconciled;
+                state.secrets_reconciled = complete;
+                recovered
+            }
+            ChangeKind::Grants => {
+                state.health.grants = true;
+                let complete = state
+                    .grants
+                    .values()
+                    .all(|entry| entry.gone || entry.metadata.is_some());
+                let recovered = complete && !state.grants_reconciled;
+                state.grants_reconciled = complete;
+                recovered
+            }
+        };
+        if recovered {
+            // Per-batch publications may have exposed this generation while
+            // other bindings were still unknown. Make final recovery distinct,
+            // without fencing unrelated RPCs or notifying on idle checkpoints.
+            state.health.generation = state.health.generation.wrapping_add(1);
         }
         self.health.send_replace(state.health);
         Ok(())
     }
     fn invalidate_values(&self) -> Result<(), Status> {
         let mut state = self.lock()?;
-        state.health.generation = state.health.generation.wrapping_add(1);
-        state.values.clear();
-        state.bytes = 0;
+        state.secret_generation = state.secret_generation.wrapping_add(1);
+        state.secrets_reconciled = false;
+        state.clear_values();
         for entry in state.secrets.values_mut() {
             entry.metadata = None;
         }
@@ -331,23 +326,31 @@ impl WatchedIssuer {
             ));
         }
         validation::requests(&request, self.inner.client.capabilities().max_batch_size)?;
-        let before = self.inner.lock()?.health;
+        let before = self.inner.observe_secrets(&request)?;
         if let Some(response) = cache::get(&self.inner, &request)? {
             return Ok(response);
         }
         let mut response = self.inner.client.resolve_secrets(request.clone()).await?;
-        cache::record(&self.inner, &request, &mut response, before)?;
+        cache::record(&self.inner, &request, &mut response, &before)?;
         Ok(response)
     }
     pub async fn reserve_secret(
         &self,
         request: store::ReserveSecretRequest,
     ) -> Result<store::ReserveSecretResponse, Status> {
-        let owner = request.owner.clone();
+        let owner = tracking::owner(
+            request
+                .owner
+                .clone()
+                .ok_or_else(|| Status::invalid_argument("issuer owner is required"))?,
+        )?;
+        let admission = self.inner.admit(1, 0)?;
         let result = self.inner.client.reserve_secret(request).await;
-        self.inner.invalidate_values()?;
-        if let (Ok(response), Some(owner)) = (&result, owner) {
-            self.track_secret(owner, response.reference.clone())?;
+        self.inner.after_mutation(self.inner.invalidate_values());
+        if let Ok(response) = &result {
+            self.inner.after_mutation(
+                admission.commit(vec![(response.reference.clone(), owner)], vec![]),
+            );
         }
         result
     }
@@ -355,11 +358,24 @@ impl WatchedIssuer {
         &self,
         request: store::PutSecretRequest,
     ) -> Result<store::PutSecretResponse, Status> {
-        let owner = request.owner.clone();
+        let owner = tracking::owner(
+            request
+                .owner
+                .clone()
+                .ok_or_else(|| Status::invalid_argument("issuer owner is required"))?,
+        )?;
+        let admission = if request.reference.is_empty() {
+            Some(self.inner.admit(1, 0)?)
+        } else {
+            self.track_secret(owner.clone(), request.reference.clone())?;
+            None
+        };
         let result = self.inner.client.put_secret(request).await;
-        self.inner.invalidate_values()?;
-        if let (Ok(response), Some(owner)) = (&result, owner) {
-            self.track_secret(owner, response.reference.clone())?;
+        self.inner.after_mutation(self.inner.invalidate_values());
+        if let (Ok(response), Some(admission)) = (&result, admission) {
+            self.inner.after_mutation(
+                admission.commit(vec![(response.reference.clone(), owner)], vec![]),
+            );
         }
         result
     }
@@ -367,8 +383,16 @@ impl WatchedIssuer {
         &self,
         request: store::DeleteSecretRequest,
     ) -> Result<store::DeleteSecretResponse, Status> {
+        let reference = request.reference.clone();
         let result = self.inner.client.delete_secret(request).await;
-        self.inner.invalidate_values()?;
+        self.inner.after_mutation(self.inner.invalidate_values());
+        if let Ok(response) = &result {
+            self.inner.after_mutation(
+                self.inner
+                    .lock()
+                    .map(|mut state| state.retire_secret(&reference, response.version)),
+            );
+        }
         result
     }
     pub async fn list_strategies(&self) -> Result<refresh::ListStrategiesResponse, Status> {
@@ -378,44 +402,31 @@ impl WatchedIssuer {
         &self,
         request: refresh::CreateGrantRequest,
     ) -> Result<refresh::CreateGrantResponse, Status> {
-        let owner = request.owner.clone();
-        let outputs = request.outputs.clone();
-        let result = self.inner.client.create_grant(request).await?;
-        self.track_grant(result.grant.clone())?;
-        if let Some(owner) = owner {
-            for (id, reference) in &result.output_references {
-                self.track_secret(
-                    store::SecretOwner {
-                        credential_key: outputs[id].clone(),
-                        ..owner.clone()
-                    },
-                    reference.clone(),
-                )?;
-            }
+        let owners = mutations::output_owners(request.owner.clone(), &request.outputs)?;
+        let admission = self.inner.admit(owners.len(), 1)?;
+        let result = self.inner.client.create_grant(request).await;
+        self.inner.after_mutation(self.inner.invalidate_values());
+        if let Ok(response) = &result {
+            self.inner.after_mutation(admission.commit(
+                mutations::bindings(&owners, &response.output_references),
+                vec![response.grant.clone()],
+            ));
         }
-        Ok(result)
+        result
     }
     pub async fn reserve_grant(
         &self,
         request: refresh::ReserveGrantRequest,
     ) -> Result<refresh::ReserveGrantResponse, Status> {
-        let owner = request.owner.clone();
-        let outputs = request.outputs.clone();
+        let owners = mutations::output_owners(request.owner.clone(), &request.outputs)?;
+        let admission = self.inner.admit(owners.len(), 1)?;
         let result = self.inner.client.reserve_grant(request).await;
-        self.inner.invalidate_values()?;
+        self.inner.after_mutation(self.inner.invalidate_values());
         if let Ok(response) = &result {
-            self.track_grant(response.grant.clone())?;
-            if let Some(owner) = owner {
-                for (id, reference) in &response.output_references {
-                    self.track_secret(
-                        store::SecretOwner {
-                            credential_key: outputs[id].clone(),
-                            ..owner.clone()
-                        },
-                        reference.clone(),
-                    )?;
-                }
-            }
+            self.inner.after_mutation(admission.commit(
+                mutations::bindings(&owners, &response.output_references),
+                vec![response.grant.clone()],
+            ));
         }
         result
     }
@@ -423,24 +434,30 @@ impl WatchedIssuer {
         &self,
         request: refresh::InitializeGrantRequest,
     ) -> Result<refresh::InitializeGrantResponse, Status> {
+        let before = self.inner.observe_grant(&request.grant)?;
         let result = self.inner.client.initialize_grant(request).await;
-        self.inner.invalidate_values()?;
-        if let Ok(response) = &result {
-            cache::grant(
-                &self.inner,
-                response.status.as_ref().ok_or_else(super::invalid)?,
-            )?;
-        }
+        self.inner.after_mutation(
+            self.inner.mutation_status(
+                before,
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|response| response.status.as_ref()),
+                true,
+            ),
+        );
         result
     }
     pub async fn get_grant(
         &self,
         request: refresh::GetGrantRequest,
     ) -> Result<refresh::GetGrantResponse, Status> {
+        let before = self.inner.observe_grant(&request.grant)?;
         let response = self.inner.client.get_grant(request).await?;
         cache::grant(
             &self.inner,
             response.status.as_ref().ok_or_else(super::invalid)?,
+            &before,
         )?;
         Ok(response)
     }
@@ -448,50 +465,70 @@ impl WatchedIssuer {
         &self,
         request: refresh::DeleteGrantRequest,
     ) -> Result<refresh::DeleteGrantResponse, Status> {
+        let grant = request.grant.clone();
         let result = self.inner.client.delete_grant(request).await;
-        self.inner.invalidate_values()?;
+        self.inner.after_mutation(self.inner.invalidate_values());
+        if result.is_ok() {
+            self.inner.after_mutation(
+                self.inner
+                    .lock()
+                    .map(|mut state| state.retire_grant(&grant, 0)),
+            );
+        }
         result
     }
     pub async fn detach_grant(
         &self,
         request: refresh::DetachGrantRequest,
     ) -> Result<refresh::DetachGrantResponse, Status> {
-        // Output metadata and values are unchanged. The grant watch observes
-        // refresh retirement; do not erase otherwise-valid secret metadata.
-        self.inner.client.detach_grant(request).await
+        // Detach retires only the grant. Published output references remain
+        // actively tracked, with unchanged values, versions and expiration.
+        let grant = request.grant.clone();
+        let result = self.inner.client.detach_grant(request).await;
+        if result.is_ok() {
+            self.inner.after_mutation(
+                self.inner
+                    .lock()
+                    .map(|mut state| state.retire_grant(&grant, 0)),
+            );
+        }
+        result
     }
     pub async fn rotate_grant(
         &self,
         request: refresh::RotateGrantRequest,
     ) -> Result<refresh::RotateGrantResponse, Status> {
+        let before = self.inner.observe_grant(&request.grant)?;
         let result = self.inner.client.rotate_grant(request).await;
-        self.inner.invalidate_values()?;
-        if let Ok(response) = &result {
-            cache::grant(
-                &self.inner,
-                response.status.as_ref().ok_or_else(super::invalid)?,
-            )?;
-        }
+        self.inner.after_mutation(
+            self.inner.mutation_status(
+                before,
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|response| response.status.as_ref()),
+                true,
+            ),
+        );
         result
     }
     pub async fn ensure_fresh(
         &self,
         request: refresh::EnsureFreshRequest,
     ) -> Result<refresh::EnsureFreshResponse, Status> {
-        let before = self
+        let version = self
             .known_grant(&request.grant)
             .ok()
             .map(|value| value.version);
+        let before = self.inner.observe_grant(&request.grant)?;
         let result = self.inner.client.ensure_fresh(request).await;
-        if let Ok(response) = &result {
-            let status = response.status.as_ref().ok_or_else(super::invalid)?;
-            if before != Some(status.version) {
-                self.inner.invalidate_values()?;
-            }
-            cache::grant(&self.inner, status)?;
-        } else {
-            self.inner.invalidate_values()?;
-        }
+        let status = result
+            .as_ref()
+            .ok()
+            .and_then(|response| response.status.as_ref());
+        let invalidate = status.is_none_or(|status| version != Some(status.version));
+        self.inner
+            .after_mutation(self.inner.mutation_status(before, status, invalidate));
         result
     }
 }

@@ -4,6 +4,7 @@
 use super::super::{connect_channel, validate_config};
 use super::*;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tower::{Service, ServiceExt};
@@ -38,22 +39,57 @@ fn certificates() -> Certificates {
         client_key: client_key.serialize_pem().unwrap(),
     }
 }
-async fn server(certs: &Certificates, client_ca: &str) -> (String, tokio::task::JoinHandle<()>) {
+#[derive(Clone)]
+struct RecordOriginService {
+    requests: mpsc::UnboundedSender<Uri>,
+}
+
+impl tonic::server::NamedService for RecordOriginService {
+    const NAME: &'static str = "openshell.test.Noop";
+}
+
+impl Service<http::Request<tonic::body::Body>> for RecordOriginService {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        super::super::tests::NoopGrpcService.poll_ready(context)
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        let _ = self.requests.send(request.uri().clone());
+        super::super::tests::NoopGrpcService.call(request)
+    }
+}
+
+async fn server(
+    certs: &Certificates,
+    client_ca: &str,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    mpsc::UnboundedReceiver<Uri>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(&certs.server, &certs.server_key))
         .client_ca_root(tonic::transport::Certificate::from_pem(client_ca));
+    let (requests, received) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         Server::builder()
             .tls_config(tls)
             .unwrap()
-            .add_service(super::super::tests::NoopGrpcService)
+            .add_service(RecordOriginService { requests })
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
     });
-    (format!("https://localhost:{port}"), task)
+    (format!("https://localhost:{port}"), task, received)
 }
 async fn request(config: &ExtensionChannelConfig) -> Result<(), Error> {
     let mut channel = connect_channel(config).await?;
@@ -74,10 +110,27 @@ fn identity(certs: &Certificates) -> ExtensionClientIdentity {
     }
 }
 #[tokio::test]
+async fn mtls_preserves_https_scheme_and_original_authority() {
+    let certs = certificates();
+    let (endpoint, task, mut received) = server(&certs, &certs.ca).await;
+    let origin: Uri = endpoint.parse().unwrap();
+    let config = ExtensionChannelConfig::new(endpoint)
+        .with_custom_ca_pem(certs.ca.as_bytes())
+        .with_client_identity(identity(&certs));
+
+    request(&config).await.unwrap();
+
+    let uri = received.try_recv().unwrap();
+    assert_eq!(uri.scheme_str(), Some("https"));
+    assert_eq!(uri.authority(), origin.authority());
+    assert_eq!(uri.path(), "/openshell.test.Noop/Call");
+    task.abort();
+}
+#[tokio::test]
 async fn mtls_authenticates_both_peers_and_preserves_hostname_checks() {
     let certs = certificates();
     let rogue = certificates();
-    let (endpoint, task) = server(&certs, &certs.ca).await;
+    let (endpoint, task, _) = server(&certs, &certs.ca).await;
     let config = ExtensionChannelConfig::new(&endpoint).with_custom_ca_pem(certs.ca.as_bytes());
     assert!(request(&config).await.is_err());
     request(&config.clone().with_client_identity(identity(&certs)))
@@ -102,7 +155,7 @@ async fn mtls_authenticates_both_peers_and_preserves_hostname_checks() {
 async fn file_identities_are_reloaded_without_falling_back_to_old_credentials() {
     let certs = certificates();
     let rotated = certificates();
-    let (endpoint, task) = server(&certs, &format!("{}{}", certs.ca, rotated.ca)).await;
+    let (endpoint, task, _) = server(&certs, &format!("{}{}", certs.ca, rotated.ca)).await;
     let dir = tempfile::tempdir().unwrap();
     let certificate = dir.path().join("tls.crt");
     let private_key = dir.path().join("tls.key");

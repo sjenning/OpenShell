@@ -75,6 +75,24 @@ pub trait ProviderCredentialSource: std::fmt::Debug + Send + Sync {
         store: &Store,
         provider: &Provider,
     ) -> Result<HashMap<String, u64>, Status>;
+    /// Capture expiration and version together for collision validation and
+    /// delivery. Injected sources without an atomic projection must demonstrate
+    /// that their version vector did not change across the projection.
+    async fn capture_metadata(
+        &self,
+        store: &Store,
+        provider: &mut Provider,
+    ) -> Result<HashMap<String, u64>, Status> {
+        let before = self.reference_versions(store, provider).await?;
+        self.project_expiration_metadata(store, provider).await?;
+        let after = self.reference_versions(store, provider).await?;
+        if before != after {
+            return Err(Status::aborted(
+                "provider credential version changed during metadata capture",
+            ));
+        }
+        Ok(after)
+    }
     async fn resolve_provider_handles(
         &self,
         provider: &Provider,
@@ -131,6 +149,13 @@ impl ProviderCredentialSource for CredentialRuntime {
         provider: &Provider,
     ) -> Result<HashMap<String, u64>, Status> {
         references::versions(store, provider).await
+    }
+    async fn capture_metadata(
+        &self,
+        store: &Store,
+        provider: &mut Provider,
+    ) -> Result<HashMap<String, u64>, Status> {
+        references::capture_metadata(store, provider).await
     }
     async fn resolve_provider_handles_for(
         &self,
@@ -349,7 +374,18 @@ impl RemoteProviderSource {
     }
     /// Hydrate metadata without updating the provider spec or reading values.
     pub fn project_expiration_times(&self, provider: &mut Provider) -> Result<(), Status> {
-        for (key, value) in self.metadata(provider)? {
+        self.capture_provider_metadata(provider).map(|_| ())
+    }
+    fn capture_provider_metadata(
+        &self,
+        provider: &mut Provider,
+    ) -> Result<HashMap<String, u64>, Status> {
+        let metadata = self.metadata(provider)?;
+        let versions = metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.version))
+            .collect();
+        for (key, value) in metadata {
             match Self::expiration(provider, &key, &value)? {
                 Some(expiration) => {
                     provider.credential_expiration_times.insert(
@@ -363,7 +399,7 @@ impl RemoteProviderSource {
                 }
             }
         }
-        Ok(())
+        Ok(versions)
     }
 }
 #[async_trait]
@@ -412,6 +448,13 @@ impl ProviderCredentialSource for RemoteProviderSource {
             .into_iter()
             .map(|(key, value)| (key, value.version))
             .collect())
+    }
+    async fn capture_metadata(
+        &self,
+        _store: &Store,
+        provider: &mut Provider,
+    ) -> Result<HashMap<String, u64>, Status> {
+        self.capture_provider_metadata(provider)
     }
     async fn resolve_provider_handles_for(
         &self,

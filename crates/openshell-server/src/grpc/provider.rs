@@ -490,8 +490,29 @@ async fn update_provider_record_with_source(
     reject_refresh_owned_credential_updates(store, existing.object_id(), &provider.credentials)
         .await?;
 
+    if remote.is_none() {
+        // Public updates hold the workspace mutation guard, as do embedded
+        // refresh publications (including the distributed PostgreSQL guard).
+        // A version-one expiration edit cannot race a refresh publication
+        // between this observation and the provider CAS.
+        Box::pin(
+            crate::credentials::references::reject_ineffective_expiration_updates(
+                store,
+                &existing,
+                &provider,
+                clear_credential_expiration_keys,
+            ),
+        )
+        .await?;
+    }
+
+    let mut response_expiration_metadata = existing.clone();
     if let Some(source) = remote {
         source.register_provider(&existing)?;
+        response_expiration_metadata
+            .credential_handles
+            .retain(|key, _| !provider.credentials.contains_key(key));
+        source.project_expiration_times(&mut response_expiration_metadata)?;
     }
     let credentials = if remote.is_some() { None } else { credentials };
     let current_version = existing.metadata.as_ref().map_or(0, |m| m.resource_version);
@@ -571,6 +592,7 @@ async fn update_provider_record_with_source(
         .credential_handles
         .extend(credential_update.pre_stored_handles.clone());
 
+    let mut response_provider = None;
     let cas_result = async {
         validate_provider_mutable_fields(&candidate)?;
         if let Some(profile) = get_provider_type_profile_for_scope(
@@ -584,6 +606,42 @@ async fn update_provider_record_with_source(
             store, catalog, workspace, &candidate,
         )
         .await?;
+
+        // Project a response copy before publication. Stored legacy metadata is
+        // not authority for later reference versions, and a metadata failure
+        // must not turn an already committed update into an apparent failure.
+        let mut projected = candidate.clone();
+        if remote.is_some() {
+            // Staging remote values invalidates watch metadata. Their expiry
+            // is already the explicit staged expiry; retained references use
+            // the value-free observation captured before those effects.
+            for key in candidate
+                .credential_handles
+                .keys()
+                .filter(|key| !updated_credential_values.contains_key(*key))
+            {
+                match response_expiration_metadata
+                    .credential_expiration_times
+                    .get(key)
+                {
+                    Some(expiration) => {
+                        projected
+                            .credential_expiration_times
+                            .insert(key.clone(), *expiration);
+                    }
+                    None => {
+                        projected.credential_expiration_times.remove(key);
+                    }
+                }
+            }
+        } else {
+            Box::pin(crate::credentials::references::project_expiration_times(
+                store,
+                &mut projected,
+            ))
+            .await?;
+        }
+        response_provider = Some(projected);
 
         if let Some(source) = remote {
             return issuer_mutations::publish(
@@ -658,11 +716,13 @@ async fn update_provider_record_with_source(
     }
 
     // Update resource_version from successful write
-    if let Some(metadata) = candidate.metadata.as_mut() {
+    let mut response_provider = response_provider
+        .expect("successful provider publication has a prepared response projection");
+    if let Some(metadata) = response_provider.metadata.as_mut() {
         metadata.resource_version = result;
     }
 
-    Ok(redact_provider_credentials(candidate))
+    Ok(redact_provider_credentials(response_provider))
 }
 
 #[cfg(test)]
@@ -1165,13 +1225,13 @@ async fn load_provider_environment_record(
     else {
         return Ok(None);
     };
-    let provider = Provider::decode(record.payload.as_slice())
+    let mut provider = Provider::decode(record.payload.as_slice())
         .map_err(|e| Status::internal(format!("failed to decode provider '{name}': {e}")))?;
     let refresh_states =
         crate::provider_refresh::list_refresh_states_for_provider(store, &record.id).await?;
     let credential_versions = match source {
-        Some(source) => source.reference_versions(store, &provider).await?,
-        None => crate::credentials::references::versions(store, &provider).await?,
+        Some(source) => source.capture_metadata(store, &mut provider).await?,
+        None => crate::credentials::references::capture_metadata(store, &mut provider).await?,
     };
     Ok(Some(ProviderEnvironmentRecord {
         name: name.to_string(),
@@ -2181,6 +2241,9 @@ pub async fn validate_provider_credential_key_available_for_attached_sandboxes_w
         .credentials
         .entry(credential_key.to_string())
         .or_insert_with(|| "pending".to_string());
+    // This synthetic output belongs to a prospective new epoch, not the old
+    // reference whose expired metadata might otherwise hide the reservation.
+    candidate.credential_handles.remove(credential_key);
     candidate.credential_expiration_times.remove(credential_key);
     validate_provider_update_against_attached_sandboxes_with_catalog(
         store, catalog, workspace, &candidate,
@@ -2565,9 +2628,11 @@ async fn active_provider_environment_keys_for_identity(
     } else {
         crate::provider_refresh::list_refresh_states_for_provider(store, provider_identity).await?
     };
+    let mut projected = provider.clone();
+    crate::credentials::references::project_expiration_times(store, &mut projected).await?;
     Ok(active_keys_with_refresh_states(
         catalog,
-        provider,
+        &projected,
         &refresh_states,
         now_ms,
     ))
@@ -4271,7 +4336,7 @@ pub(super) async fn handle_update_provider(
         .provider_profile_sources
         .snapshot_catalog(state.store.as_ref(), &workspace)
         .await?;
-    let result = update_provider_record_with_source(
+    let result = Box::pin(update_provider_record_with_source(
         state.store.as_ref(),
         &workspace,
         &catalog,
@@ -4279,7 +4344,7 @@ pub(super) async fn handle_update_provider(
         &req.clear_credential_expiration_keys,
         Some(&state.credentials),
         remote,
-    )
+    ))
     .await;
     match result {
         Ok(provider) => {
@@ -5357,16 +5422,45 @@ pub(super) async fn handle_configure_provider_refresh(
             .as_ref()
             .map(|metadata| metadata.resource_version)
     });
-    let has_expiration = requested_expiration_ms.is_some()
-        || existing_refresh_state
-            .as_ref()
-            .is_some_and(crate::provider_refresh::refresh_has_expiration);
-    let expires_at_ms = requested_expiration_ms.unwrap_or_else(|| {
-        existing_refresh_state
-            .as_ref()
-            .map(|state| state.expires_at_ms)
-            .unwrap_or_default()
-    });
+    // Reconfiguration changes authorization, not an already published value.
+    // Reject unsupported expiration edits before storing material or changing
+    // the durable grant. With no explicit edit, carry the issuer's current
+    // expiration forward rather than a potentially stale grant/provider field.
+    let mut projected = provider.clone();
+    let versions = Box::pin(crate::credentials::references::capture_metadata(
+        state.store.as_ref(),
+        &mut projected,
+    ))
+    .await?;
+    let versioned = versions
+        .get(credential_key)
+        .is_some_and(|version| *version > 1);
+    let current_expiration_ms = projected
+        .credential_expiration_times
+        .get(credential_key)
+        .map(openshell_core::time::timestamp_to_millis)
+        .transpose()
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
+    if versioned
+        && requested_expiration_ms.is_some()
+        && requested_expiration_ms != current_expiration_ms
+    {
+        return Err(Status::failed_precondition(format!(
+            "credential expiration for '{credential_key}' is issuer-owned; omit expiration when reconfiguring refresh and rotate to establish a new expiration"
+        )));
+    }
+    let expiration_ms = if versioned {
+        current_expiration_ms
+    } else {
+        requested_expiration_ms.or_else(|| {
+            existing_refresh_state
+                .as_ref()
+                .filter(|state| crate::provider_refresh::refresh_has_expiration(state))
+                .map(|state| state.expires_at_ms)
+        })
+    };
+    let has_expiration = expiration_ms.is_some();
+    let expires_at_ms = expiration_ms.unwrap_or_default();
     let mut persisted_material = request.material;
     let secret_material: HashMap<_, _> = secret_material_keys
         .iter()
@@ -5459,7 +5553,7 @@ pub(super) async fn handle_configure_provider_refresh(
         return Err(err);
     }
 
-    if let Some(expires_at_ms) = requested_expiration_ms {
+    if let Some(expires_at_ms) = requested_expiration_ms.filter(|_| !versioned) {
         let updated = Provider {
             metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
                 id: String::new(),
@@ -5482,12 +5576,12 @@ pub(super) async fn handle_configure_provider_refresh(
             profile_workspace: String::new(),
             credential_handles: HashMap::new(),
         };
-        let result = update_provider_record_with_catalog(
+        let result = Box::pin(update_provider_record_with_catalog(
             state.store.as_ref(),
             &catalog,
             &workspace,
             updated,
-        )
+        ))
         .await;
         publish_provider_change(state, &workspace, provider_name);
         result?;

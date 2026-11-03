@@ -116,10 +116,21 @@ impl GrantRuntime {
                 .await?;
         }
         while let Some(retired) = current.state.retired.first().cloned() {
-            self.store
+            if let Err(error) = self
+                .store
                 .storage
                 .delete(scope, &retired.owner, &retired.purpose, &retired.backing)
-                .await?;
+                .await
+            {
+                tracing::warn!(grant=%id,code=?error.code(),"issuer retired grant material cleanup deferred");
+                // Keep the tombstone for retry, but do not make physical
+                // deletion a prerequisite for live refresh or known-result
+                // recovery. The sweep reloads state and execution reacquires
+                // the lease before admitting either. Coordination, recovery,
+                // and metadata persistence errors still fail closed via `?`.
+                // Return before a Deleting grant can be marked Deleted.
+                return Ok(());
+            }
             let mut state = current.state;
             state.retired.remove(0);
             current = self

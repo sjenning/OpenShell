@@ -519,7 +519,7 @@ Profile YAML can declare these refresh strategies:
 | `google_service_account_jwt` | The gateway signs a Google service account JWT and exchanges it for an access token. |
 | `aws_sts_assume_role` | The gateway calls `sts:AssumeRole` and mints `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in one operation. |
 
-You can use `refresh.strategy_name` instead of `refresh.strategy` with an exact name from the table, such as `oauth2_refresh_token`. If you supply both, they must select the same strategy. The `ConfigureProviderRefresh` API supports the same `strategy_name` field, and refresh status returns the canonical name even for existing enum-configured grants. Unregistered names, including `custom:<name>`, are rejected; remote custom minters are not yet available.
+You can use `refresh.strategy_name` instead of `refresh.strategy` with an exact name from the table, such as `oauth2_refresh_token`. If you supply both, they must select the same strategy. The `ConfigureProviderRefresh` API supports the same `strategy_name` field, and refresh status returns the canonical name even for existing enum-configured grants. Profile declarations reject custom names. With an explicitly selected remote issuer, SDK/API clients can configure a registered single-output `custom:<name>` minter; see [custom refresh configuration](/extensibility/credential-issuer#configure-a-custom-refresh). The CLI status table displays its registered strategy name.
 
 `openshell provider refresh configure` accepts only gateway-mintable strategies: `oauth2-refresh-token`, `oauth2-client-credentials`, `google-service-account-jwt`, and `aws-sts-assume-role`. Use `openshell provider update` for `static` and `external` refresh patterns.
 
@@ -974,7 +974,7 @@ openshell provider refresh delete my-graph \
   --credential-key MS_GRAPH_ACCESS_TOKEN
 ```
 
-In embedded mode, deleting refresh state clears the provider credential expiry only when that expiry came from the deleted refresh state, including an explicit Unix epoch expiry. If you later set a different expiry manually with `openshell provider update --credential-expires-at`, OpenShell preserves the manual value.
+For inline credentials and legacy references that have not advanced through versioned rotation, embedded refresh deletion clears the provider credential expiry only when that expiry came from the deleted refresh state, including an explicit Unix epoch expiry. Independently authored expirations remain unchanged. Versioned credentials retain their issuer-owned expiration after refresh deletion; stopping refresh does not make an expiring token permanent.
 
 With a remote credential issuer, deletion preserves the latest published outputs
 as static credentials with their original expiration. See

@@ -2118,15 +2118,21 @@ fn print_refresh_status_row(status: &ProviderCredentialRefreshStatus) {
 }
 
 fn refresh_status_row(status: &ProviderCredentialRefreshStatus) -> String {
-    let strategy = ProviderCredentialRefreshStrategy::try_from(status.strategy)
-        .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
+    let strategy = if status.strategy_name.is_empty() {
+        provider_refresh_strategy_name(
+            ProviderCredentialRefreshStrategy::try_from(status.strategy)
+                .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified),
+        )
+    } else {
+        &status.strategy_name
+    };
     let recovery_action = ProviderCredentialRefreshRecoveryAction::try_from(status.recovery_action)
         .unwrap_or(ProviderCredentialRefreshRecoveryAction::Unspecified);
     format!(
         "{:<24}  {:<28}  {:<28}  {:<24}  {:<18}  {:<20}  {:<20}  {:<20}  {:<44}  {}",
         status.provider,
         status.credential_key,
-        provider_refresh_strategy_name(strategy),
+        strategy,
         status.status,
         provider_refresh_recovery_action_name(recovery_action),
         format_optional_epoch_ms(proto_timestamp_ms(status.expiration_time.as_ref())),
@@ -3491,6 +3497,33 @@ binaries: [/usr/bin/curl]
         assert!(row.contains("2026-01-01 00:00:00"));
         assert!(!row.contains("292278994"));
         assert!(row.contains("..."));
+    }
+
+    #[test]
+    fn refresh_status_table_prefers_named_custom_strategy() {
+        let row = refresh_status_row(&ProviderCredentialRefreshStatus {
+            provider: "custom-provider".to_string(),
+            credential_key: "ACCESS_TOKEN".to_string(),
+            strategy: ProviderCredentialRefreshStrategy::Unspecified as i32,
+            strategy_name: "acme.workload_token".to_string(),
+            ..Default::default()
+        });
+
+        assert_eq!(row.split_whitespace().nth(2), Some("acme.workload_token"));
+        assert!(!row.contains("unspecified"));
+    }
+
+    #[test]
+    fn refresh_status_table_falls_back_to_legacy_builtin_strategy() {
+        let row = refresh_status_row(&ProviderCredentialRefreshStatus {
+            provider: "legacy-provider".to_string(),
+            credential_key: "ACCESS_TOKEN".to_string(),
+            strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
+            strategy_name: String::new(),
+            ..Default::default()
+        });
+
+        assert_eq!(row.split_whitespace().nth(2), Some("oauth2_refresh_token"));
     }
 
     #[test]

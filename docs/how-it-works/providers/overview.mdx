@@ -241,6 +241,15 @@ openshell provider update my-graph \
 
 Use `0` as the timestamp to clear expiry for a credential key.
 
+After versioned refresh rotation, the issuer owns the credential's expiration.
+An expiration-only update that would change or clear it fails instead of being
+silently ignored. To set a new expiration for a static credential, replace its
+value in the same update. While refresh still owns the credential, rotate it to
+obtain a new expiration. Reconfigure refresh without an explicit expiration to
+preserve the current credential's issuer-owned expiration; an explicit differing
+expiration fails before changing refresh configuration. Deleting refresh
+preserves a versioned credential's expiration.
+
 ## Label a Provider
 
 Attach labels when you create a provider to track environment or team ownership.

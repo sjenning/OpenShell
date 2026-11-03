@@ -10,6 +10,7 @@ pub mod engine;
 pub mod grant;
 pub mod minter;
 pub mod refresh;
+pub mod remote_minter;
 pub mod scheduler;
 
 use std::sync::Arc;

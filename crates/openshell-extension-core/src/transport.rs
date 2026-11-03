@@ -93,6 +93,11 @@ impl ExtensionChannelConfig {
         &self.server_trust
     }
 
+    /// Whether new connections present an explicit client identity.
+    pub fn has_client_identity(&self) -> bool {
+        self.client_identity.is_some()
+    }
+
     /// Returns whether HTTPS verification uses an operator-provided CA bundle.
     pub fn has_custom_ca(&self) -> bool {
         matches!(&self.server_trust, ExtensionServerTrust::CustomCaPem(_))

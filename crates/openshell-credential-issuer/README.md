@@ -145,8 +145,26 @@ status projects canonical names for legacy grants. New grants persist known name
 using the existing durable enum; existing grants need no migration. Unregistered custom names
 fail closed. Moving durable adapters into the issuer, exposing registered custom
 minters through configuration, durable reconnectable change streams,
-and remote transport remain separate implementation work. The Rust registry
-supports custom implementations; it does not yet enable remote minter services.
+and issuer-service transport remain separate implementation work. The private
+store, refresh, and minter RPC contracts live under `proto/`; they are not served
+by the gateway listener.
+
+## Remote minter adapter
+
+`remote_minter::RemoteMinter` connects using private-CA mTLS through
+`openshell-extension-core`, discovers exactly the configured `custom:<name>`,
+and validates/pins its descriptor using the embedded registry's rules. Register
+the adapter in `MinterRegistry` so requests and returned output/material sets
+receive the same validation as built-ins. Discovery has a ten-second deadline;
+mints have a two-minute deadline and are never automatically replayed.
+
+Only explicit, valid status/action/retry combinations permit retries. Missing,
+malformed, or unknown failure details park the attempt for investigation; network
+errors and deadlines may follow an upstream side effect. Arbitrary remote status
+messages, failure codes, and subtypes are discarded in favor of static local
+diagnostics. Configured minter services remain responsible for authenticating
+and authorizing issuer identities. Gateway custom-profile/configuration wiring
+and a hosted minter server adapter remain future work.
 
 ## Verification
 

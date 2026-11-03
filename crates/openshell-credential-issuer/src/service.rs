@@ -48,6 +48,7 @@ struct Runtime {
     coordinator: RefreshCoordinator,
     reads: Arc<Semaphore>,
     watches: Arc<Semaphore>,
+    watch_shutdown: tokio::sync::watch::Sender<bool>,
     cache_ttl: Duration,
 }
 #[derive(Serialize, Deserialize)]
@@ -178,6 +179,7 @@ impl CredentialStoreService {
                 coordinator: RefreshCoordinator::default(),
                 reads: Arc::new(Semaphore::new(16)),
                 watches: Arc::new(Semaphore::new(128)),
+                watch_shutdown: tokio::sync::watch::channel(false).0,
                 cache_ttl,
             }),
         })
@@ -186,6 +188,18 @@ impl CredentialStoreService {
         wire::credential_store_server::CredentialStoreServer::new(self)
             .max_decoding_message_size(MESSAGE_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT)
+    }
+    /// Stop new mutations and terminate value-free store/grant watches. Stop
+    /// scheduler handles too; reads already in progress may finish normally.
+    pub fn stop_admission(&self) {
+        self.runtime.coordinator.stop_admission();
+        self.runtime.watch_shutdown.send_replace(true);
+    }
+    /// Wait for detached admitted mutations, even if their caller disconnected.
+    /// Hosts may bound this wait, but must not classify a timeout as safe retry.
+    pub async fn drain(&self) {
+        self.stop_admission();
+        self.runtime.coordinator.drain().await;
     }
     pub fn spawn_maintenance(
         &self,

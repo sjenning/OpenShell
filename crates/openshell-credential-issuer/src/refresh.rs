@@ -10,7 +10,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tonic::Status;
 
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +39,20 @@ pub struct RefreshCoordinator {
     locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     executors: Arc<Semaphore>,
     admissions: Arc<Semaphore>,
+    admission_capacity: usize,
+    finished: Arc<Notify>,
     wait_timeout: Duration,
+}
+struct Admission {
+    permit: Option<OwnedSemaphorePermit>,
+    finished: Arc<Notify>,
+}
+impl Drop for Admission {
+    fn drop(&mut self) {
+        // Publish permit release before waking every concurrent drain waiter.
+        drop(self.permit.take());
+        self.finished.notify_waiters();
+    }
 }
 
 impl RefreshCoordinator {
@@ -57,8 +70,32 @@ impl RefreshCoordinator {
             locks: Arc::default(),
             executors: Arc::new(Semaphore::new(limits.executors)),
             admissions: Arc::new(Semaphore::new(limits.admissions)),
+            admission_capacity: limits.admissions,
+            finished: Arc::default(),
             wait_timeout: limits.wait_timeout,
         })
+    }
+
+    /// Permanently reject new work without interrupting queued or executing
+    /// operations. Stop background schedulers before draining a service.
+    pub fn stop_admission(&self) {
+        self.admissions.close();
+    }
+
+    /// Await every admitted detached task, including disconnected callers.
+    /// Canceling this wait never cancels their work. The process host chooses
+    /// its shutdown deadline; a timeout does not prove an upstream failure.
+    pub async fn drain(&self) {
+        self.stop_admission();
+        loop {
+            let notified = self.finished.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.admissions.available_permits() == self.admission_capacity {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Maintenance uses the same local exclusion without occupying an executor.
@@ -85,11 +122,22 @@ impl RefreshCoordinator {
         T: Send + 'static,
         F: Future<Output = Result<T, Status>> + Send + 'static,
     {
-        let admission = self
-            .admissions
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("credential refresh queue is full"))?;
+        let admission =
+            self.admissions
+                .clone()
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    TryAcquireError::Closed => {
+                        Status::unavailable("credential refresh is shutting down")
+                    }
+                    TryAcquireError::NoPermits => {
+                        Status::resource_exhausted("credential refresh queue is full")
+                    }
+                })?;
+        let admission = Admission {
+            permit: Some(admission),
+            finished: self.finished.clone(),
+        };
         let lock = self.lock_for(key)?;
         let executors = self.executors.clone();
         let timeout = self.wait_timeout;

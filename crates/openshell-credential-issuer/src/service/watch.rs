@@ -13,6 +13,10 @@ pub(super) async fn start(
     scope: GatewayScope,
     after: u64,
 ) -> Result<ReceiverStream<Result<wire::WatchSecretsResponse, Status>>, Status> {
+    let mut shutdown = runtime.watch_shutdown.subscribe();
+    if *shutdown.borrow() {
+        return Err(Status::unavailable("issuer is shutting down"));
+    }
     let permit = runtime
         .watches
         .clone()
@@ -23,8 +27,15 @@ pub(super) async fn start(
     let (sender, receiver) = mpsc::channel(64);
     tokio::spawn(async move {
         let _permit = permit;
-        if let Err(error) = run(&runtime, &scope, store, after, current, &sender).await {
-            let _ = sender.send(Err(error)).await;
+        if *shutdown.borrow() {
+            return;
+        }
+        tokio::select! {
+            biased;
+            _=shutdown.changed()=>{},
+            ()=async {
+                if let Err(error)=run(&runtime,&scope,store,after,current,&sender).await {let _=sender.send(Err(error)).await;}
+            }=>{}
         }
     });
     Ok(ReceiverStream::new(receiver))

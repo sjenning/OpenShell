@@ -35,6 +35,7 @@ mod mtls;
 mod postgres;
 mod recovery;
 mod remote_client;
+mod shutdown;
 mod watched_client;
 
 const A: &str = "spiffe://test.example/gateway/a";

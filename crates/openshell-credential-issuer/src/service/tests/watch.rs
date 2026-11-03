@@ -14,6 +14,47 @@ async fn next(
         .unwrap()
 }
 #[tokio::test]
+async fn shutdown_releases_backpressured_watch_without_waiting_for_its_reader() {
+    let fixture = Fixture::new().await;
+    let runtime = fixture.runtime();
+    let mut stream = super::super::watch::start(runtime.clone(), test_scope(A), 0)
+        .await
+        .unwrap();
+    let registry = runtime.repository.references(&test_scope(A)).registry();
+    let owner = SecretOwner {
+        workspace: "default".into(),
+        provider_id: "provider".into(),
+        credential_key: "TOKEN".into(),
+    };
+    for index in 0..80 {
+        registry
+            .reserve(&format!("reference-{index}"), &owner)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while tokio_stream::Stream::size_hint(&stream).0 < 64 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.service.drain().await;
+    let count = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut count = 0;
+        while let Some(frame) = stream.next().await {
+            frame.unwrap();
+            count += 1;
+        }
+        count
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 64);
+    assert_eq!(runtime.watches.available_permits(), 128);
+}
+
+#[tokio::test]
 async fn reset_checkpoint_replay_and_identity_partitioning_are_durable() {
     let fixture = Fixture::new().await;
     let runtime = fixture.runtime();

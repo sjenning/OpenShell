@@ -4,6 +4,7 @@
 use super::*;
 use tokio::sync::oneshot;
 use tonic::Code;
+mod shutdown;
 
 fn coordinator(executors: usize, admissions: usize) -> RefreshCoordinator {
     RefreshCoordinator::new(RefreshLimits {

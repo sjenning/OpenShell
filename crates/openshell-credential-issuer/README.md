@@ -357,6 +357,21 @@ service pools to coalesce mints, replay intents, recover known results and
 complete cleanup. These library hosts are not yet a standalone binary,
 deployment configuration, or gateway remote source.
 
+### Graceful host shutdown
+
+Stop scheduler/maintenance handles, call `CredentialStoreService::stop_admission()`,
+and stop accepting transport connections before awaiting `drain()`. The shared
+coordinator rejects new mutations but retains already queued and detached work.
+Store and grant watches close even when their receivers are backpressured, so
+long-lived streams cannot hold a graceful transport shutdown open indefinitely.
+Await both the transport and the drain before exiting. A canceled drain wait
+does not cancel an admitted mint; another clone can resume waiting.
+
+The host owns the shutdown deadline. An elapsed deadline or process termination
+is not evidence that an upstream exchange failed and never authorizes replay.
+Normal uncertainty preparation and known-result recovery remain authoritative.
+These lifecycle methods are host primitives, not a standalone daemon.
+
 ## Remote issuer client
 
 `remote_issuer::RemoteIssuer` is a private-CA HTTPS/mTLS client for all store and

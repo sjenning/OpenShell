@@ -24,6 +24,8 @@ use crate::storage_proto::StoredProviderCredentialRefreshStateV2;
 #[path = "provider_credentials_tests.rs"]
 mod tests;
 
+mod remote;
+
 const MAX_KEYS: usize = 32;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const DEFAULT_LIFETIME: Duration = Duration::from_mins(5);
@@ -173,6 +175,18 @@ async fn retrieve(
                 "selected key is not an exportable static or gateway-refresh-managed runtime credential",
             ));
         }
+    }
+    if let Some(source) = state.remote_provider_mutations()? {
+        return remote::retrieve(
+            state,
+            source,
+            request,
+            &provider,
+            &profile,
+            lifetime,
+            refresh_audit,
+        )
+        .await;
     }
     let refreshes = crate::provider_refresh::list_refresh_states_for_provider(
         state.store.as_ref(),
@@ -441,8 +455,12 @@ async fn resolve_selected(
     // Expired handle-backed credentials are omitted by the shared runtime and
     // consequently trigger refresh, or a failure for nonrefreshable credentials.
     let resolved = state
-        .credentials
-        .resolve_provider_handles(&selected, crate::persistence::current_time_ms())
+        .provider_credential_source()
+        .resolve_provider_handles_for(
+            &selected,
+            crate::persistence::current_time_ms(),
+            crate::credential_source::CredentialReadPurpose::OperatorExport,
+        )
         .await
         .map_err(sanitize)?;
     let mut result = HashMap::new();

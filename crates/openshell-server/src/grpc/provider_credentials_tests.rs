@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "provider_credentials_tests/remote.rs"]
+mod remote;
+
 use super::*;
 use crate::auth::identity::{Identity, IdentityProvider};
 use crate::auth::principal::{OperatorPrincipal, Principal};

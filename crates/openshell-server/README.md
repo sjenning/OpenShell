@@ -244,7 +244,11 @@ healthy while its value backend is unavailable and prove this ordering.
 `CredentialReadPurpose` keeps sandbox delivery, refresh exchanges, and operator
 export cache entries separate. Subject misses select refresh purpose; a cached
 delivery value cannot satisfy either of the other purposes. Privileged export
-RPC forwarding still needs issuer-owned refresh integration.
+uses the selected source with OperatorExport purpose. For issuer-backed grants it
+validates the complete owner/reference metadata batch and every grant before any
+freshness effect, delegates EnsureFresh to the issuer only when needed, and fences
+the final response against provider, profile, and grant version changes. Repeated
+exports reuse a sufficiently valid grant rather than reminting.
 Public provider get/list calls project expiration through the selected source
 before redaction, without resolving values or rewriting records. Version-one
 legacy deadlines remain conservative; later issuer versions are authoritative.
@@ -257,8 +261,8 @@ retirement without waiting for physical cleanup. Legacy inline/driver records
 cannot be implicitly adopted on update. Internal secret storage remains local.
 Issuer refresh configure/rotate/delete currently fail explicitly under remote
 selection rather than persisting refresh material locally. Production remote
-gateway configuration, grant routing, export routing, and watch-driven
-config-delivery fanout remain separate work.
+gateway configuration, grant mutation routing, and watch-driven config-delivery
+fanout remain separate work.
 
 ### Static credential handoff journal
 

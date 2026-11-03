@@ -215,6 +215,42 @@ impl RemoteProviderSource {
         }
         Ok(())
     }
+    pub(crate) fn issuer(&self) -> &WatchedIssuer {
+        &self.client
+    }
+    pub(crate) async fn export_grants(
+        &self,
+        provider: &Provider,
+        keys: &[String],
+    ) -> Result<std::collections::BTreeSet<String>, Status> {
+        self.register_provider(provider)?;
+        let mut grants = std::collections::BTreeSet::new();
+        let mut secrets = Vec::new();
+        for key in keys {
+            let binding = self.decode(
+                provider
+                    .credential_handles
+                    .get(key)
+                    .ok_or_else(|| Status::not_found("selected runtime credential is missing"))?,
+            )?;
+            secrets.push(wire::ResolveSecretRequest {
+                request_id: key.clone(),
+                owner: Some(owner(provider, key)?),
+                reference: binding.reference,
+                expected_version: None,
+            });
+            if let Some(grant) = binding.grant {
+                grants.insert(grant);
+            }
+        }
+        self.client
+            .resolve_secrets(wire::ResolveSecretsRequest {
+                purpose: wire::ResolvePurpose::MetadataInspection as i32,
+                secrets,
+            })
+            .await?;
+        Ok(grants)
+    }
     fn metadata(
         &self,
         provider: &Provider,

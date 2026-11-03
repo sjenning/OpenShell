@@ -78,6 +78,9 @@ impl Drop for Issuer {
 }
 impl Issuer {
     pub async fn start() -> Self {
+        Self::with_minters(Arc::new(MinterRegistry::default())).await
+    }
+    pub async fn with_minters(minters: Arc<MinterRegistry>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let repository = Repository::open("sqlite::memory:").await.unwrap();
         let config = toml::Table::from_iter([(
@@ -103,7 +106,7 @@ impl Issuer {
                 .unwrap();
         let refresh = CredentialRefreshService::new(
             &store,
-            Arc::new(MinterRegistry::default()),
+            minters,
             MintResultSpool::new(
                 EncryptedGatewayCredentialStoreCrypto::from_config(&config).unwrap(),
             ),

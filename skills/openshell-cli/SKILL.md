@@ -11,6 +11,12 @@ Guide agents through using the `openshell` CLI for sandbox and platform manageme
 
 The OpenShell CLI (`openshell`) is the primary interface for managing sandboxes, providers, policies, settings, exposed services, and gateway registrations. Gateway service lifecycle is handled outside the CLI by packages, systemd, or Helm. This skill teaches agents how to orchestrate CLI commands for common and complex workflows.
 
+The experimental `openshell-credential-issuer` service is a separate binary, not
+an `openshell` subcommand. When explicitly operating it, use its own `--help` and
+[service documentation](https://docs.nvidia.com/openshell/latest/extensibility/credential-issuer).
+Starting it does not enable gateway remote mode or relocate gateway-local SSH
+and supervisor launch secrets.
+
 **Companion skill**: For creating or modifying sandbox policy YAML content (network rules, L7 inspection, access presets), use the `generate-sandbox-policy` skill. This skill covers the CLI *commands* for the policy lifecycle; `generate-sandbox-policy` covers policy *content authoring*.
 
 **Self-teaching**: The CLI has comprehensive built-in help. When you encounter a command or option not covered in this skill, walk the help tree:

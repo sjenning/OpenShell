@@ -94,6 +94,8 @@ navigation:
     path: extensibility/gateway-interceptors.mdx
   - page: "Drivers"
     path: extensibility/drivers.mdx
+  - page: "Credential Issuer"
+    path: extensibility/credential-issuer.mdx
   - page: "Isolation Backends"
     path: extensibility/isolation-backends.mdx
 - folder: observability

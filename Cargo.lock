@@ -4477,6 +4477,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-sts",
+ "clap",
  "futures",
  "http 1.4.0",
  "jsonwebtoken",
@@ -4501,6 +4502,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wiremock",
 ]

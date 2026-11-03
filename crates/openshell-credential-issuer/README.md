@@ -5,7 +5,9 @@ stateless minter contracts, authenticated store/refresh/minter library hosts,
 and an autonomous refresh/recovery worker. Credential drivers store values;
 reference metadata contains ownership, opaque handles, versions, expiration,
 revocation, and pending deletions. Known mint results use encrypted native spools.
-Standalone deployment and gateway remote-source wiring remain incomplete.
+The experimental standalone binary hosts both private services. Container/Helm
+packaging, issuer audit/metrics integration, and gateway remote-source wiring
+remain incomplete. See [standalone configuration](../../docs/extensibility/credential-issuer.mdx).
 
 ## Reference lifecycle
 
@@ -310,9 +312,9 @@ filtered events. A checkpoint alone does not complete client reconciliation.
 Unknown cursors reset; stream errors require clients to invalidate caches and
 fail closed. The journal currently retains all events.
 
-The service is a library host, not yet a standalone command or gateway remote
-source. CredentialRefreshService shares its storage/coordination runtime;
-source-side caching and gateway wiring remain pending.
+The standalone daemon composes this host with CredentialRefreshService and
+shared storage/coordination. Remote-source caching exists separately; gateway
+mode selection and mutation/delivery wiring remain pending.
 
 ## CredentialRefresh RPC host
 
@@ -354,8 +356,9 @@ reset/checkpoint model as store watches and never return credential values.
 SQLite supports one runtime; use PostgreSQL for replicas. mTLS tests exercise the
 actual generated clients for both services. PostgreSQL tests use independent
 service pools to coalesce mints, replay intents, recover known results and
-complete cleanup. These library hosts are not yet a standalone binary,
-deployment configuration, or gateway remote source.
+complete cleanup. The standalone daemon supplies validated TOML composition,
+mandatory mTLS, storage, and registered minters; it does not enable gateway
+remote mode or provide container/Helm packaging.
 
 ### Graceful host shutdown
 
@@ -370,7 +373,7 @@ does not cancel an admitted mint; another clone can resume waiting.
 The host owns the shutdown deadline. An elapsed deadline or process termination
 is not evidence that an upstream exchange failed and never authorizes replay.
 Normal uncertainty preparation and known-result recovery remain authoritative.
-These lifecycle methods are host primitives, not a standalone daemon.
+The standalone daemon uses these lifecycle methods on SIGTERM and Ctrl-C.
 
 ## Remote issuer client
 

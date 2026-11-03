@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod backend;
 pub mod builtins;
+pub mod daemon;
 pub mod engine;
 pub mod grant;
 pub mod hosted_minter;

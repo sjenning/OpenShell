@@ -4492,6 +4492,8 @@ dependencies = [
  "serde",
  "serde_json",
  "spiffe",
+ "sqlx",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

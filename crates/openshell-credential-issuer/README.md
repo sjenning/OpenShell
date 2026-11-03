@@ -77,6 +77,29 @@ keys or launch material to an issuer: `InternalSecretStore` remains local and
 retains its own backend ownership. The issuer can compose these same first-party
 drivers without depending on `openshell-server`.
 
+## Standalone persistence
+
+`repository::Repository` owns a separate, versioned SQLite/PostgreSQL schema.
+`for_gateway` accepts an authenticated `GatewayScope`; every row and event is
+partitioned by both the derived namespace and durable creating identity.
+Workspace and immutable-owner checks remain required above this storage layer.
+Payloads are opaque and redacted in Debug output. Persist values only through
+the encrypted database driver or the configured external credential backend,
+not as plaintext repository payloads.
+
+Native transactions combine revision checks, multi-output writes, completion
+receipts, value-free events, and namespace-wide sequence allocation. Failed
+checks roll everything back, including sequence advances. Enumeration and event
+replay use bounded pages. The initial journal retains all events; a watch adapter
+must request reset/full reconciliation when it cannot establish a valid cursor.
+
+PostgreSQL refresh leases use transaction-scoped advisory locks on a separate
+pool, release on cancellation/drop, and cannot starve data commits by occupying
+the data pool. SQLite relies on shared engine-local exclusion and durable CAS;
+use PostgreSQL for multiple issuer replicas. Schema initialization rejects newer
+versions and serializes PostgreSQL migrations across startup replicas. The
+repository is not yet wired to the store/refresh RPC hosts.
+
 ## Refresh coordination and minters
 
 `RefreshCoordinator` owns process-local grant locks, bounded admission, executor
@@ -198,6 +221,9 @@ state. The policy primitives do not yet host store/refresh RPCs.
 
 ```shell
 cargo test -p openshell-credential-issuer
+# Against a disposable PostgreSQL database (creates issuer-owned tables):
+OPENSHELL_TEST_ISSUER_POSTGRES_URL=postgres://localhost/issuer_test \
+  cargo test -p openshell-credential-issuer repository::tests::postgres:: -- --ignored
 cargo test -p openshell-server --lib --features prebuilt-z3 credentials::references::tests
 cargo test -p openshell-server --lib --features prebuilt-z3 grpc::policy::reference_tests
 cargo test -p openshell-server --lib --features prebuilt-z3 provider_refresh::

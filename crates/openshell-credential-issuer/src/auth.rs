@@ -161,4 +161,13 @@ impl GatewayScope {
 }
 
 #[cfg(test)]
+pub(crate) fn test_scope(identity: &str) -> GatewayScope {
+    GatewayScope {
+        identity: identity.to_string(),
+        namespace: format!("test-namespace:{identity}"),
+        workspaces: BTreeSet::from(["default".to_string()]),
+    }
+}
+
+#[cfg(test)]
 mod tests;

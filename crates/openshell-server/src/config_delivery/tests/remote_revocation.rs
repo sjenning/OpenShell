@@ -11,6 +11,8 @@ use openshell_core::proto::{
 };
 use std::sync::atomic::Ordering;
 
+mod delivery;
+
 async fn answer(harness: &SupervisorStreamHarness, update: &ConfigUpdate, installed: bool) {
     let mut result = session::applied_result(update);
     if !installed {

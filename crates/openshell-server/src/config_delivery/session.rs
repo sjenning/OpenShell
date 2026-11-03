@@ -27,7 +27,7 @@ use super::{DeliveryDisposition, MAX_SUPERVISOR_CONFIG_MESSAGE_BYTES, Supervisor
 use crate::ServerState;
 use crate::grpc::policy::{
     build_provider_environment_snapshot_from_inputs, build_sandbox_config_snapshot_from_inputs,
-    is_configuration_rejection, load_sandbox_config_inputs, unadmitted_sandbox_config,
+    is_configuration_rejection, load_sandbox_config_inputs_for_delivery, unadmitted_sandbox_config,
 };
 use crate::persistence::ObjectId;
 use crate::supervisor_session::{AcceptedSession, SupervisorSessionRegistry};
@@ -954,7 +954,7 @@ async fn build_config_bootstrap(
 ) -> Result<SessionBootstrap, Status> {
     tokio::time::timeout(CONFIG_BOOTSTRAP_BUILD_TIMEOUT, async {
         let built = async {
-            let inputs = load_sandbox_config_inputs(state, sandbox.clone()).await?;
+            let inputs = load_sandbox_config_inputs_for_delivery(state, sandbox.clone()).await?;
             let sandbox_config = build_sandbox_config_snapshot_from_inputs(state, &inputs).await?;
             Ok::<_, Status>((inputs, sandbox_config))
         }

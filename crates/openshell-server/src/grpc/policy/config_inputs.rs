@@ -36,11 +36,28 @@ pub struct SandboxConfigInputs {
     /// Observed for its version metadata even under a global policy, whose
     /// dormant sandbox payload is never decoded.
     pub(super) latest_policy: Option<PolicyRecord>,
+    /// Only an explicitly selected external metadata source may defer an
+    /// availability error. Policy/settings remain deliverable, but these
+    /// inputs must never resolve or cache a provider environment.
+    pub(super) credential_metadata_error: Option<Box<Status>>,
 }
 
 impl SandboxConfigInputs {
     pub fn sandbox(&self) -> &Sandbox {
         &self.sandbox
+    }
+
+    pub(super) fn delivery_provider_revision(&self, revision: u64) -> Result<u64, Status> {
+        if self.credential_metadata_error.is_none() {
+            return Ok(revision);
+        }
+        let mut bytes = b"openshell-unavailable-provider-metadata-v1".to_vec();
+        bytes.extend_from_slice(&revision.to_le_bytes());
+        let digest = openshell_crypto::sha256(&bytes)
+            .map_err(|_| Status::internal("provider metadata failure fingerprint failed"))?;
+        Ok(u64::from_le_bytes(
+            digest[..8].try_into().expect("hash prefix"),
+        ))
     }
 }
 
@@ -50,6 +67,28 @@ pub async fn load_sandbox_config_inputs(
     state: &ServerState,
     sandbox: Sandbox,
 ) -> Result<SandboxConfigInputs, Status> {
+    // Keep the shared concurrent read tree off every enclosing RPC/mutation
+    // future's stack, including callers that also capture readiness snapshots.
+    Box::pin(load_inputs(state, sandbox, false)).await
+}
+
+/// Capture a configuration for a poll or a new push session. Defer only
+/// external metadata availability failures until environment construction,
+/// allowing delivery of an explicit static-credential invalidation without a
+/// previous session's cached configuration. Store and validation errors still
+/// fail the read normally.
+pub async fn load_sandbox_config_inputs_for_delivery(
+    state: &ServerState,
+    sandbox: Sandbox,
+) -> Result<SandboxConfigInputs, Status> {
+    Box::pin(load_inputs(state, sandbox, true)).await
+}
+
+async fn load_inputs(
+    state: &ServerState,
+    sandbox: Sandbox,
+    for_delivery: bool,
+) -> Result<SandboxConfigInputs, Status> {
     let store = state.store.as_ref();
     let workspace = sandbox.object_workspace();
     let provider_names = sandbox
@@ -57,7 +96,11 @@ pub async fn load_sandbox_config_inputs(
         .as_ref()
         .map(|spec| spec.providers.as_slice())
         .unwrap_or_default();
-    let selected_source = crate::config_delivery::credential_metadata::Source::selected(state);
+    let selected_source = if for_delivery {
+        crate::config_delivery::credential_metadata::Source::for_delivery(state)
+    } else {
+        crate::config_delivery::credential_metadata::Source::selected(state)
+    };
     let credential_source: &dyn crate::credential_source::ProviderCredentialSource =
         match selected_source.as_ref() {
             Some(source) => source,
@@ -87,5 +130,6 @@ pub async fn load_sandbox_config_inputs(
         provider_records,
         global_settings,
         latest_policy,
+        credential_metadata_error: selected_source.and_then(|source| source.take_unavailable()),
     })
 }

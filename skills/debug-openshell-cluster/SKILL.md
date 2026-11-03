@@ -181,6 +181,10 @@ rotation; a retired or replaced bundle makes replay unavailable, never permissio
 to remint. Watch changes invalidate local push delivery,
 and the handoff reconciler retries owned cleanup with `cleanup_idle_seconds`
 (default 300, range 60–3600); do not delete ownership journals to clear warnings.
+Issuer revocation or unknown metadata also invalidates installed static
+credentials through polling and push reconnection. Valid policy/settings remain
+available while credentials fail closed; restore issuer metadata availability
+rather than changing delivery mode to bypass the failure.
 See the published gateway configuration reference for the experimental mode.
 
 For the Kubernetes Secrets credential driver, every provider credential lives in

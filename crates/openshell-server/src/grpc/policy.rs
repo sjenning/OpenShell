@@ -17,7 +17,9 @@ mod provisioning_clock;
 mod reference_tests;
 #[cfg(test)]
 mod token_grant_owners_tests;
-pub use config_inputs::{SandboxConfigInputs, load_sandbox_config_inputs};
+pub use config_inputs::{
+    SandboxConfigInputs, load_sandbox_config_inputs, load_sandbox_config_inputs_for_delivery,
+};
 pub use provisioning_clock::configuration_change;
 
 pub(super) use endpoint_status::{
@@ -2913,7 +2915,7 @@ pub async fn build_sandbox_config_snapshot(
     state: &ServerState,
     sandbox: &Sandbox,
 ) -> Result<SandboxConfigSnapshot, Status> {
-    let inputs = load_sandbox_config_inputs(state, sandbox.clone()).await?;
+    let inputs = load_sandbox_config_inputs_for_delivery(state, sandbox.clone()).await?;
     build_sandbox_config_snapshot_from_inputs(state, &inputs).await
 }
 
@@ -3074,13 +3076,15 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
             &policy_credential_bindings,
         )?;
     }
-    let provider_env_revision = compute_provider_env_revision_from_records_and_policy_bindings(
-        provider_profile_catalog,
-        provider_records,
-        &policy_credential_bindings,
-        policy
-            .as_ref()
-            .filter(|_| matches!(policy_source, PolicySource::Global)),
+    let provider_env_revision = inputs.delivery_provider_revision(
+        compute_provider_env_revision_from_records_and_policy_bindings(
+            provider_profile_catalog,
+            provider_records,
+            &policy_credential_bindings,
+            policy
+                .as_ref()
+                .filter(|_| matches!(policy_source, PolicySource::Global)),
+        )?,
     )?;
 
     let service_routes = super::service::configured_app_routes(state, sandbox).await?;
@@ -3955,6 +3959,9 @@ pub async fn build_provider_environment_snapshot_from_inputs(
     supports_static_credential_bindings: bool,
     supports_stable_placeholder_environment_keys: bool,
 ) -> Result<ProviderEnvironmentSnapshot, Status> {
+    if let Some(error) = &inputs.credential_metadata_error {
+        return Err(error.as_ref().clone());
+    }
     let sandbox_id = inputs.sandbox.object_id().to_string();
     let ProviderEnvironmentTarget {
         spec,

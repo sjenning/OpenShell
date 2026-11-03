@@ -317,6 +317,15 @@ forwarding without canceling issuer-admitted work. Remote startup retains this
 guard and the handoff reconciler until shutdown and disables embedded provider
 reference migration/notifications and the embedded refresh worker.
 
+Polling configuration reads and push bootstraps defer selected-source metadata
+availability errors until provider-environment construction. They deliver valid
+authored policy/settings with a domain-separated failed environment revision,
+allowing polling supervisors to revoke on a failed fetch and reconnecting push
+supervisors to receive an unresolved bootstrap. Failed inputs never resolve
+values or seed the environment cache. Equal-version recovery resolves again;
+embedded database failures and invalid reference ownership remain ordinary read
+errors. Existing live push sessions retain their session-local invalidation path.
+
 ### Credential handoff ownership journal
 
 `credential_source::handoff::StaticHandoff` provides the gateway-local,

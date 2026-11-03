@@ -1686,6 +1686,8 @@ fn format_setting_value(es: &openshell_core::proto::EffectiveSetting) -> String 
     reason = "Test code: test fixtures often use idiomatic forms not flagged in production."
 )]
 mod tests {
+    mod metadata_unavailable;
+
     use super::*;
     use crate::tests::{
         proto_policy_fixture, proto_tcp_policy_fixture, settings_poll_result, startup_provider,

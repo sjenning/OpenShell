@@ -210,8 +210,16 @@ receipt in one transaction without modifying provider records. The transaction
 checks the provider's resource version and every captured output version. First
 mint and legacy inline outputs still use provider-record publication to establish
 references. Reconfiguration clears old mint receipts so its first mint allocates
-new references for the new authorization epoch. Moving the remaining adapters into the issuer and adding remote
-transport and the standalone service remain future work.
+new references for the new authorization epoch. The issuer now supplies native
+store/refresh library hosts and a bounded mTLS remote client. Moving the remaining
+embedded adapters, gateway remote-source wiring, and standalone deployment remain
+future work.
+
+Intermediate subject-token exchange checks its versioned intermediate-token cache
+before resolving stored subject values. Cache hits still require live attachment,
+identity, owner/version metadata, and unexpired subject metadata; a backend outage
+does not force a value read for an otherwise valid cached token. Cache misses
+resolve the subject and recheck its captured version before exchanging it.
 
 ## Operator credential export
 

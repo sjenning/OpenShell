@@ -4430,23 +4430,7 @@ async fn exchange_provider_subject_token_inner(
         .get(&subject_token.credential)
         .copied()
         .unwrap_or(1);
-    let stored_subject_token =
-        resolve_subject_token_credential(&state.credentials, &provider, &subject_token.credential)
-            .await?;
-    let resolved_versions =
-        crate::credentials::references::versions(state.store.as_ref(), &provider)
-            .await
-            .map_err(token_grant_dependency_status)?;
-    if resolved_versions
-        .get(&subject_token.credential)
-        .copied()
-        .unwrap_or(1)
-        != subject_version
-    {
-        return Err(token_grant_dependency_status(Status::aborted(
-            "subject credential version changed during resolution",
-        )));
-    }
+    ensure_subject_token_metadata(&provider, &subject_token.credential)?;
 
     let jwt_svid_audience =
         effective_jwt_svid_audience(&token_grant.token_endpoint, &token_grant.jwt_svid_audience);
@@ -4473,15 +4457,41 @@ async fn exchange_provider_subject_token_inner(
         supervisor_subject: &supervisor_claims.sub,
         gateway_subject: &gateway_claims.sub,
     });
-    if let Some(cached) = INTERMEDIATE_TOKEN_CACHE.get(&intermediate_cache_key) {
-        return Ok(Response::new(ExchangeProviderSubjectTokenResponse {
-            access_token: cached.access_token,
-            expires_after: openshell_core::time::duration_from_std(std::time::Duration::from_secs(
-                u64::try_from(cached.expires_in).unwrap_or_default(),
-            ))
-            .ok(),
-            token_type: cached.token_type,
-        }));
+    let stored_subject_token = match lookup_subject_token(
+        &state.credentials,
+        &provider,
+        &subject_token.credential,
+        &intermediate_cache_key,
+    )
+    .await?
+    {
+        SubjectTokenLookup::Cached(cached) => {
+            return Ok(Response::new(ExchangeProviderSubjectTokenResponse {
+                access_token: cached.access_token,
+                expires_after: openshell_core::time::duration_from_std(
+                    std::time::Duration::from_secs(
+                        u64::try_from(cached.expires_in).unwrap_or_default(),
+                    ),
+                )
+                .ok(),
+                token_type: cached.token_type,
+            }));
+        }
+        SubjectTokenLookup::Resolved(value) => value,
+    };
+    let resolved_versions =
+        crate::credentials::references::versions(state.store.as_ref(), &provider)
+            .await
+            .map_err(token_grant_dependency_status)?;
+    if resolved_versions
+        .get(&subject_token.credential)
+        .copied()
+        .unwrap_or(1)
+        != subject_version
+    {
+        return Err(token_grant_dependency_status(Status::aborted(
+            "subject credential version changed during resolution",
+        )));
     }
 
     let token_response = perform_intermediate_token_exchange(
@@ -4532,6 +4542,41 @@ fn validate_intermediate_grant_configuration(
         .map_err(|_| token_grant_configuration_status(tonic::Code::InvalidArgument))?;
     let subject_expires_at_ms = provider_credential_expiration_ms(provider, subject_credential)?;
     Ok((cache_ttl, subject_expires_at_ms))
+}
+
+enum SubjectTokenLookup {
+    Cached(oauth::OAuthTokenResponse),
+    Resolved(String),
+}
+
+fn ensure_subject_token_metadata(provider: &Provider, credential_key: &str) -> Result<(), Status> {
+    ensure_subject_token_credential_not_expired(provider, credential_key)?;
+    if provider
+        .credentials
+        .get(credential_key)
+        .is_none_or(String::is_empty)
+        && !provider.credential_handles.contains_key(credential_key)
+    {
+        return Err(token_grant_authorization_required_status());
+    }
+    Ok(())
+}
+
+async fn lookup_subject_token(
+    credentials: &crate::credentials::CredentialRuntime,
+    provider: &Provider,
+    credential_key: &str,
+    cache_key: &str,
+) -> Result<SubjectTokenLookup, Status> {
+    // Metadata/expiry is authoritative even on hits, but resolving a value can
+    // involve the remote issuer. Never acquire that value before cache lookup.
+    ensure_subject_token_metadata(provider, credential_key)?;
+    if let Some(cached) = INTERMEDIATE_TOKEN_CACHE.get(cache_key) {
+        return Ok(SubjectTokenLookup::Cached(cached));
+    }
+    resolve_subject_token_credential(credentials, provider, credential_key)
+        .await
+        .map(SubjectTokenLookup::Resolved)
 }
 
 async fn resolve_subject_token_credential(

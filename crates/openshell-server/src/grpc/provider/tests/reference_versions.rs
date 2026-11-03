@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::{
-    IntermediateTokenCacheKeyInput, get_provider_record, intermediate_token_cache_key,
-    list_provider_records,
+    INTERMEDIATE_TOKEN_CACHE, IntermediateTokenCacheKeyInput, SubjectTokenLookup,
+    get_provider_record, intermediate_token_cache_key, list_provider_records, lookup_subject_token,
 };
 use crate::credentials::{CredentialRuntime, references};
 use crate::persistence::{current_time_ms, test_store};
@@ -44,6 +44,62 @@ fn subject_cache_identity_includes_reference_version_even_with_unchanged_provide
     };
     assert_eq!(key(1), key(1));
     assert_ne!(key(1), key(2));
+}
+
+#[tokio::test]
+async fn intermediate_cache_hit_never_resolves_subject_values_but_keeps_metadata_fences() {
+    let runtime =
+        CredentialRuntime::from_config(&Config::new(None).with_credential_drivers(["test-static"]))
+            .unwrap();
+    let mut provider = provider();
+    let key = format!("cache-before-subject:{}", uuid::Uuid::new_v4());
+    let handle = openshell_core::proto::CredentialHandle {
+        driver: "unavailable-subject-backend".into(),
+        handle: "opaque".into(),
+        metadata: HashMap::new(),
+    };
+    provider
+        .credential_handles
+        .insert("SUBJECT_TOKEN".into(), handle.clone());
+    let token = openshell_core::oauth::OAuthTokenResponse {
+        access_token: "intermediate-token".into(),
+        expires_in: 60,
+        token_type: "Bearer".into(),
+    };
+    INTERMEDIATE_TOKEN_CACHE.set(key.clone(), &token, current_time_ms() + 60_000);
+    let SubjectTokenLookup::Cached(cached) =
+        lookup_subject_token(&runtime, &provider, "SUBJECT_TOKEN", &key)
+            .await
+            .unwrap()
+    else {
+        panic!("cache hit resolved a subject credential")
+    };
+    assert_eq!(cached.access_token, "intermediate-token");
+    provider.credential_expiration_times.insert(
+        "SUBJECT_TOKEN".into(),
+        openshell_core::time::timestamp_from_millis(1).unwrap(),
+    );
+    assert!(
+        lookup_subject_token(&runtime, &provider, "SUBJECT_TOKEN", &key)
+            .await
+            .is_err()
+    );
+    provider.credential_expiration_times.clear();
+    provider.credential_handles.clear();
+    assert!(
+        lookup_subject_token(&runtime, &provider, "SUBJECT_TOKEN", &key)
+            .await
+            .is_err()
+    );
+    provider
+        .credential_handles
+        .insert("SUBJECT_TOKEN".into(), handle);
+    INTERMEDIATE_TOKEN_CACHE.set(key.clone(), &token, 1);
+    let error = lookup_subject_token(&runtime, &provider, "SUBJECT_TOKEN", &key)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]

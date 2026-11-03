@@ -85,10 +85,6 @@ impl StaticHandoff {
             || keys.is_empty()
             || keys.len() > source.max_batch
             || expected_provider_version == Some(0)
-            || provider
-                .metadata
-                .as_ref()
-                .is_some_and(|metadata| !metadata.labels.is_empty())
         {
             return Err(invalid());
         }
@@ -102,20 +98,6 @@ impl StaticHandoff {
                 || record.name != provider.object_name()
             {
                 return Err(invalid());
-            }
-            let old = Provider::decode(record.payload.as_slice()).map_err(|_| invalid())?;
-            if old
-                .metadata
-                .as_ref()
-                .is_some_and(|metadata| !metadata.labels.is_empty())
-                || record.labels.as_ref().is_some_and(|labels| {
-                    !serde_json::from_str::<BTreeMap<String, String>>(labels)
-                        .is_ok_and(|labels| labels.is_empty())
-                })
-            {
-                return Err(Status::failed_precondition(
-                    "issuer handoff requires atomic label-index support for labeled providers",
-                ));
             }
             if record.resource_version != expected {
                 return Err(Status::aborted("handoff provider changed"));
@@ -359,8 +341,8 @@ impl StaticHandoff {
     }
     /// Join an exact provider write with the journal publication fence. Raw
     /// provider values are rejected. A cleanup claim invalidates stale owners.
-    /// Labeled providers are rejected until atomic provider label-index writes
-    /// are supported; never publish a payload with an inconsistent label index.
+    /// The label index is derived from the validated provider payload and joined
+    /// to the same transaction, including removal of all previous labels.
     pub async fn publish(
         &mut self,
         store: &Store,
@@ -420,15 +402,41 @@ impl StaticHandoff {
                     .collect::<Result<Vec<_>, Status>>()?,
             })
             .await?;
-        if provider
+        let labels = provider
             .metadata
             .as_ref()
-            .is_some_and(|metadata| !metadata.labels.is_empty())
-        {
-            return Err(Status::failed_precondition(
-                "issuer handoff requires atomic label-index support for labeled providers",
-            ));
-        }
+            .ok_or_else(invalid)?
+            .labels
+            .clone();
+        let provider_write = match provider_write {
+            AtomicWrite::Create {
+                object_type,
+                id,
+                name,
+                workspace,
+                payload,
+            } => AtomicWrite::CreateLabeled {
+                object_type,
+                id,
+                name,
+                workspace,
+                payload,
+                labels,
+            },
+            AtomicWrite::Update {
+                object_type,
+                id,
+                payload,
+                expected_version,
+            } => AtomicWrite::UpdateLabeled {
+                object_type,
+                id,
+                payload,
+                expected_version,
+                labels,
+            },
+            _ => return Err(invalid()),
+        };
         let mut published = self.state.clone();
         published.phase = Phase::Published;
         store

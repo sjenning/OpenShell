@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 #[tokio::test]
-async fn update_owner_version_and_labels_are_checked_before_external_allocation() {
+async fn update_owner_and_version_are_checked_before_external_allocation() {
     let store = test_store().await;
     let issuer = Issuer::start().await;
     let source = RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap();
@@ -19,18 +19,6 @@ async fn update_owner_version_and_labels_are_checked_before_external_allocation(
     wrong.metadata.as_mut().unwrap().workspace = "other".into();
     assert!(
         StaticHandoff::begin(&store, &source, &wrong, &["TOKEN".into()], Some(1))
-            .await
-            .is_err()
-    );
-    let mut labeled = original.clone();
-    labeled
-        .metadata
-        .as_mut()
-        .unwrap()
-        .labels
-        .insert("team".into(), "one".into());
-    assert!(
-        StaticHandoff::begin(&store, &source, &labeled, &["TOKEN".into()], Some(1))
             .await
             .is_err()
     );
@@ -97,7 +85,7 @@ async fn update_owner_version_and_labels_are_checked_before_external_allocation(
     );
 }
 #[tokio::test]
-async fn publication_rejects_values_or_changed_source_and_label_indexes() {
+async fn publication_rejects_values_or_changed_source_and_updates_label_indexes() {
     let store = test_store().await;
     let issuer = Issuer::start().await;
     let source = RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap();
@@ -127,18 +115,57 @@ async fn publication_rejects_values_or_changed_source_and_label_indexes() {
         .unwrap()
         .labels
         .insert("team".into(), "one".into());
-    assert!(
-        handoff
-            .publish(&store, &source, write(&payload))
-            .await
-            .is_err()
+    handoff
+        .publish(&store, &source, write(&payload))
+        .await
+        .unwrap();
+    let row = store
+        .get("provider", payload.object_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<HashMap<String, String>>(&row.labels.unwrap()).unwrap(),
+        payload.metadata.as_ref().unwrap().labels
     );
-    assert!(
-        store
-            .get_message::<Provider>(payload.object_id())
+    let mut replacement =
+        StaticHandoff::begin(&store, &source, &payload, &["TOKEN".into()], Some(1))
             .await
+            .unwrap();
+    replacement.reserve(&store, &source).await.unwrap();
+    replacement
+        .fill(
+            &store,
+            &source,
+            &HashMap::from([("TOKEN".into(), "replacement".into())]),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    payload.credential_handles = replacement.handles(&source).unwrap();
+    payload.metadata.as_mut().unwrap().labels.clear();
+    replacement
+        .publish(
+            &store,
+            &source,
+            AtomicWrite::Update {
+                object_type: "provider".into(),
+                id: payload.object_id().into(),
+                payload: payload.encode_to_vec(),
+                expected_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let row = store
+        .get("provider", payload.object_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.resource_version, 2);
+    assert!(
+        serde_json::from_str::<HashMap<String, String>>(&row.labels.unwrap())
             .unwrap()
-            .is_none()
+            .is_empty()
     );
-    handoff.abort(&store, &source).await.unwrap();
 }

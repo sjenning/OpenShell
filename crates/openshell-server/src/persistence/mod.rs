@@ -208,6 +208,23 @@ pub enum AtomicWrite {
         payload: Vec<u8>,
         expected_version: u64,
     },
+    /// Create a payload and its label index in the same transaction.
+    CreateLabeled {
+        object_type: String,
+        id: String,
+        name: String,
+        workspace: String,
+        payload: Vec<u8>,
+        labels: HashMap<String, String>,
+    },
+    /// Replace payload and label index together; an empty map clears the index.
+    UpdateLabeled {
+        object_type: String,
+        id: String,
+        payload: Vec<u8>,
+        expected_version: u64,
+        labels: HashMap<String, String>,
+    },
     /// Delete an object at exactly `expected_version`.
     Delete {
         object_type: String,
@@ -217,12 +234,29 @@ pub enum AtomicWrite {
 }
 
 impl AtomicWrite {
+    fn labels_json(&self) -> PersistenceResult<Option<String>> {
+        match self {
+            Self::CreateLabeled { labels, .. } | Self::UpdateLabeled { labels, .. } => {
+                serde_json::to_string(labels)
+                    .map(Some)
+                    .map_err(|_| PersistenceError::Encode("encode atomic labels failed".into()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn key(&self) -> (&str, &str) {
         match self {
             Self::Create {
                 object_type, id, ..
             }
             | Self::Update {
+                object_type, id, ..
+            }
+            | Self::CreateLabeled {
+                object_type, id, ..
+            }
+            | Self::UpdateLabeled {
                 object_type, id, ..
             }
             | Self::Delete {
@@ -1616,5 +1650,7 @@ pub mod test_postgres;
 #[cfg(test)]
 mod mutation_lock_pg_tests;
 
+#[cfg(test)]
+mod atomic_labels_tests;
 #[cfg(test)]
 mod tests;

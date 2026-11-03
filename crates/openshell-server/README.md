@@ -272,12 +272,13 @@ cannot publish after that claim, even before remote revocation finishes.
 
 This is a library primitive, not production mutation routing or a background
 reconciler. Published journals deliberately refuse abort: retirement after later
-provider updates/deletion remains separate work. Labeled providers fail closed
-until atomic provider label-index writes are supported. The issuer's independent
+provider updates/deletion remains separate work. Publication derives the label
+index from the validated provider payload; payload, labels, and journal commit
+or roll back together, including clearing removed labels. The issuer's independent
 backing-allocation-to-candidate-journal crash window is not closed by this gateway
 journal. Real mTLS tests cover round trips, ambiguous allocation recovery,
 one-shot fill failure, cleanup/publication fences, rollback, immutable ownership,
-and rejection of inline values or unsupported label-index changes.
+rejection of inline values, and atomic label-index replacement/removal.
 
 ## Operator credential export
 

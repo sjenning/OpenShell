@@ -541,6 +541,7 @@ RETURNING "resource_version", "created_at_ms", "updated_at_ms"
             .await
             .map_err(|e| map_db_error(&e))?;
         for index in atomic_write_order(writes) {
+            let labels = writes[index].labels_json()?;
             match &writes[index] {
                 AtomicWrite::Check {
                     object_type,
@@ -575,11 +576,19 @@ FROM "objects" WHERE "object_type" = ?1 AND "id" = ?2 AND "resource_version" = ?
                     name,
                     workspace,
                     payload,
+                }
+                | AtomicWrite::CreateLabeled {
+                    object_type,
+                    id,
+                    name,
+                    workspace,
+                    payload,
+                    ..
                 } => {
                     sqlx::query(
                         r#"
 INSERT INTO "objects" ("object_type", "id", "name", "workspace", "payload", "created_at_ms", "updated_at_ms", "labels", "resource_version")
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, '{}', 1)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, 1)
 "#,
                     )
                     .bind(object_type)
@@ -588,6 +597,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, '{}', 1)
                     .bind(workspace)
                     .bind(payload)
                     .bind(now_ms)
+                    .bind(labels.as_deref().unwrap_or("{}"))
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| map_db_error(&e))?;
@@ -602,11 +612,19 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, '{}', 1)
                     id,
                     payload,
                     expected_version,
+                }
+                | AtomicWrite::UpdateLabeled {
+                    object_type,
+                    id,
+                    payload,
+                    expected_version,
+                    ..
                 } => {
                     let row = sqlx::query(
                         r#"
 UPDATE "objects"
-SET "payload" = ?4, "updated_at_ms" = ?5, "resource_version" = "resource_version" + 1
+SET "payload" = ?4, "updated_at_ms" = ?5, "resource_version" = "resource_version" + 1,
+    "labels" = CASE WHEN ?6 THEN ?7 ELSE "labels" END
 WHERE "object_type" = ?1 AND "id" = ?2 AND "resource_version" = ?3
 RETURNING "resource_version", "created_at_ms", "updated_at_ms"
 "#,
@@ -616,6 +634,8 @@ RETURNING "resource_version", "created_at_ms", "updated_at_ms"
                     .bind(i64::try_from(*expected_version).unwrap_or(i64::MAX))
                     .bind(payload)
                     .bind(now_ms)
+                    .bind(labels.is_some())
+                    .bind(labels.as_deref().unwrap_or("{}"))
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(|e| map_db_error(&e))?

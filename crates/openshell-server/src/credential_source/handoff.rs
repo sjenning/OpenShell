@@ -11,7 +11,9 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tonic::Status;
+mod recovery;
 mod retirement;
+pub use recovery::{HandoffPage, HandoffReconciler, RecoveryPage};
 
 const KIND: &str = "credential_issuer_handoff_v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,9 +164,12 @@ impl StaticHandoff {
         let Some(record) = store.get(KIND, id).await.map_err(storage)? else {
             return Ok(None);
         };
+        Self::from_record(record).map(Some)
+    }
+    fn from_record(record: crate::persistence::ObjectRecord) -> Result<Self, Status> {
         let state: State = serde_json::from_slice(&record.payload).map_err(|_| invalid())?;
         if state.format != 1
-            || state.id != id
+            || state.id != record.id
             || state.workspace != record.workspace
             || state.slots.is_empty()
             || state.slots.len() > 64
@@ -177,10 +182,10 @@ impl StaticHandoff {
         {
             return Err(invalid());
         }
-        Ok(Some(Self {
+        Ok(Self {
             state,
             revision: record.resource_version,
-        }))
+        })
     }
     fn source(&self, source: &RemoteProviderSource) -> Result<(), Status> {
         if self.state.source == source.name.as_ref() {

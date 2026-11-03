@@ -270,8 +270,14 @@ reservations to discover lost allocation responses and revokes every known
 identity. It retains ownership through uncertain cleanup responses. A late owner
 cannot publish after that claim, even before remote revocation finishes.
 
-This is a library primitive, not production mutation routing or a background
-reconciler. Published journals refuse direct abort. `publish_replacing` joins
+This is library infrastructure, not production mutation routing. The optional
+`spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
+Aborting claims, and claims idle unpublished work using a configurable one-minute
+to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;
+foreign registrations and Published journals are never reclaimed. Filtered pages
+advance the raw scan cursor even when no source/provider rows match.
+`published_for_provider` discovers live immutable ownership before a mutation.
+The production gateway does not start this worker yet. Published journals refuse direct abort. `publish_replacing` joins
 old-journal retirement claims to the replacement transaction, and `delete_provider`
 joins them to provider deletion. Both require complete immutable ownership of the
 current static bindings. Cleanup reloads those committed claims before issuer

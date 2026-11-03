@@ -166,6 +166,24 @@ diagnostics. Configured minter services remain responsible for authenticating
 and authorizing issuer identities. Gateway custom-profile/configuration wiring
 and a hosted minter server adapter remain future work.
 
+## Remote caller authorization
+
+`auth::GatewayPolicy` maps exact certificate SPIFFE URI identities to explicit
+workspace sets. This applies to both file-based certificates with URI SANs and
+Workload API SVIDs. It derives caller identity only from verified TLS connection
+extensions, never headers, bearer claims, or supplied owner metadata. The
+facade-owned `ExtensionTlsAcceptor` supplies verified peer metadata; tonic TLS
+connection info is also supported for existing authenticated listeners.
+
+`GatewayScope` supplies a stable identity-derived storage namespace across key
+and certificate rotations. Authorization checks both the durable creating
+identity and immutable workspace/provider-ID/credential-key owner. A matching
+supplied owner never permits access to another gateway's object. Missing TLS,
+unknown or ambiguous identities, unconfigured workspaces, and wildcard workspace
+bindings fail closed. Services must authenticate every operation, select storage
+by that namespace, and check the bound owner before reading values or mutating
+state. The policy primitives do not yet host store/refresh RPCs.
+
 ## Verification
 
 ```shell

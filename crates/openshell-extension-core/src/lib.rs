@@ -8,6 +8,7 @@
 mod auth;
 mod identity;
 mod jwt;
+mod server_tls;
 mod store;
 mod transport;
 
@@ -16,6 +17,7 @@ pub use identity::{ExtensionAudience, ExtensionIdentity, ExtensionKind, Identity
 pub use jwt::{
     EXTENSION_JWT_TYP, ExtensionCallerKind, ExtensionJwtClaims, MAX_EXTENSION_TOKEN_TTL,
 };
+pub use server_tls::{ExtensionPeer, ExtensionTlsAcceptor, ExtensionTlsStream, ServerTlsError};
 pub use store::ExtensionCredentialStore;
 pub use transport::{
     ExtensionChannelConfig, ExtensionClientIdentity, ExtensionServerTrust, TransportError,

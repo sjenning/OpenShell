@@ -22,6 +22,7 @@ openshell-crypto = { workspace = true }
 openshell-core = { path = "../openshell-core" }
 openshell-extension-core = { path = "../openshell-extension-core" }
 prost = { workspace = true }
+spiffe = { workspace = true, features = ["x509"] }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -31,6 +32,9 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
+http = { workspace = true }
+tower = { workspace = true }
 rcgen = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio = { workspace = true, features = ["test-util"] }

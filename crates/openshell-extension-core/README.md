@@ -36,6 +36,14 @@ closed. The Workload API supplies credentials, not an alternate verifier: server
 CA/DNS validation still applies, with trust bundles configured independently.
 Socket access permissions remain the local credential-source trust boundary.
 
+`ExtensionTlsAcceptor` constructs HTTP/2-only mTLS listeners through the crypto
+facade, requires explicit client trust roots, bounds handshake time, and exposes
+an `ExtensionPeer` connection extension only after successful verification. Peer
+metadata has no public constructor and cannot be supplied by request headers.
+Services must still authorize the certificate identity and bound resource owner.
+Accept loops must bound concurrent handshakes and discard failed handshakes
+without terminating the listener.
+
 Middleware- or interceptor-specific protobuf clients, policy selection,
 orchestration, and lifecycle management stay in their owning crates. Gateway
 signing authority also stays in `openshell-server`. This ownership rule keeps

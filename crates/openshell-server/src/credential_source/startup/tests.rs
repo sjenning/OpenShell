@@ -49,6 +49,16 @@ fn remote_configuration_requires_explicit_trust_identity_and_bounded_intervals()
         let error = invalid.validate().unwrap_err();
         assert!(!error.to_string().contains("never-echo-this"));
     }
+    for name in ["", "Primary", "with space", "path/name", &"a".repeat(129)] {
+        let mut invalid = valid.clone();
+        invalid.name = name.into();
+        assert!(invalid.validate().is_err());
+    }
+    for name in ["primary", "issuer_1.local-prod", &"a".repeat(128)] {
+        let mut config = valid.clone();
+        config.name = name.into();
+        config.validate().unwrap();
+    }
     let mut invalid = valid.clone();
     invalid.client_key_path = None;
     assert!(invalid.validate().is_err());
@@ -93,6 +103,12 @@ fn gateway_file_selection_is_strict_and_preflight_does_not_connect_or_read_ident
     std::fs::write(
         &path,
         input.replace("https://issuer.example:8443", "http://issuer.example:8443"),
+    )
+    .unwrap();
+    assert!(crate::config_file::load(&path).is_err());
+    std::fs::write(
+        &path,
+        input.replace("name = \"primary\"", "name = \"Primary\""),
     )
     .unwrap();
     assert!(crate::config_file::load(&path).is_err());

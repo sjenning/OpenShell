@@ -185,14 +185,16 @@ fn owner(provider: &Provider, key: &str) -> Result<wire::SecretOwner, Status> {
         provider: metadata.name.clone(),
     })
 }
+fn valid_registration(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|value| {
+            value.is_ascii_lowercase() || value.is_ascii_digit() || b"_.-".contains(&value)
+        })
+}
 impl RemoteProviderSource {
     pub fn new(name: &str, client: WatchedIssuer) -> Result<Self, Status> {
-        if name.is_empty()
-            || name.len() > 128
-            || !name.bytes().all(|value| {
-                value.is_ascii_lowercase() || value.is_ascii_digit() || b"_.-".contains(&value)
-            })
-        {
+        if !valid_registration(name) {
             return Err(Status::invalid_argument(
                 "invalid credential issuer registration",
             ));

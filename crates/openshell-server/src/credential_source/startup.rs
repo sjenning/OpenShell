@@ -46,12 +46,7 @@ fn invalid() -> Status {
 impl RemoteConfig {
     pub fn validate(&self) -> Result<(), Status> {
         let endpoint = url::Url::parse(&self.endpoint).map_err(|_| invalid())?;
-        if self.name.is_empty()
-            || self.name.len() > 128
-            || !self
-                .name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+        if !super::valid_registration(&self.name)
             || endpoint.scheme() != "https"
             || endpoint.host_str().is_none()
             || !endpoint.username().is_empty()

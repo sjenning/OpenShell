@@ -119,7 +119,8 @@ startup_timeout_seconds = 30
 cleanup_idle_seconds = 300
 ```
 
-All paths must be absolute. The client certificate must carry the SPIFFE identity
+Use a registration name of 1–128 lowercase ASCII letters, digits, underscores,
+hyphens, or periods. All paths must be absolute. The client certificate must carry the SPIFFE identity
 authorized by the issuer for this gateway and its workspaces. The server CA and
 endpoint hostname authenticate the issuer independently of that client identity.
 HTTP, platform-root fallback, URL credentials, and insecure verification are not

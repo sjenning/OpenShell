@@ -79,14 +79,17 @@ drivers without depending on `openshell-server`.
 
 These are raw legacy driver requests, not an authorization boundary. In
 particular, the database driver binds its legacy `provider` and credential-key
-fields. An issuer service must derive a stable physical owner from authenticated
-namespace and immutable owner metadata (or retain the original physical owner
-with its backing). Do not pass a mutable display name or rely on extra request
+fields. An issuer service must derive an immutable per-backing physical owner
+from authenticated namespace and immutable owner metadata (or retain the original
+physical owner with its backing). Do not pass a mutable display name or rely on extra request
 fields that a particular driver does not enforce.
 
 `storage::CredentialStorage` supplies that namespace-bound addressing for new
-issuer-owned backings. It projects authenticated namespace, immutable owner, and
-storage purpose into safe physical names, stages fresh objects, preserves the
+issuer-owned backings. It projects authenticated namespace, immutable owner,
+storage purpose, and a fresh allocation UUID into safe physical names. Including
+the allocation in version-two owner addressing protects even drivers that retain
+one value per provider/key and ignore the object ID. Version-one backings retain
+their original address for resolution and deletion. The wrapper preserves the
 backend's opaque handle separately from its configured registration, validates
 batch correlation and expiration, and sanitizes backend diagnostics. Different
 gateways cannot resolve or delete one another's backing even when their supplied

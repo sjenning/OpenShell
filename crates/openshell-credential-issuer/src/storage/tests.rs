@@ -4,6 +4,7 @@
 use super::*;
 use crate::{auth::test_scope, repository::Repository};
 use openshell_driver_db_credstore::DbCredstoreCredentialDriver;
+mod allocations;
 
 fn owner() -> SecretOwner {
     SecretOwner {
@@ -136,8 +137,8 @@ async fn staging_never_overwrites_an_existing_candidate() {
 #[test]
 fn addresses_are_unambiguous_stable_and_safe_for_legacy_paths_and_labels() {
     let scope = test_scope("a");
-    let one = address(&scope, &owner(), "value-v1").unwrap();
-    let two = address(&scope, &owner(), "value-v1").unwrap();
+    let one = address(&scope, &owner(), "value-v1", None).unwrap();
+    let two = address(&scope, &owner(), "value-v1", None).unwrap();
     assert_eq!(one.provider, two.provider);
     assert!(one.provider.len() <= 63);
     assert!(one.workspace.len() <= 63);
@@ -148,7 +149,7 @@ fn addresses_are_unambiguous_stable_and_safe_for_legacy_paths_and_labels() {
     );
     let mut unusual = owner();
     unusual.provider_id = "../untrusted/path".to_string();
-    let other = address(&scope, &unusual, "value-v1").unwrap();
+    let other = address(&scope, &unusual, "value-v1", None).unwrap();
     assert!(!other.provider.contains(".."));
     assert_ne!(one.provider, other.provider);
     assert!(CredentialStorage::new(BTreeMap::new(), "missing".to_string()).is_err());

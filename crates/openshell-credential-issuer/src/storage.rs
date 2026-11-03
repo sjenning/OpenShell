@@ -33,6 +33,13 @@ struct Backing {
     registration: String,
     handle: Vec<u8>,
     purpose: String,
+    #[serde(default)]
+    allocation: Option<String>,
+}
+struct DecodedBacking<'a> {
+    handle: CredentialHandle,
+    driver: &'a Arc<dyn CredentialDriver>,
+    allocation: Option<String>,
 }
 struct Address {
     provider: String,
@@ -67,20 +74,40 @@ fn error(status: Status) -> Status {
 fn encode_error() -> Status {
     Status::data_loss("invalid issuer credential backing")
 }
-fn address(scope: &GatewayScope, owner: &SecretOwner, purpose: &str) -> Result<Address, Status> {
+fn address(
+    scope: &GatewayScope,
+    owner: &SecretOwner,
+    purpose: &str,
+    allocation: Option<&str>,
+) -> Result<Address, Status> {
     scope.authorize_owner(owner)?;
     if purpose.is_empty() || purpose.len() > 512 || purpose.chars().any(char::is_control) {
         return Err(Status::invalid_argument("invalid issuer storage purpose"));
     }
     // Canonical tuple encoding avoids delimiter ambiguity. This is non-secret
     // identity hashing through the crypto facade, not a credential fingerprint.
-    let encoded = serde_json::to_vec(&(
-        "openshell.issuer.backend-owner.v1",
-        scope.namespace(),
-        owner,
-        purpose,
-    ))
-    .map_err(|_| encode_error())?;
+    let encoded = allocation
+        .map_or_else(
+            // Preserve reads/deletions of version-one backings exactly.
+            || {
+                serde_json::to_vec(&(
+                    "openshell.issuer.backend-owner.v1",
+                    scope.namespace(),
+                    owner,
+                    purpose,
+                ))
+            },
+            |allocation| {
+                serde_json::to_vec(&(
+                    "openshell.issuer.backend-owner.v2",
+                    scope.namespace(),
+                    owner,
+                    purpose,
+                    allocation,
+                ))
+            },
+        )
+        .map_err(|_| encode_error())?;
     let digest = openshell_crypto::sha256(&encoded)
         .map_err(|_| Status::unavailable("issuer backend identity unavailable"))?;
     let mut hex = String::with_capacity(64);
@@ -127,7 +154,8 @@ impl CredentialStorage {
         purpose: &str,
         value: String,
     ) -> Result<Vec<u8>, Status> {
-        let address = address(scope, owner, purpose)?;
+        let allocation = uuid::Uuid::new_v4().to_string();
+        let address = address(scope, owner, purpose, Some(&allocation))?;
         let driver = &self.drivers[&self.default_driver];
         let mut handle = driver
             .store_credential(StoreCredentialRequest {
@@ -137,7 +165,7 @@ impl CredentialStorage {
                 existing_handle: None,
                 workspace: address.workspace,
                 provider_id: address.provider_id,
-                object_id: uuid::Uuid::new_v4().to_string(),
+                object_id: allocation.clone(),
             })
             .await
             .map_err(error)?;
@@ -148,20 +176,23 @@ impl CredentialStorage {
             handle.driver.clone_from(&self.default_driver);
         }
         serde_json::to_vec(&Backing {
-            version: 1,
+            version: 2,
             registration: self.default_driver.clone(),
             handle: handle.encode_to_vec(),
             purpose: purpose.to_string(),
+            allocation: Some(allocation),
         })
         .map_err(|_| encode_error())
     }
-    fn decode<'a>(
-        &'a self,
-        bytes: &[u8],
-        purpose: &str,
-    ) -> Result<(CredentialHandle, &'a Arc<dyn CredentialDriver>), Status> {
+    fn decode<'a>(&'a self, bytes: &[u8], purpose: &str) -> Result<DecodedBacking<'a>, Status> {
         let backing: Backing = serde_json::from_slice(bytes).map_err(|_| encode_error())?;
-        if backing.version != 1 || backing.purpose != purpose {
+        let valid_allocation = match (backing.version, backing.allocation.as_deref()) {
+            (1, None) => true,
+            (2, Some(id)) => uuid::Uuid::parse_str(id)
+                .is_ok_and(|value| !value.is_nil() && value.to_string() == id),
+            _ => false,
+        };
+        if !valid_allocation || backing.purpose != purpose {
             return Err(encode_error());
         }
         let handle =
@@ -172,7 +203,11 @@ impl CredentialStorage {
         let driver = self.drivers.get(&backing.registration).ok_or_else(|| {
             Status::failed_precondition("issuer backing driver is not configured")
         })?;
-        Ok((handle, driver))
+        Ok(DecodedBacking {
+            handle,
+            driver,
+            allocation: backing.allocation,
+        })
     }
     pub async fn resolve(
         &self,
@@ -181,8 +216,13 @@ impl CredentialStorage {
         purpose: &str,
         backing: &[u8],
     ) -> Result<ResolvedBacking, Status> {
-        let address = address(scope, owner, purpose)?;
-        let (handle, driver) = self.decode(backing, purpose)?;
+        scope.authorize_owner(owner)?;
+        let DecodedBacking {
+            handle,
+            driver,
+            allocation,
+        } = self.decode(backing, purpose)?;
+        let address = address(scope, owner, purpose, allocation.as_deref())?;
         let request_id = uuid::Uuid::new_v4().to_string();
         let mut values = driver
             .resolve_credentials(vec![ResolveCredentialRequest {
@@ -219,8 +259,13 @@ impl CredentialStorage {
         purpose: &str,
         backing: &[u8],
     ) -> Result<(), Status> {
-        let address = address(scope, owner, purpose)?;
-        let (handle, driver) = self.decode(backing, purpose)?;
+        scope.authorize_owner(owner)?;
+        let DecodedBacking {
+            handle,
+            driver,
+            allocation,
+        } = self.decode(backing, purpose)?;
+        let address = address(scope, owner, purpose, allocation.as_deref())?;
         driver
             .delete_credential(DeleteCredentialRequest {
                 provider: address.provider,

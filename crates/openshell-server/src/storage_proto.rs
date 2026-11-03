@@ -662,6 +662,8 @@ mod tests {
                     "openshell.credentials.store.v1.CredentialStore/WatchSecrets",
                     "openshell.credentials.refresh.v1.CredentialRefresh/ListStrategies",
                     "openshell.credentials.refresh.v1.CredentialRefresh/CreateGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/ReserveGrant",
+                    "openshell.credentials.refresh.v1.CredentialRefresh/InitializeGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/GetGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/DeleteGrant",
                     "openshell.credentials.refresh.v1.CredentialRefresh/RotateGrant",

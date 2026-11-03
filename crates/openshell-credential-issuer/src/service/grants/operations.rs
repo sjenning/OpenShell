@@ -29,7 +29,7 @@ use std::{
 };
 use tonic::Status;
 
-fn validate_inputs(
+pub(super) fn validate_inputs(
     fields: &[MaterialDescriptor],
     values: &BTreeMap<String, String>,
 ) -> Result<(), Status> {
@@ -50,7 +50,7 @@ fn validate_inputs(
     }
     Ok(())
 }
-fn parsed_duration(
+pub(super) fn parsed_duration(
     value: Option<&prost_types::Duration>,
     default: Duration,
 ) -> Result<Duration, Status> {
@@ -77,6 +77,9 @@ pub(super) fn retire(
     purpose: String,
     backing: Vec<u8>,
 ) {
+    if backing.is_empty() {
+        return;
+    }
     if !state
         .retired
         .iter()

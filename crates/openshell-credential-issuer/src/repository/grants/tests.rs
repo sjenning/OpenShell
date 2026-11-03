@@ -3,6 +3,7 @@
 
 use super::*;
 mod publication;
+mod reservations;
 use crate::{ReferenceState, ReferenceStateStore, auth::test_scope, minter::MaterialDescriptor};
 
 fn state() -> GrantState {

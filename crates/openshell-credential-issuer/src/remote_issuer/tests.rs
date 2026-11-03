@@ -329,6 +329,7 @@ async fn malformed_watch_frames_are_rejected_and_checkpoint_does_not_reconcile()
 #[test]
 fn catalog_and_grant_metadata_use_the_same_pinned_semantic_id_rules() {
     let mut catalog = refresh::ListStrategiesResponse {
+        supports_pending_reservations: false,
         strategies: vec![
             openshell_core::proto::credentials::minter::v1::StrategyDescriptor {
                 name: "custom:acme.sts".into(),

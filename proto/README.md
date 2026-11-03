@@ -122,6 +122,15 @@ sending a conditional value fill, or replay allocation without retaining the
 value. Original reservation receipts survive fill/deletion; tombstones fence
 late fills rather than allowing resurrection.
 
+The refresh catalog separately advertises pending grant reservations.
+`ReserveGrant` allocates a grant epoch and fixed pending outputs without
+configuration, refresh material, or backend values. The gateway journals those
+identities before sending inputs to `InitializeGrant`. Initialization encrypts
+inputs and atomically commits the one-time transition to a mintable pending
+grant with its replay receipt. Reserved grants cannot mint; deletion fences late
+initialization. Exact reservation/initialization receipts remain replayable after
+deletion and never resurrect a grant. Neither operation retries an upstream mint.
+
 The issuer library hosts authenticated store, refresh, and custom-minter
 services. These contracts do not enable a gateway remote-source mode or relax
 authorization for an existing gateway RPC; deployment and gateway wiring remain

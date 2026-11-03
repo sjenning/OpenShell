@@ -389,6 +389,44 @@ impl WatchedIssuer {
         }
         Ok(result)
     }
+    pub async fn reserve_grant(
+        &self,
+        request: refresh::ReserveGrantRequest,
+    ) -> Result<refresh::ReserveGrantResponse, Status> {
+        let owner = request.owner.clone();
+        let outputs = request.outputs.clone();
+        let result = self.inner.client.reserve_grant(request).await;
+        self.inner.invalidate_values()?;
+        if let Ok(response) = &result {
+            self.track_grant(response.grant.clone())?;
+            if let Some(owner) = owner {
+                for (id, reference) in &response.output_references {
+                    self.track_secret(
+                        store::SecretOwner {
+                            credential_key: outputs[id].clone(),
+                            ..owner.clone()
+                        },
+                        reference.clone(),
+                    )?;
+                }
+            }
+        }
+        result
+    }
+    pub async fn initialize_grant(
+        &self,
+        request: refresh::InitializeGrantRequest,
+    ) -> Result<refresh::InitializeGrantResponse, Status> {
+        let result = self.inner.client.initialize_grant(request).await;
+        self.inner.invalidate_values()?;
+        if let Ok(response) = &result {
+            cache::grant(
+                &self.inner,
+                response.status.as_ref().ok_or_else(super::invalid)?,
+            )?;
+        }
+        result
+    }
     pub async fn get_grant(
         &self,
         request: refresh::GetGrantRequest,

@@ -15,6 +15,7 @@ use tonic::{Request, Response, Status};
 mod kernel;
 mod maintenance;
 mod operations;
+mod reservations;
 mod watch;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -94,6 +95,7 @@ fn grant_status(state: &GrantState) -> Result<wire::GrantStatus, Status> {
             .map_err(|_| Status::data_loss("invalid issuer grant timestamp"))
     };
     let state_name = match state.phase {
+        GrantPhase::Reserved => "reserved",
         GrantPhase::Pending => "pending",
         GrantPhase::Refreshing | GrantPhase::Publishing => "refreshing",
         GrantPhase::Refreshed => "refreshed",
@@ -170,7 +172,10 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
                 }
             })
             .collect();
-        let result = wire::ListStrategiesResponse { strategies };
+        let result = wire::ListStrategiesResponse {
+            strategies,
+            supports_pending_reservations: true,
+        };
         check_size(&result)?;
         Ok(Response::new(result))
     }
@@ -191,6 +196,49 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
             .run(
                 &coordination,
                 Box::pin(async move { runtime.create(scope, request, key).await }),
+            )
+            .await?;
+        Ok(Response::new(result))
+    }
+    async fn reserve_grant(
+        &self,
+        request: Request<wire::ReserveGrantRequest>,
+    ) -> Result<Response<wire::ReserveGrantResponse>, Status> {
+        let scope = self.runtime.store.policy.authenticate(&request)?;
+        let request = request.into_inner();
+        check_size(&request)?;
+        let key = idempotency(&request.idempotency_key)?;
+        let runtime = self.runtime.clone();
+        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+        let result = self
+            .runtime
+            .store
+            .coordinator
+            .run(
+                &coordination,
+                Box::pin(async move { runtime.reserve(scope, request, key).await }),
+            )
+            .await?;
+        Ok(Response::new(result))
+    }
+    async fn initialize_grant(
+        &self,
+        request: Request<wire::InitializeGrantRequest>,
+    ) -> Result<Response<wire::InitializeGrantResponse>, Status> {
+        let scope = self.runtime.store.policy.authenticate(&request)?;
+        let request = request.into_inner();
+        check_size(&request)?;
+        valid_reference(&request.grant)?;
+        let key = idempotency(&request.idempotency_key)?;
+        let runtime = self.runtime.clone();
+        let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
+        let result = self
+            .runtime
+            .store
+            .coordinator
+            .run(
+                &coordination,
+                Box::pin(async move { runtime.initialize(scope, request, key).await }),
             )
             .await?;
         Ok(Response::new(result))

@@ -82,6 +82,11 @@ impl GrantRuntime {
         snapshot: Snapshot,
         trigger: RefreshTrigger,
     ) -> Result<Snapshot, Status> {
+        if snapshot.loaded.state.phase == GrantPhase::Reserved {
+            return Err(Status::failed_precondition(
+                "issuer grant is awaiting initialization",
+            ));
+        }
         RefreshEngine::new(
             Arc::new(NativeStore {
                 runtime: self.clone(),
@@ -146,6 +151,11 @@ impl GrantRuntime {
         key: String,
     ) -> Result<wire::RotateGrantResponse, Status> {
         let loaded = self.load(&scope, &id).await?;
+        if loaded.state.phase == GrantPhase::Reserved {
+            return Err(Status::failed_precondition(
+                "issuer grant is awaiting initialization",
+            ));
+        }
         let fingerprint = hex_digest(&encode(&(
             "rotate-grant-v1",
             &loaded.state.definition.identity,

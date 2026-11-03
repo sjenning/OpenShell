@@ -313,8 +313,9 @@ Unknown cursors reset; stream errors require clients to invalidate caches and
 fail closed. The journal currently retains all events.
 
 The standalone daemon composes this host with CredentialRefreshService and
-shared storage/coordination. Remote-source caching exists separately; gateway
-mode selection and mutation/delivery wiring remain pending.
+shared storage/coordination. The gateway has selected-source delivery, static
+mutation journaling, and operator-export adapters. Production source selection
+and grant mutation routing remain pending.
 
 ### Value-free static reservations
 
@@ -331,12 +332,13 @@ sending a conditional `PutSecret(expected_version = 1)`. First fill publishes
 version two. Revoking the known pending identity fences a late fill through the
 same native reference CAS and permanent tombstone. The gateway need not persist
 the provider value to discover or clean up an ambiguous fill. This is the
-issuer-side handoff primitive; gateway mutation journaling is not wired yet.
-The existing backing-allocation-to-candidate-journal crash window remains.
+issuer-side primitive used by the gateway's static handoff journal. Production
+remote-source selection remains pending. The existing backing-allocation-to-
+candidate-journal crash window remains.
 
 ## CredentialRefresh RPC host
 
-`service::CredentialRefreshService` hosts all seven refresh RPCs alongside a
+`service::CredentialRefreshService` hosts all nine refresh RPCs alongside a
 CredentialStoreService. Supply a pinned minter registry and MintResultSpool
 using a shared encryption key across replicas. The host never reads gateway
 profiles. Creation encrypts configuration/material, allocates fixed pending
@@ -345,6 +347,23 @@ idempotency receipts, and value-free events together. Default lifetime is one
 hour, default lead time is five minutes, and requested lifetime is bounded to
 twelve hours. The issuer serving window never exceeds that lifetime; this does
 not shorten the upstream credential's actual validity.
+
+`ReserveGrant` allocates an immutable grant epoch and its fixed pending output
+references without configuration, refresh material, backend allocations, or
+secret-dependent fingerprints. Its value-free receipt replays the original
+identities after initialization or deletion. `ListStrategies` advertises this
+additive capability; earlier read-only clients remain supported. Reserved grants
+cannot mint through scheduling, EnsureFresh, or RotateGrant.
+
+After journaling those identities, a gateway can send `InitializeGrant` with
+configuration and refresh material. The host encrypts the inputs and atomically
+commits initialization, candidate ownership, the completed replay receipt, and
+the pending status transition. Only then can scheduling or an explicit refresh
+mint. Configuration can be initialized once; another operation cannot replace
+it, change the epoch, or rebind outputs. Exact completed initialization replays
+even after minting/deletion, without reinitializing or minting. Deleting a reserved
+grant revokes its pending outputs and permanently fences late initialization.
+These issuer primitives do not yet route gateway grant configuration RPCs.
 
 Store and grant mutations share the gateway's durable idempotency namespace.
 Rotation claims its intent with the pre-mint uncertainty marker, before any

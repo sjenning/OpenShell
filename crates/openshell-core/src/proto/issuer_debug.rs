@@ -18,6 +18,7 @@ redacted_debug!(
     store::PutSecretRequest,
     store::ResolvedSecret,
     refresh::CreateGrantRequest,
+    refresh::InitializeGrantRequest,
     minter::MintRequest,
     minter::MintResponse
 );
@@ -51,6 +52,15 @@ mod tests {
             secret_material: request.secret_material.clone(),
             ..Default::default()
         };
+        let initialize = refresh::InitializeGrantRequest {
+            config: request.config.clone(),
+            secret_material: request.secret_material.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            refresh::InitializeGrantRequest::decode(initialize.encode_to_vec().as_slice()).unwrap(),
+            initialize
+        );
         let put = store::PutSecretRequest {
             value: secret.to_string(),
             ..Default::default()
@@ -65,6 +75,8 @@ mod tests {
             format!("{request:?}"),
             format!("{response:?}"),
             format!("{create:?}"),
+            format!("{initialize:?}"),
+            format!("{:?}", tonic::Request::new(initialize)),
             format!("{put:?}"),
             format!("{resolved:?}"),
             format!("{:?}", tonic::Request::new(request)),

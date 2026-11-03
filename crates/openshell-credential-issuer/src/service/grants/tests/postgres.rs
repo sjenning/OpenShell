@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+mod reservations;
 
 fn services(
     repository: Arc<Repository>,

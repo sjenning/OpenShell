@@ -29,6 +29,8 @@ pub struct OutputBinding {
 pub struct GrantDefinition {
     pub identity: GrantIdentity,
     pub descriptor: StrategyDescriptor,
+    /// Empty only for a value-free reservation (including its tombstone).
+    /// Initialization may set this once without changing identity or bindings.
     pub config_backing: Vec<u8>,
     pub outputs: BTreeMap<String, OutputBinding>,
     pub refresh_before_ms: i64,
@@ -37,6 +39,7 @@ pub struct GrantDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantPhase {
+    Reserved,
     Pending,
     Refreshing,
     Publishing,
@@ -89,6 +92,7 @@ impl std::fmt::Debug for GrantState {
 impl GrantState {
     pub fn checkpoint(&self) -> GrantCheckpoint {
         let status = match self.phase {
+            GrantPhase::Reserved => "reserved",
             GrantPhase::Pending => "configured",
             GrantPhase::Refreshing => "refresh_in_progress",
             GrantPhase::Publishing => "refresh_committing",
@@ -127,6 +131,16 @@ impl GrantState {
             || identity.authorization_epoch.is_empty()
             || definition.descriptor.name.is_empty()
             || definition.config_backing.is_empty()
+                && !matches!(
+                    self.phase,
+                    GrantPhase::Reserved | GrantPhase::Deleting | GrantPhase::Deleted
+                )
+            || self.phase == GrantPhase::Reserved
+                && (!definition.config_backing.is_empty()
+                    || !self.material.is_empty()
+                    || self.attempt.is_some()
+                    || self.expiration_time_ms.is_some()
+                    || self.next_refresh_at_ms != i64::MAX)
             || definition.refresh_before_ms < 0
             || definition.max_lifetime_seconds <= 0
             || outputs.is_empty()
@@ -158,14 +172,13 @@ impl GrantState {
                     .secret_material
                     .iter()
                     .any(|field| field.name == *name)
-        }) || definition
-            .descriptor
-            .secret_material
-            .iter()
-            .any(|field| field.required && !self.material.contains_key(&field.name))
-            || self
-                .expiration_time_ms
-                .is_some_and(|expiration| expiration <= 0)
+        }) || definition.descriptor.secret_material.iter().any(|field| {
+            !definition.config_backing.is_empty()
+                && field.required
+                && !self.material.contains_key(&field.name)
+        }) || self
+            .expiration_time_ms
+            .is_some_and(|expiration| expiration <= 0)
             || self.failure_code.len() > 128
             || self
                 .failure_code
@@ -253,10 +266,11 @@ impl GrantState {
     }
     fn allows(&self, next: GrantPhase) -> bool {
         use GrantPhase::{
-            Deleted, Deleting, Failed, Parked, Pending, Publishing, Refreshed, Refreshing,
+            Deleted, Deleting, Failed, Parked, Pending, Publishing, Refreshed, Refreshing, Reserved,
         };
         self.phase == next
             || match self.phase {
+                Reserved => matches!(next, Pending | Deleting),
                 Pending | Failed | Refreshed => {
                     matches!(next, Refreshing | Failed | Parked | Deleting)
                 }
@@ -356,7 +370,17 @@ impl GrantRepository {
             return Err(Status::aborted("issuer grant revision changed"));
         }
         let changed = if let Some(old) = old {
-            if old.state.definition != state.definition {
+            let initializing = old.state.phase == GrantPhase::Reserved
+                && state.phase == GrantPhase::Pending
+                && old.state.definition.config_backing.is_empty()
+                && !state.definition.config_backing.is_empty();
+            let mut definition = old.state.definition.clone();
+            if initializing {
+                definition
+                    .config_backing
+                    .clone_from(&state.definition.config_backing);
+            }
+            if definition != state.definition {
                 return Err(Status::aborted("immutable grant definition changed"));
             }
             if matches!(
@@ -411,7 +435,10 @@ impl GrantRepository {
                     "grant rotation lost retired material ownership",
                 ));
             }
-            if old.state.material != state.material && old.state.phase != GrantPhase::Publishing {
+            if old.state.material != state.material
+                && old.state.phase != GrantPhase::Publishing
+                && !initializing
+            {
                 return Err(Status::failed_precondition(
                     "grant material requires a known completed mint",
                 ));
@@ -449,12 +476,12 @@ impl GrantRepository {
             changed
         } else {
             if state.version != 1
-                || state.phase != GrantPhase::Pending
+                || !matches!(state.phase, GrantPhase::Pending | GrantPhase::Reserved)
                 || state.attempt.is_some()
                 || state.completed_attempt.is_some()
             {
                 return Err(Status::failed_precondition(
-                    "new issuer grants must be pending at version one",
+                    "new issuer grants must be pending or reserved at version one",
                 ));
             }
             true

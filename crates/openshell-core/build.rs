@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".openshell.credentials.store.v1.PutSecretRequest",
         ".openshell.credentials.store.v1.ResolvedSecret",
         ".openshell.credentials.refresh.v1.CreateGrantRequest",
+        ".openshell.credentials.refresh.v1.InitializeGrantRequest",
         ".openshell.credentials.minter.v1.MintRequest",
         ".openshell.credentials.minter.v1.MintResponse",
     ]);

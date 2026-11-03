@@ -230,6 +230,52 @@ impl RemoteIssuer {
         validation::created(&outputs, &result)?;
         Ok(result)
     }
+    pub async fn reserve_grant(
+        &self,
+        message: refresh::ReserveGrantRequest,
+    ) -> Result<refresh::ReserveGrantResponse, Status> {
+        if !self.list_strategies().await?.supports_pending_reservations {
+            return Err(Status::failed_precondition(
+                "remote issuer does not support pending grant reservations",
+            ));
+        }
+        let outputs = message.outputs.clone();
+        let mut client = self.refresh.clone();
+        let result = self
+            .call(message, ORDINARY, move |request| async move {
+                client.reserve_grant(request).await
+            })
+            .await?;
+        validation::created(
+            &outputs,
+            &refresh::CreateGrantResponse {
+                grant: result.grant.clone(),
+                output_references: result.output_references.clone(),
+            },
+        )?;
+        Ok(result)
+    }
+    pub async fn initialize_grant(
+        &self,
+        message: refresh::InitializeGrantRequest,
+    ) -> Result<refresh::InitializeGrantResponse, Status> {
+        let expected = message.grant.clone();
+        let mut client = self.refresh.clone();
+        let result = self
+            .call(message, ORDINARY, move |request| async move {
+                client.initialize_grant(request).await
+            })
+            .await?;
+        validation::status(&expected, result.status.as_ref())?;
+        if result
+            .status
+            .as_ref()
+            .is_none_or(|status| status.state != "pending" || status.version != 2)
+        {
+            return Err(invalid());
+        }
+        Ok(result)
+    }
     pub async fn get_grant(
         &self,
         message: refresh::GetGrantRequest,

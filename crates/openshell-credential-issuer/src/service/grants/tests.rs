@@ -35,6 +35,7 @@ mod mtls;
 mod postgres;
 mod recovery;
 mod remote_client;
+mod reservations;
 mod shutdown;
 mod watched_client;
 

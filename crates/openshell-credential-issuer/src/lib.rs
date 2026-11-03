@@ -6,6 +6,7 @@
 //! refresh coordination, and the stateless minter contract.
 
 pub mod auth;
+pub mod backend;
 pub mod builtins;
 pub mod engine;
 pub mod grant;

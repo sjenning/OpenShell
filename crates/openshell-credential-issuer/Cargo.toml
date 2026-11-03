@@ -20,6 +20,9 @@ aws-sdk-sts = { workspace = true }
 jsonwebtoken = { workspace = true }
 openshell-crypto = { workspace = true }
 openshell-core = { path = "../openshell-core" }
+openshell-driver-db-credstore = { path = "../openshell-driver-db-credstore" }
+openshell-driver-kubernetes-secrets = { path = "../openshell-driver-kubernetes-secrets" }
+openshell-driver-vault = { path = "../openshell-driver-vault" }
 openshell-extension-core = { path = "../openshell-extension-core" }
 prost = { workspace = true }
 spiffe = { workspace = true, features = ["x509"] }

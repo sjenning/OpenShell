@@ -67,6 +67,16 @@ handle cleanup is retried on later replacement or deletion; pending cleanup
 survives restart. This is not yet a general orphan scanner for a crash between
 backend allocation and reference publication.
 
+## Storage backend boundary
+
+`backend::CredentialDriver` owns the low-level driver contract and adapters for
+encrypted database, Kubernetes Secrets, and Vault storage. The gateway reexports
+the trait for compatibility and still composes its local registry, subprocess
+lifetimes, and object-store adapter. Sharing the contract does not send SSH host
+keys or launch material to an issuer: `InternalSecretStore` remains local and
+retains its own backend ownership. The issuer can compose these same first-party
+drivers without depending on `openshell-server`.
+
 ## Refresh coordination and minters
 
 `RefreshCoordinator` owns process-local grant locks, bounded admission, executor

@@ -75,52 +75,7 @@ const COMMON_CREDENTIAL_DRIVER_FIELDS: &[&str] = &[
 #[cfg(unix)]
 const CREDENTIAL_DRIVER_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
 
-#[async_trait]
-pub trait CredentialDriver: std::fmt::Debug + Send + Sync {
-    async fn store_credential(
-        &self,
-        request: StoreCredentialRequest,
-    ) -> Result<CredentialHandle, Status>;
-
-    async fn delete_credential(&self, request: DeleteCredentialRequest) -> Result<(), Status>;
-
-    async fn resolve_credentials(
-        &self,
-        requests: Vec<ResolveCredentialRequest>,
-    ) -> Result<Vec<ResolvedCredential>, Status>;
-
-    #[cfg(test)]
-    fn stored_credential_count(&self) -> Option<usize> {
-        None
-    }
-
-    #[cfg(test)]
-    fn fail_next_store(&self) {}
-
-    #[cfg(test)]
-    fn fail_next_delete(&self) {}
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn gate_next_resolve(
-        &self,
-    ) -> Option<(
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    )> {
-        None
-    }
-
-    #[cfg(test)]
-    fn gate_next_store(
-        &self,
-    ) -> Option<(
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    )> {
-        None
-    }
-}
+pub use openshell_credential_issuer::backend::CredentialDriver;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedProviderCredentials {
@@ -1655,69 +1610,6 @@ fn default_credential_store_persistence_error_to_status(
             "default credential encode failed during {operation}: {err}"
         )),
         other => Status::unavailable(format!("default credential {operation} failed: {other}")),
-    }
-}
-
-#[async_trait]
-impl CredentialDriver for KubernetesSecretsCredentialDriver {
-    async fn store_credential(
-        &self,
-        request: StoreCredentialRequest,
-    ) -> Result<CredentialHandle, Status> {
-        Self::store_credential(self, request).await
-    }
-
-    async fn delete_credential(&self, request: DeleteCredentialRequest) -> Result<(), Status> {
-        Self::delete_credential(self, request).await
-    }
-
-    async fn resolve_credentials(
-        &self,
-        requests: Vec<ResolveCredentialRequest>,
-    ) -> Result<Vec<ResolvedCredential>, Status> {
-        Self::resolve_credentials(self, requests).await
-    }
-}
-
-#[async_trait]
-impl CredentialDriver for DbCredstoreCredentialDriver {
-    async fn store_credential(
-        &self,
-        request: StoreCredentialRequest,
-    ) -> Result<CredentialHandle, Status> {
-        Self::store_credential(self, request).await
-    }
-
-    async fn delete_credential(&self, request: DeleteCredentialRequest) -> Result<(), Status> {
-        Self::delete_credential(self, request).await
-    }
-
-    async fn resolve_credentials(
-        &self,
-        requests: Vec<ResolveCredentialRequest>,
-    ) -> Result<Vec<ResolvedCredential>, Status> {
-        Self::resolve_credentials(self, requests).await
-    }
-}
-
-#[async_trait]
-impl CredentialDriver for VaultCredentialDriver {
-    async fn store_credential(
-        &self,
-        request: StoreCredentialRequest,
-    ) -> Result<CredentialHandle, Status> {
-        Self::store_credential(self, request).await
-    }
-
-    async fn delete_credential(&self, request: DeleteCredentialRequest) -> Result<(), Status> {
-        Self::delete_credential(self, request).await
-    }
-
-    async fn resolve_credentials(
-        &self,
-        requests: Vec<ResolveCredentialRequest>,
-    ) -> Result<Vec<ResolvedCredential>, Status> {
-        Self::resolve_credentials(self, requests).await
     }
 }
 

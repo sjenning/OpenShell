@@ -12,6 +12,7 @@ use tonic::Status;
 pub(super) fn claims(
     source: &RemoteProviderSource,
     provider: &Provider,
+    replacement: Option<&Provider>,
     owned: &[StaticHandoff],
 ) -> Result<Vec<AtomicWrite>, Status> {
     if !provider.credentials.is_empty() {
@@ -37,6 +38,7 @@ pub(super) fn claims(
                 old.state
                     .slots
                     .get(key)
+                    .filter(|slot| !slot.retiring)
                     .and_then(|slot| slot.reference.as_ref())
                     == Some(&binding.reference)
             })
@@ -46,11 +48,28 @@ pub(super) fn claims(
             ));
         }
     }
+    let remaining = replacement
+        .map(|provider| {
+            provider
+                .credential_handles
+                .iter()
+                .map(|(key, handle)| Ok((key.clone(), source.decode(handle)?.reference)))
+                .collect::<Result<std::collections::HashMap<_, _>, Status>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     owned
         .iter()
         .map(|old| {
             let mut state = old.state.clone();
-            state.phase = Phase::Aborting;
+            for (key, slot) in &mut state.slots {
+                if remaining.get(key) != slot.reference.as_ref() {
+                    slot.retiring = true;
+                }
+            }
+            if state.slots.values().all(|slot| slot.retiring) {
+                state.phase = Phase::Aborting;
+            }
             Ok(AtomicWrite::Update {
                 object_type: super::KIND.into(),
                 id: old.id().into(),
@@ -83,7 +102,7 @@ impl StaticHandoff {
         if provider.object_id() != provider_id || provider.object_workspace() != row.workspace {
             return Err(invalid());
         }
-        let mut writes = claims(source, &provider, owned)?;
+        let mut writes = claims(source, &provider, None, owned)?;
         writes.push(AtomicWrite::Delete {
             object_type: "provider".into(),
             id: provider_id.into(),

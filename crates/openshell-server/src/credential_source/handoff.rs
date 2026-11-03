@@ -11,6 +11,7 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tonic::Status;
+mod partial;
 mod recovery;
 mod retirement;
 pub use recovery::{HandoffPage, HandoffReconciler, RecoveryPage};
@@ -29,6 +30,8 @@ enum Phase {
 struct Slot {
     reference: Option<String>,
     filled: bool,
+    #[serde(default)]
+    retiring: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +124,7 @@ impl StaticHandoff {
                         Slot {
                             reference: None,
                             filled: false,
+                            retiring: false,
                         },
                     )
                     .is_some()
@@ -179,6 +183,9 @@ impl StaticHandoff {
                 .any(|slot| slot.filled && slot.reference.is_none())
             || matches!(state.phase, Phase::Ready | Phase::Published)
                 && state.slots.values().any(|slot| !slot.filled)
+            || state.phase == Phase::Published && state.slots.values().all(|slot| slot.retiring)
+            || !matches!(state.phase, Phase::Published | Phase::Aborting)
+                && state.slots.values().any(|slot| slot.retiring)
         {
             return Err(invalid());
         }
@@ -399,7 +406,10 @@ impl StaticHandoff {
             || provider.object_workspace() != self.state.workspace
             || provider.object_name() != self.state.provider_name
             || !provider.credentials.is_empty()
-            || provider.credential_handles != self.handles(source)?
+            || self
+                .handles(source)?
+                .iter()
+                .any(|(key, handle)| provider.credential_handles.get(key) != Some(handle))
         {
             return Err(invalid());
         }
@@ -419,9 +429,25 @@ impl StaticHandoff {
             {
                 return Err(invalid());
             }
-            retirement::claims(source, &old, retiring)?
+            // New bindings come only from this handoff; all other bindings
+            // must preserve an exact, non-retiring old immutable reference.
+            for (key, handle) in &provider.credential_handles {
+                if !self.state.slots.contains_key(key) {
+                    if old.credential_handles.get(key) != Some(handle) {
+                        return Err(invalid());
+                    }
+                    if old.credential_expiration_times.get(key)
+                        != provider.credential_expiration_times.get(key)
+                    {
+                        return Err(Status::failed_precondition(
+                            "retained issuer credential expiration requires a new credential value",
+                        ));
+                    }
+                }
+            }
+            retirement::claims(source, &old, Some(&provider), retiring)?
         } else {
-            if !retiring.is_empty() {
+            if !retiring.is_empty() || provider.credential_handles.len() != self.state.slots.len() {
                 return Err(invalid());
             }
             Vec::new()

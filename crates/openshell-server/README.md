@@ -274,7 +274,7 @@ This is library infrastructure, not production mutation routing. The optional
 `spawn_reconciler` worker scans bounded keyset pages, immediately retries committed
 Aborting claims, and claims idle unpublished work using a configurable one-minute
 to one-hour cutoff. Failed rows retain ownership without blocking unrelated rows;
-foreign registrations and Published journals are never reclaimed. Filtered pages
+foreign registrations and live Published bindings are never reclaimed. Filtered pages
 advance the raw scan cursor even when no source/provider rows match.
 `published_for_provider` discovers live immutable ownership before a mutation.
 The production gateway does not start this worker yet. Published journals refuse direct abort. `publish_replacing` joins
@@ -282,7 +282,15 @@ old-journal retirement claims to the replacement transaction, and `delete_provid
 joins them to provider deletion. Both require complete immutable ownership of the
 current static bindings. Cleanup reloads those committed claims before issuer
 revocation; it never infers permission from a missing provider or a display name.
-Stale ownership rolls back the whole mutation. Publication derives the label
+Stale ownership rolls back the whole mutation. Partial replacements preserve
+untouched bindings without resolving their values. Old journals mark only replaced
+or removed keys for retirement; `cleanup_retired` forgets each retired key only
+after confirmed issuer revocation, retaining active siblings and their original
+operation IDs. Recovery processes these explicit flags, not parent absence.
+`update_preserving` supports metadata-only changes and key removal without issuer
+value reads. It rejects reference injection and expiration changes to retained
+credentials; changing issuer-owned expiration currently requires a new value.
+Publication derives the label
 index from the validated provider payload; payload, labels, and journal commit
 or roll back together, including clearing removed labels. The issuer's independent
 backing-allocation-to-candidate-journal crash window is not closed by this gateway

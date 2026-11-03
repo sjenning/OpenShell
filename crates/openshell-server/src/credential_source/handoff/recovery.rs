@@ -94,7 +94,8 @@ impl StaticHandoff {
         Ok(owned)
     }
     /// Recover one raw keyset page. Failed rows retain ownership and do not block
-    /// unrelated rows. Never reclaim Published rows, even if their parent is gone.
+    /// unrelated rows. Published rows permit only explicitly retired-key cleanup,
+    /// never reclamation inferred from a missing parent.
     /// `idle_before_ms` is a trusted cutoff, not supplied by a public request.
     pub async fn recover_page(
         store: &Store,
@@ -121,13 +122,21 @@ impl StaticHandoff {
                 result.failures += 1;
                 continue;
             };
-            if handoff.state.source != source.name.as_ref()
-                || handoff.state.phase == Phase::Published
-                || (handoff.state.phase != Phase::Aborting && updated > idle_before_ms)
-            {
+            if handoff.state.source != source.name.as_ref() {
                 continue;
             }
-            match handoff.abort(store, source).await {
+            let outcome = if handoff.state.phase == Phase::Published {
+                if !handoff.state.slots.values().any(|slot| slot.retiring) {
+                    continue;
+                }
+                handoff.cleanup_retired(store, source).await
+            } else {
+                if handoff.state.phase != Phase::Aborting && updated > idle_before_ms {
+                    continue;
+                }
+                handoff.abort(store, source).await
+            };
+            match outcome {
                 Ok(()) => result.cleaned += 1,
                 Err(error) if error.code() == Code::Aborted => result.conflicts += 1,
                 Err(_) => result.failures += 1,

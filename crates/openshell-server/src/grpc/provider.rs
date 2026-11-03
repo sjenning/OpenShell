@@ -555,6 +555,26 @@ async fn update_provider_record_with_source(
     // strand legacy records whose stored type predates current limits. See
     // #1347.
     super::validation::validate_object_metadata(candidate.metadata.as_ref(), "provider")?;
+    if let Some(source) = remote {
+        // Staging invalidates watch metadata. Validate retained references and
+        // prospective values before those effects, without letting the old
+        // reference's expiration hide a newly allocated value.
+        let mut validation_candidate = candidate.clone();
+        for key in updated_credential_values
+            .keys()
+            .chain(removed_credential_handles.keys())
+        {
+            validation_candidate.credential_handles.remove(key);
+        }
+        validate_provider_update_against_attached_sandboxes_with_source(
+            store,
+            catalog,
+            workspace,
+            &validation_candidate,
+            Some(source),
+        )
+        .await?;
+    }
     let mut remote_handoff = if let Some(source) = remote {
         issuer_mutations::stage(
             store,
@@ -602,10 +622,12 @@ async fn update_provider_record_with_source(
         ) {
             validate_provider_credentials(&profile, &candidate, &updated_credential_values)?;
         }
-        validate_provider_update_against_attached_sandboxes_with_catalog(
-            store, catalog, workspace, &candidate,
-        )
-        .await?;
+        if remote.is_none() {
+            validate_provider_update_against_attached_sandboxes_with_catalog(
+                store, catalog, workspace, &candidate,
+            )
+            .await?;
+        }
 
         // Project a response copy before publication. Stored legacy metadata is
         // not authority for later reference versions, and a metadata failure
@@ -2212,11 +2234,29 @@ pub async fn validate_provider_profiles_present(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn validate_provider_environment_keys_unique_with_catalog(
     store: &Store,
     catalog: &EffectiveProviderProfileCatalog,
     workspace: &str,
     provider_names: &[String],
+) -> Result<(), Status> {
+    validate_provider_environment_keys_unique_with_source(
+        store,
+        catalog,
+        workspace,
+        provider_names,
+        None,
+    )
+    .await
+}
+
+pub async fn validate_provider_environment_keys_unique_with_source(
+    store: &Store,
+    catalog: &EffectiveProviderProfileCatalog,
+    workspace: &str,
+    provider_names: &[String],
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
 ) -> Result<(), Status> {
     validate_provider_environment_keys_unique_at(
         store,
@@ -2224,17 +2264,38 @@ pub async fn validate_provider_environment_keys_unique_with_catalog(
         workspace,
         provider_names,
         None,
+        source,
         crate::persistence::current_time_ms(),
     )
     .await
 }
 
+#[cfg(test)]
 pub async fn validate_provider_credential_key_available_for_attached_sandboxes_with_catalog(
     store: &Store,
     catalog: &EffectiveProviderProfileCatalog,
     workspace: &str,
     provider: &Provider,
     credential_key: &str,
+) -> Result<(), Status> {
+    validate_provider_credential_key_available_for_attached_sandboxes_with_source(
+        store,
+        catalog,
+        workspace,
+        provider,
+        credential_key,
+        None,
+    )
+    .await
+}
+
+pub async fn validate_provider_credential_key_available_for_attached_sandboxes_with_source(
+    store: &Store,
+    catalog: &EffectiveProviderProfileCatalog,
+    workspace: &str,
+    provider: &Provider,
+    credential_key: &str,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
 ) -> Result<(), Status> {
     let mut candidate = provider.clone();
     candidate
@@ -2245,8 +2306,8 @@ pub async fn validate_provider_credential_key_available_for_attached_sandboxes_w
     // reference whose expired metadata might otherwise hide the reservation.
     candidate.credential_handles.remove(credential_key);
     candidate.credential_expiration_times.remove(credential_key);
-    validate_provider_update_against_attached_sandboxes_with_catalog(
-        store, catalog, workspace, &candidate,
+    validate_provider_update_against_attached_sandboxes_with_source(
+        store, catalog, workspace, &candidate, source,
     )
     .await
 }
@@ -2271,6 +2332,19 @@ pub async fn validate_provider_update_against_attached_sandboxes_with_catalog(
     workspace: &str,
     provider: &Provider,
 ) -> Result<(), Status> {
+    validate_provider_update_against_attached_sandboxes_with_source(
+        store, catalog, workspace, provider, None,
+    )
+    .await
+}
+
+pub async fn validate_provider_update_against_attached_sandboxes_with_source(
+    store: &Store,
+    catalog: &EffectiveProviderProfileCatalog,
+    workspace: &str,
+    provider: &Provider,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
+) -> Result<(), Status> {
     let provider_name = provider.object_name().to_string();
     for sandbox in sandboxes_using_provider_records(store, workspace, &provider_name).await? {
         let sandbox_name = sandbox.object_name().to_string();
@@ -2280,9 +2354,10 @@ pub async fn validate_provider_update_against_attached_sandboxes_with_catalog(
         validate_provider_environment_keys_unique_at(
             store,
             catalog,
-                        workspace,
+            workspace,
             &spec.providers,
             Some(provider),
+            source,
             crate::persistence::current_time_ms(),
         )
         .await
@@ -2302,6 +2377,7 @@ async fn validate_provider_environment_keys_unique_at(
     workspace: &str,
     provider_names: &[String],
     candidate_provider: Option<&Provider>,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
     now_ms: i64,
 ) -> Result<(), Status> {
     let mut seen_credentials = HashMap::<String, String>::new();
@@ -2323,7 +2399,8 @@ async fn validate_provider_environment_keys_unique_at(
             &mut seen_credentials,
             &mut seen_plugin_config,
             &provider_name,
-            active_provider_environment_keys(store, catalog, &provider, now_ms).await?,
+            active_provider_environment_keys_with_source(store, catalog, &provider, source, now_ms)
+                .await?,
             provider_plugin_environment_keys(catalog, &provider),
         )?;
         dynamic_bindings.extend(dynamic_token_grant_bindings_for_provider_with_catalog(
@@ -2600,42 +2677,66 @@ fn validate_dynamic_token_grant_bindings_unambiguous(
     Ok(())
 }
 
+#[cfg(test)]
 async fn active_provider_environment_keys(
     store: &Store,
     catalog: &EffectiveProviderProfileCatalog,
     provider: &Provider,
     now_ms: i64,
 ) -> Result<Vec<String>, Status> {
-    active_provider_environment_keys_for_identity(
-        store,
-        catalog,
-        provider,
-        provider.object_id(),
-        now_ms,
-    )
-    .await
+    active_provider_environment_keys_with_source(store, catalog, provider, None, now_ms).await
 }
 
-async fn active_provider_environment_keys_for_identity(
+async fn active_provider_environment_keys_with_source(
     store: &Store,
     catalog: &EffectiveProviderProfileCatalog,
     provider: &Provider,
-    provider_identity: &str,
+    source: Option<&dyn crate::credential_source::ProviderCredentialSource>,
     now_ms: i64,
 ) -> Result<Vec<String>, Status> {
-    let refresh_states = if provider_identity.is_empty() {
+    let provider_identity = provider.object_id();
+    let refresh_states = if source
+        .and_then(crate::credential_source::ProviderCredentialSource::remote_mutations)
+        .is_some()
+        || provider_identity.is_empty()
+    {
         Vec::new()
     } else {
         crate::provider_refresh::list_refresh_states_for_provider(store, provider_identity).await?
     };
     let mut projected = provider.clone();
-    crate::credentials::references::project_expiration_times(store, &mut projected).await?;
-    Ok(active_keys_with_refresh_states(
-        catalog,
-        &projected,
-        &refresh_states,
-        now_ms,
-    ))
+    match source {
+        Some(source) => {
+            // Prospective values have no issuer references yet. Project only
+            // retained handles; keep those values visible to collision checks
+            // without presenting plaintext as persisted remote-source state.
+            let prospective_values = std::mem::take(&mut projected.credentials);
+            source.capture_metadata(store, &mut projected).await?;
+            projected.credentials = prospective_values;
+        }
+        None => {
+            crate::credentials::references::project_expiration_times(store, &mut projected).await?;
+        }
+    }
+    let mut keys = active_keys_with_refresh_states(catalog, &projected, &refresh_states, now_ms);
+    if let Some(source) = source {
+        // Configured source-owned refresh epochs reserve their complete output
+        // set even while a value is expired: the next mint can make it live
+        // without another provider mutation. Detached/static references have
+        // no refresh epoch and follow the expiration projection above.
+        let broker_only = broker_only_provider_credential_keys_for_provider(catalog, provider);
+        keys.extend(
+            source
+                .refresh_authorization_epochs(provider)?
+                .into_keys()
+                .filter(|key| !broker_only.contains(key))
+                .filter(|key| !is_non_injectable_provider_credential(provider, key))
+                .filter(|key| is_valid_env_key(key)),
+        );
+        keys.sort();
+        keys.dedup();
+    }
+    Ok(keys)
 }
 
 fn active_keys_with_refresh_states(
@@ -5253,6 +5354,12 @@ pub(super) async fn handle_configure_provider_refresh(
         .transpose()
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
 
+    if requested_expiration_ms.is_some() && state.remote_provider_mutations()?.is_some() {
+        return Err(Status::invalid_argument(
+            "credential issuer refresh derives expiration from minted outputs; omit expiration_time",
+        ));
+    }
+
     // Serialize the reserve-then-persist sequence against other configurations
     // and sandbox mutations. The collision validation below and the refresh-state
     // persist further down are otherwise separate steps: two concurrent
@@ -5277,12 +5384,13 @@ pub(super) async fn handle_configure_provider_refresh(
         .provider_profile_sources
         .snapshot_catalog(state.store.as_ref(), &workspace)
         .await?;
-    validate_provider_credential_key_available_for_attached_sandboxes_with_catalog(
+    validate_provider_credential_key_available_for_attached_sandboxes_with_source(
         state.store.as_ref(),
         &catalog,
         &workspace,
         &provider,
         credential_key,
+        Some(state.provider_credential_source()),
     )
     .await?;
     // Reserve every env key this refresh will co-mint (resolved from the
@@ -5292,12 +5400,13 @@ pub(super) async fn handle_configure_provider_refresh(
     let additional_output_keys =
         resolved_additional_output_keys(&catalog, &provider, credential_key);
     for additional_key in additional_output_keys.values() {
-        validate_provider_credential_key_available_for_attached_sandboxes_with_catalog(
+        validate_provider_credential_key_available_for_attached_sandboxes_with_source(
             state.store.as_ref(),
             &catalog,
             &workspace,
             &provider,
             additional_key,
+            Some(state.provider_credential_source()),
         )
         .await?;
     }

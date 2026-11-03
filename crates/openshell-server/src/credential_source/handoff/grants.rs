@@ -293,10 +293,17 @@ impl StaticHandoff {
         store: &Store,
         source: &RemoteProviderSource,
     ) -> Result<(), Status> {
+        self.source(source)?;
         if self.state.phase != Phase::Aborting {
             return Err(invalid());
         }
-        self.reserve_grant(store, source).await?;
+        // The complete allocation was already journaled atomically. Replaying
+        // its reservation is unnecessary and can prevent cleanup when tracking
+        // is full (including after restart, when no replay receipt is cached).
+        if self.grant_id().is_none() {
+            self.reserve_grant(store, source).await?;
+        }
+        self.check(store).await?;
         let grant = self.state.grant.as_ref().ok_or_else(invalid)?;
         source
             .client

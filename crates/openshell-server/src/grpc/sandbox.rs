@@ -66,7 +66,7 @@ use russh::ChannelMsg;
 use russh::client::AuthResult;
 
 use super::provider::{
-    get_provider_record, is_valid_env_key, validate_provider_environment_keys_unique_with_catalog,
+    get_provider_record, is_valid_env_key, validate_provider_environment_keys_unique_with_source,
 };
 use super::validation::{
     level_matches, source_matches, validate_and_canonicalize_policy, validate_dns1123_label,
@@ -663,11 +663,12 @@ async fn handle_create_sandbox_inner(
         &spec.providers,
     )
     .await?;
-    validate_provider_environment_keys_unique_with_catalog(
+    validate_provider_environment_keys_unique_with_source(
         state.store.as_ref(),
         &provider_profile_catalog,
         &workspace,
         &spec.providers,
+        Some(state.provider_credential_source()),
     )
     .await?;
 
@@ -1550,11 +1551,12 @@ pub(super) async fn handle_attach_sandbox_provider(
         &candidate_spec.providers,
     )
     .await?;
-    validate_provider_environment_keys_unique_with_catalog(
+    validate_provider_environment_keys_unique_with_source(
         state.store.as_ref(),
         &provider_profile_catalog,
         &workspace,
         &candidate_spec.providers,
+        Some(state.provider_credential_source()),
     )
     .await?;
     super::policy::validate_candidate_provider_attachments(

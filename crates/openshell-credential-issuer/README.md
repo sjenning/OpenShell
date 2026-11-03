@@ -479,7 +479,13 @@ evicted. Authenticated status reads can still report `deleting` without restorin
 active tracking. Allocating mutations reserve tracking capacity for their
 complete output bundle before contacting the issuer, so a historical tombstone
 does not impose a process-lifetime quota or turn a committed allocation into a
-local capacity error. Per-registration observation tokens prevent old in-flight
+local capacity error. Successfully observed value-free reservation intents can
+replay against their existing tracked bundle at capacity. Their bounded receipts
+are reclaimed with the binding; an unknown intent still needs allocation capacity.
+Replays pin their bindings until completion or cancellation so reclamation cannot
+spend the same capacity twice. Gateway cleanup deletes durably known grant
+bindings directly, including after restart, instead of rediscovering them through
+reservation replay. Per-registration observation tokens prevent old in-flight
 reads from restoring metadata after a terminal entry was reclaimed and
 registered again. Revocation remains durable at the issuer. Independent secret
 and grant metadata epochs prevent cross-stream starvation; a distinct recovery

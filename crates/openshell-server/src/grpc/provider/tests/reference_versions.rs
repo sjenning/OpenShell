@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod expiration_authority;
+mod remote_collision;
+mod remote_configuration;
 
 fn provider() -> Provider {
     Provider {

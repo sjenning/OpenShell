@@ -282,7 +282,10 @@ After versioned rotation, expiration-only edits that change or clear the
 issuer-owned expiration fail. Replace a static value in the same update to set
 a new expiration; rotate while refresh owns it. When reconfiguring refresh,
 omit explicit expiration to retain the current issuer-owned expiration; a differing
-expiration fails before changing refresh configuration.
+expiration fails before changing embedded refresh configuration. With a remote
+issuer, omit `expiration_time` for both built-in and custom refresh configuration:
+any explicit expiration is rejected before creating or replacing a grant, and
+mint results determine the new values' expiration.
 Deleting refresh does not extend a versioned credential's lifetime. Status tables
 show registered custom strategy names rather than the legacy unspecified enum.
 

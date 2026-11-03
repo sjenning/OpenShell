@@ -11,6 +11,7 @@
 //! Build permits come from one FIFO semaphore sized from the database pool.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -28,6 +29,10 @@ use tokio::time::Instant;
 pub(super) const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const MIN_FAILURE_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+/// A process-local identity fence, not an authorization token. Sessions are
+/// replica-local and reset on reconnect. Do not consume cryptographic entropy
+/// for these public, non-secret configuration identities.
+static NEXT_METADATA_INVALIDATION_REVISION: AtomicU64 = AtomicU64::new(u64::MAX);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FanoutScope {
@@ -67,6 +72,9 @@ pub(super) struct SessionRecord {
     /// The last provider environment this session resolved, reused while the
     /// sandbox configuration names it.
     provider_environment: Mutex<Option<ProviderEnvironmentSnapshot>>,
+    /// One distinct identity per credential-metadata failure episode. Retrying
+    /// the same outage must not invent a fresh configuration every second.
+    metadata_invalidation_revision: Mutex<Option<u64>>,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +109,7 @@ impl SessionRecord {
             }),
             wake: Notify::new(),
             provider_environment: Mutex::new(registration.provider_environment),
+            metadata_invalidation_revision: Mutex::new(None),
         }
     }
 
@@ -116,6 +125,32 @@ impl SessionRecord {
             .provider_environment
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(snapshot);
+        *self
+            .metadata_invalidation_revision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// Forget resolved values before delivering a metadata invalidation. Even
+    /// recovery to the very same versions must resolve against the selected
+    /// source again, never reinstall a pre-outage cached environment.
+    pub(super) fn invalidate_provider_environment(&self, original_revision: u64) -> u64 {
+        *self
+            .provider_environment
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        let mut revision = self
+            .metadata_invalidation_revision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *revision.get_or_insert_with(|| {
+            loop {
+                let candidate = NEXT_METADATA_INVALIDATION_REVISION.fetch_sub(1, Ordering::Relaxed);
+                if candidate != 0 && candidate != original_revision {
+                    break candidate;
+                }
+            }
+        })
     }
 
     /// Delivery is best effort beside the session lifecycle, so a poisoned
@@ -338,6 +373,26 @@ mod tests {
             captured_seq: 0,
             rebuild: false,
         }))
+    }
+
+    #[test]
+    fn metadata_invalidation_forgets_values_and_fences_each_failure_episode() {
+        let record = record("sandbox", "default", &["provider"]);
+        let healthy = ProviderEnvironmentSnapshot {
+            provider_env_revision: 42,
+            ..Default::default()
+        };
+        record.cache_provider_environment(healthy.clone());
+        let first = record.invalidate_provider_environment(42);
+        assert_ne!(first, 42);
+        assert!(record.provider_environment().is_none());
+        assert_eq!(record.invalidate_provider_environment(42), first);
+        record.cache_provider_environment(healthy.clone());
+        assert_eq!(record.provider_environment(), Some(healthy));
+        let next_episode = record.invalidate_provider_environment(42);
+        assert_ne!(next_episode, first);
+        assert_ne!(next_episode, 42);
+        assert!(record.provider_environment().is_none());
     }
 
     fn builds(permits: usize) -> Arc<Semaphore> {

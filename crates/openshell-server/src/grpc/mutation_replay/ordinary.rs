@@ -180,6 +180,11 @@ pub(in crate::grpc) enum Outcome {
     },
     Provider {
         reference: Reference,
+        // Snapshot only public expiration metadata, not handles or values. The
+        // admission's existing size limit bounds this explicit scalar recipe.
+        // None preserves old receipts; Some(empty) clears stale stored expiry.
+        #[serde(default)]
+        expiration_times: Option<HashMap<String, (i64, i32)>>,
         mutation_id: String,
         target_receipts: Vec<ProviderReceiptReference>,
     },
@@ -623,8 +628,16 @@ macro_rules! provider_mutation {
             Admin,
             |response: &Response<ProviderResponse>| {
                 let response = response.get_ref();
+                let provider = response.provider.as_ref().ok_or_else(uncertain)?;
                 Ok(Outcome::Provider {
-                    reference: Reference::new(response.provider.as_ref().ok_or_else(uncertain)?),
+                    reference: Reference::new(provider),
+                    expiration_times: Some(
+                        provider
+                            .credential_expiration_times
+                            .iter()
+                            .map(|(key, time)| (key.clone(), (time.seconds, time.nanos)))
+                            .collect(),
+                    ),
                     mutation_id: response.mutation_id.clone(),
                     target_receipts: response
                         .target_receipts
@@ -636,6 +649,7 @@ macro_rules! provider_mutation {
             async |store: &Store, outcome: Outcome| {
                 let Outcome::Provider {
                     reference,
+                    expiration_times,
                     mutation_id,
                     target_receipts,
                 } = outcome
@@ -646,10 +660,19 @@ macro_rules! provider_mutation {
                 for receipt in target_receipts {
                     receipts.push(receipt.restore(store).await?);
                 }
+                let mut provider: Provider = reference.restore(store).await?;
+                if let Some(expiration_times) = expiration_times {
+                    // Reference metadata can change without a provider CAS.
+                    // Replay the admitted result, never a fresh projection.
+                    provider.credential_expiration_times = expiration_times
+                        .into_iter()
+                        .map(|(key, (seconds, nanos))| {
+                            (key, prost_types::Timestamp { seconds, nanos })
+                        })
+                        .collect();
+                }
                 Ok(ProviderResponse {
-                    provider: Some(provider::redact_provider_credentials(
-                        reference.restore(store).await?,
-                    )),
+                    provider: Some(provider::redact_provider_credentials(provider)),
                     mutation_id,
                     target_receipts: receipts,
                 })

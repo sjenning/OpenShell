@@ -296,6 +296,70 @@ async fn lost_grant_reservation_response_recovers_identity_and_fences_late_mater
     assert_eq!(minter.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
+async fn journaled_grant_cleanup_at_capacity_needs_no_observed_reservation_receipt() {
+    let store = test_store().await;
+    let (issuer, source, minter) = issuer().await;
+    let mut handoff = begin(&store, &source).await;
+    handoff.reserve(&store, &source).await.unwrap();
+    let id = handoff.grant_id().unwrap().to_owned();
+    let mut recovered = StaticHandoff::load(&store, handoff.id())
+        .await
+        .unwrap()
+        .unwrap();
+    // A fresh authenticated client knows only the persisted bindings, not the
+    // successful reservation intent observed by the original watched client.
+    // Reconnect rather than clone RemoteIssuer: a clone shares the original
+    // client's two watch permits, already held by its live watched wrapper.
+    let source = issuer.startup.connect(&store).await.unwrap();
+    let watched = &source.client;
+    watched.track_grant(id.clone()).unwrap();
+    for (key, slot) in &recovered.state.slots {
+        watched
+            .track_secret(recovered.owner(key), slot.reference.clone().unwrap())
+            .unwrap();
+    }
+    for number in 0..4094 {
+        watched
+            .track_secret(
+                recovered.owner("TOKEN"),
+                format!("active-reference-{number}"),
+            )
+            .unwrap();
+    }
+    for number in 0..1023 {
+        watched
+            .track_grant(format!("active-grant-{number}"))
+            .unwrap();
+    }
+    assert_eq!(
+        watched
+            .track_secret(recovered.owner("TOKEN"), "over-limit".into())
+            .unwrap_err()
+            .code(),
+        tonic::Code::ResourceExhausted
+    );
+    assert_eq!(
+        watched.track_grant("over-limit".into()).unwrap_err().code(),
+        tonic::Code::ResourceExhausted
+    );
+    recovered.abort(&store, &source).await.unwrap();
+    assert!(
+        StaticHandoff::load(&store, handoff.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let status = issuer
+        .raw
+        .get_grant(refresh::GetGrantRequest { grant: id })
+        .await
+        .unwrap()
+        .status
+        .unwrap();
+    assert!(matches!(status.state.as_str(), "deleting" | "deleted"));
+    assert_eq!(minter.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
 async fn failed_mint_can_only_be_abandoned_not_refilled_with_different_material() {
     let store = test_store().await;
     let (issuer, source, minter) = issuer().await;

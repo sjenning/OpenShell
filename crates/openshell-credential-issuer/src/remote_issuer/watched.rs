@@ -61,6 +61,8 @@ struct Secret {
     gone: bool,
     terminal: bool,
     binding: Arc<()>,
+    reservation: Option<[u8; 32]>,
+    admissions: usize,
 }
 struct Grant {
     metadata: Option<refresh::GrantStatus>,
@@ -68,6 +70,8 @@ struct Grant {
     gone: bool,
     terminal: bool,
     binding: Arc<()>,
+    reservation: Option<tracking::GrantReservation>,
+    admissions: usize,
 }
 struct CachedCredential {
     value: store::ResolvedSecret,
@@ -344,13 +348,13 @@ impl WatchedIssuer {
                 .clone()
                 .ok_or_else(|| Status::invalid_argument("issuer owner is required"))?,
         )?;
-        let admission = self.inner.admit(1, 0)?;
+        let intent = mutations::secret_intent(&request, &owner)?;
+        let admission = self.inner.admit_secret_reservation(intent)?;
         let result = self.inner.client.reserve_secret(request).await;
         self.inner.after_mutation(self.inner.invalidate_values());
         if let Ok(response) = &result {
-            self.inner.after_mutation(
-                admission.commit(vec![(response.reference.clone(), owner)], vec![]),
-            );
+            self.inner
+                .after_mutation(admission.commit_secret_reservation(intent, response, owner));
         }
         result
     }
@@ -419,14 +423,17 @@ impl WatchedIssuer {
         request: refresh::ReserveGrantRequest,
     ) -> Result<refresh::ReserveGrantResponse, Status> {
         let owners = mutations::output_owners(request.owner.clone(), &request.outputs)?;
-        let admission = self.inner.admit(owners.len(), 1)?;
+        let intent = mutations::grant_intent(&request)?;
+        let admission = self.inner.admit_grant_reservation(intent, &owners)?;
         let result = self.inner.client.reserve_grant(request).await;
         self.inner.after_mutation(self.inner.invalidate_values());
         if let Ok(response) = &result {
-            self.inner.after_mutation(admission.commit(
-                mutations::bindings(&owners, &response.output_references),
-                vec![response.grant.clone()],
-            ));
+            self.inner
+                .after_mutation(admission.commit_grant_reservation(
+                    intent,
+                    mutations::bindings(&owners, &response.output_references),
+                    response,
+                ));
         }
         result
     }

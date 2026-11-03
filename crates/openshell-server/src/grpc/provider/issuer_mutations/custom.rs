@@ -134,12 +134,13 @@ pub(in crate::grpc::provider) async fn configure_custom(
             "custom refresh cannot override a profile refresh declaration",
         ));
     }
-    super::super::validate_provider_credential_key_available_for_attached_sandboxes_with_catalog(
+    super::super::validate_provider_credential_key_available_for_attached_sandboxes_with_source(
         &state.store,
         &catalog,
         workspace,
         &provider,
         key,
+        Some(source),
     )
     .await?;
     super::configuration::publish_grant(

@@ -3,6 +3,7 @@
 
 //! Build and deliver complete supervisor configuration.
 
+pub mod credential_metadata;
 pub mod session;
 mod task;
 
@@ -369,6 +370,34 @@ impl Deliver for Builder<'_> {
             }
             Ok(Err(error)) => {
                 record_build_failure(sandbox_id, "failed", error.code(), started.elapsed());
+                if credential_metadata::is_unavailable(&error)
+                    && let Some(mut sandbox_config) = state
+                        .supervisor_sessions
+                        .credential_invalidation_snapshot(sandbox_id, &record.session_id)
+                {
+                    // Unlike a store read failure, missing/unknown credential
+                    // metadata invalidates values already installed by this
+                    // session. A distinct identity avoids duplicate suppression
+                    // both here and in the supervisor's environment readiness.
+                    // Only the old policy/settings are retained: no old secret
+                    // payload is used, even when recovery has equal versions.
+                    sandbox_config.provider_env_revision = record
+                        .invalidate_provider_environment(sandbox_config.provider_env_revision);
+                    let provider_environment = unresolved_provider_environment(&sandbox_config);
+                    let owner = deliver_if_owner(
+                        state,
+                        sandbox_id,
+                        &record.session_id,
+                        SupervisorConfig {
+                            sandbox_config,
+                            provider_environment,
+                        },
+                    )
+                    .await;
+                    if matches!(owner, OwnerCheck::Remote) {
+                        notify_peer(state, PeerNotifyTarget::Sandbox(record.sandbox_id.clone()));
+                    }
+                }
                 return (true, None);
             }
             Err(_) => {
@@ -919,6 +948,8 @@ fn record_peer_notify(outcome: &'static str) {
 
 #[cfg(test)]
 mod tests {
+    mod remote_revocation;
+
     use super::*;
     use crate::grpc::test_support::{
         StreamFeatures, SupervisorStreamHarness, connect_supervisor_stream,

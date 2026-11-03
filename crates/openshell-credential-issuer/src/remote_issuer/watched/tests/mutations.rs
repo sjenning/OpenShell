@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 use refresh::credential_refresh_server::{CredentialRefresh, CredentialRefreshServer};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use store::credential_store_server::{CredentialStore, CredentialStoreServer};
 use tokio::sync::Notify;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response};
+mod replay;
 
 struct Calls {
     allocations: AtomicUsize,
+    deny_reservation: AtomicBool,
     started: Notify,
     release: Semaphore,
 }
@@ -35,6 +37,11 @@ impl CredentialStore for Service {
         _: Request<store::ReserveSecretRequest>,
     ) -> Result<Response<store::ReserveSecretResponse>, Status> {
         self.0.allocate().await;
+        if self.0.deny_reservation.load(Ordering::SeqCst) {
+            return Err(Status::permission_denied(
+                "reservation no longer authorized",
+            ));
+        }
         Ok(Response::new(store::ReserveSecretResponse {
             reference: "allocated".into(),
             version: 1,
@@ -101,6 +108,11 @@ impl CredentialRefresh for Service {
         _: Request<refresh::ReserveGrantRequest>,
     ) -> Result<Response<refresh::ReserveGrantResponse>, Status> {
         self.0.allocate().await;
+        if self.0.deny_reservation.load(Ordering::SeqCst) {
+            return Err(Status::permission_denied(
+                "reservation no longer authorized",
+            ));
+        }
         Ok(Response::new(refresh::ReserveGrantResponse {
             grant: "allocated-grant".into(),
             output_references: [
@@ -186,6 +198,7 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(Calls {
             allocations: AtomicUsize::new(0),
+            deny_reservation: AtomicBool::new(false),
             started: Notify::new(),
             release: Semaphore::new(0),
         });

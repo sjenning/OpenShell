@@ -2,10 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Atomic admission and reclaimable terminal bindings. Active bindings are never evicted.
 use super::{
-    GRANTS, Grant, Inner, REFERENCES, Secret, State, WatchHealth, same_owner, store, validation,
+    GRANTS, Grant, Inner, REFERENCES, Secret, State, WatchHealth, refresh, same_owner, store,
+    validation,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tonic::Status;
+
+/// One successful value-free intent per tracked binding, never a lifetime
+/// idempotency cache. Reclamation drops its receipt and incarnation tokens.
+pub(super) struct GrantReservation {
+    intent: [u8; 32],
+    outputs: BTreeMap<String, (String, Arc<()>)>,
+}
+enum Reservation {
+    Secret([u8; 32]),
+    Grant([u8; 32], HashMap<String, String>),
+}
 
 pub(super) fn owner(mut owner: store::SecretOwner) -> Result<store::SecretOwner, Status> {
     if !validation::id(&owner.workspace)
@@ -45,10 +60,12 @@ impl State {
         // starts unknown and must authenticate/reconcile again. In-flight
         // observations hold identity tokens, not authorization to restore it.
         if self.secrets.len() + self.reserved_secrets + secrets > REFERENCES {
-            self.secrets.retain(|_, entry| !entry.gone);
+            self.secrets
+                .retain(|_, entry| !entry.gone || entry.admissions > 0);
         }
         if self.grants.len() + self.reserved_grants + grants > GRANTS {
-            self.grants.retain(|_, entry| !entry.gone);
+            self.grants
+                .retain(|_, entry| !entry.gone || entry.admissions > 0);
         }
         self.check_capacity(secrets, grants)
     }
@@ -103,11 +120,11 @@ impl State {
         // revocation fence and undercount the capacity needed to reinsert it.
         if self.secrets.len() + self.reserved_secrets + new_secrets > REFERENCES {
             self.secrets
-                .retain(|id, entry| !entry.gone || owners.contains_key(id));
+                .retain(|id, entry| !entry.gone || entry.admissions > 0 || owners.contains_key(id));
         }
         if self.grants.len() + self.reserved_grants + new_grants > GRANTS {
             self.grants
-                .retain(|id, entry| !entry.gone || grants.contains(id));
+                .retain(|id, entry| !entry.gone || entry.admissions > 0 || grants.contains(id));
         }
         self.check_capacity(new_secrets, new_grants)?;
         if new_secrets > 0 {
@@ -124,6 +141,8 @@ impl State {
                 gone: false,
                 terminal: false,
                 binding: Arc::new(()),
+                reservation: None,
+                admissions: 0,
             });
         }
         for grant in grants {
@@ -133,6 +152,8 @@ impl State {
                 gone: false,
                 terminal: false,
                 binding: Arc::new(()),
+                reservation: None,
+                admissions: 0,
             });
         }
         Ok(())
@@ -196,31 +217,147 @@ impl State {
 /// Capacity is reserved before remote allocation, including every grant output.
 /// Drop releases unused reservations on errors or cancellation; commit publishes
 /// the entire validated bundle under the same lock used by ordinary registration.
+/// Observed reservation replays pin existing incarnations instead of reserving
+/// new slots. Retirement may proceed, but reclamation cannot steal those slots
+/// before the authenticated replay completes (or its caller cancels).
 pub(super) struct Admission {
     inner: Arc<Inner>,
     secrets: usize,
     grants: usize,
+    secret_pins: BTreeMap<String, Arc<()>>,
+    grant_pins: BTreeMap<String, Arc<()>>,
 }
 impl Drop for Admission {
     fn drop(&mut self) {
         if let Ok(mut state) = self.inner.lock() {
-            state.reserved_secrets -= self.secrets;
-            state.reserved_grants -= self.grants;
+            self.release(&mut state);
         }
     }
 }
 impl Admission {
+    fn release(&self, state: &mut State) {
+        state.reserved_secrets -= self.secrets;
+        state.reserved_grants -= self.grants;
+        for (id, binding) in &self.secret_pins {
+            if let Some(entry) = state.secrets.get_mut(id)
+                && Arc::ptr_eq(binding, &entry.binding)
+            {
+                entry.admissions -= 1;
+            }
+        }
+        for (id, binding) in &self.grant_pins {
+            if let Some(entry) = state.grants.get_mut(id)
+                && Arc::ptr_eq(binding, &entry.binding)
+            {
+                entry.admissions -= 1;
+            }
+        }
+    }
     pub fn commit(
-        mut self,
+        self,
         secrets: Vec<(String, store::SecretOwner)>,
         grants: Vec<String>,
     ) -> Result<(), Status> {
-        let mut state = self.inner.lock()?;
-        state.reserved_secrets -= self.secrets;
-        state.reserved_grants -= self.grants;
+        self.publish(secrets, grants, None)
+    }
+    pub fn commit_secret_reservation(
+        self,
+        intent: [u8; 32],
+        response: &store::ReserveSecretResponse,
+        owner: store::SecretOwner,
+    ) -> Result<(), Status> {
+        self.publish(
+            vec![(response.reference.clone(), owner)],
+            vec![],
+            Some(Reservation::Secret(intent)),
+        )
+    }
+    pub fn commit_grant_reservation(
+        self,
+        intent: [u8; 32],
+        secrets: Vec<(String, store::SecretOwner)>,
+        response: &refresh::ReserveGrantResponse,
+    ) -> Result<(), Status> {
+        self.publish(
+            secrets,
+            vec![response.grant.clone()],
+            Some(Reservation::Grant(
+                intent,
+                response.output_references.clone(),
+            )),
+        )
+    }
+    fn publish(
+        mut self,
+        secrets: Vec<(String, store::SecretOwner)>,
+        grants: Vec<String>,
+        reservation: Option<Reservation>,
+    ) -> Result<(), Status> {
+        let inner = self.inner.clone();
+        let mut state = inner.lock()?;
+        let changed_outputs = match &reservation {
+            Some(Reservation::Grant(_, outputs)) if !self.grant_pins.is_empty() => {
+                self.grant_pins.keys().any(|id| {
+                    state.grants[id].reservation.as_ref().is_none_or(|known| {
+                        known.outputs.len() != outputs.len()
+                            || known
+                                .outputs
+                                .iter()
+                                .any(|(name, (reference, _))| outputs.get(name) != Some(reference))
+                    })
+                })
+            }
+            _ => false,
+        };
+        // An admitted replay may only reuse its authenticated allocation, not
+        // register a different bundle using zero newly reserved capacity.
+        let replay = !self.secret_pins.is_empty() || !self.grant_pins.is_empty();
+        if changed_outputs
+            || (replay
+                && (secrets.len() != self.secret_pins.len()
+                    || grants.len() != self.grant_pins.len()
+                    || secrets
+                        .iter()
+                        .any(|(id, _)| !self.secret_pins.contains_key(id))
+                    || grants.iter().any(|id| !self.grant_pins.contains_key(id))))
+        {
+            return Err(Status::failed_precondition(
+                "issuer reservation binding changed",
+            ));
+        }
+        self.release(&mut state);
         self.secrets = 0;
         self.grants = 0;
-        state.insert(secrets, grants)
+        self.secret_pins.clear();
+        self.grant_pins.clear();
+        let secret_id = secrets.first().map(|(id, _)| id.clone());
+        let grant_id = grants.first().cloned();
+        state.insert(secrets, grants)?;
+        match reservation {
+            Some(Reservation::Secret(intent)) => {
+                state
+                    .secrets
+                    .get_mut(&secret_id.expect("reserved secret"))
+                    .expect("inserted secret")
+                    .reservation = Some(intent);
+            }
+            Some(Reservation::Grant(intent, outputs)) => {
+                let outputs = outputs
+                    .into_iter()
+                    .map(|(name, id)| {
+                        let binding = state.secrets[&id].binding.clone();
+                        (name, (id, binding))
+                    })
+                    .collect();
+                state
+                    .grants
+                    .get_mut(&grant_id.expect("reserved grant"))
+                    .expect("inserted grant")
+                    .reservation = Some(GrantReservation { intent, outputs });
+            }
+            None => {}
+        }
+        Ok(())
     }
 }
 impl Inner {
@@ -233,7 +370,89 @@ impl Inner {
             inner: self.clone(),
             secrets,
             grants,
+            secret_pins: BTreeMap::new(),
+            grant_pins: BTreeMap::new(),
         })
+    }
+    /// Only a successfully observed intent can reuse tracked capacity. Ordinary
+    /// persisted registrations and unknown/lost responses still need admission.
+    /// This is not a response cache: the issuer reauthorizes every replay RPC.
+    pub fn admit_secret_reservation(
+        self: &Arc<Self>,
+        intent: [u8; 32],
+    ) -> Result<Admission, Status> {
+        let mut state = self.lock()?;
+        if let Some((id, entry)) = state
+            .secrets
+            .iter_mut()
+            .find(|(_, entry)| entry.reservation == Some(intent))
+        {
+            entry.admissions += 1;
+            return Ok(Admission {
+                inner: self.clone(),
+                secrets: 0,
+                grants: 0,
+                secret_pins: BTreeMap::from([(id.clone(), entry.binding.clone())]),
+                grant_pins: BTreeMap::new(),
+            });
+        }
+        drop(state);
+        self.admit(1, 0)
+    }
+    pub fn admit_grant_reservation(
+        self: &Arc<Self>,
+        intent: [u8; 32],
+        owners: &HashMap<String, store::SecretOwner>,
+    ) -> Result<Admission, Status> {
+        let mut state = self.lock()?;
+        let replay = state.grants.iter().find_map(|(id, entry)| {
+            let reservation = entry.reservation.as_ref()?;
+            if reservation.intent != intent
+                || reservation.outputs.len() != owners.len()
+                || !reservation.outputs.iter().all(|(name, (id, binding))| {
+                    state.secrets.get(id).is_some_and(|secret| {
+                        Arc::ptr_eq(binding, &secret.binding)
+                            && owners
+                                .get(name)
+                                .is_some_and(|owner| same_owner(owner, &secret.owner))
+                    })
+                })
+            {
+                return None;
+            }
+            Some((
+                id.clone(),
+                entry.binding.clone(),
+                reservation
+                    .outputs
+                    .values()
+                    .cloned()
+                    .collect::<BTreeMap<_, _>>(),
+            ))
+        });
+        if let Some((id, binding, secret_pins)) = replay {
+            for id in secret_pins.keys() {
+                state
+                    .secrets
+                    .get_mut(id)
+                    .expect("observed secret")
+                    .admissions += 1;
+            }
+            state
+                .grants
+                .get_mut(&id)
+                .expect("observed grant")
+                .admissions += 1;
+            return Ok(Admission {
+                inner: self.clone(),
+                secrets: 0,
+                grants: 0,
+                secret_pins,
+                grant_pins: BTreeMap::from([(id, binding)]),
+            });
+        }
+        drop(state);
+        self.admit(owners.len(), 1)
     }
     pub fn track_secret(
         &self,

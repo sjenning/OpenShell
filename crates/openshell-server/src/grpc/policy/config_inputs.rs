@@ -57,6 +57,12 @@ pub async fn load_sandbox_config_inputs(
         .as_ref()
         .map(|spec| spec.providers.as_slice())
         .unwrap_or_default();
+    let selected_source = crate::config_delivery::credential_metadata::Source::selected(state);
+    let credential_source: &dyn crate::credential_source::ProviderCredentialSource =
+        match selected_source.as_ref() {
+            Some(source) => source,
+            None => state.provider_credential_source(),
+        };
     let (catalog, provider_records, global_settings, latest_policy) = tokio::try_join!(
         state
             .provider_profile_sources
@@ -65,7 +71,7 @@ pub async fn load_sandbox_config_inputs(
             store,
             workspace,
             provider_names,
-            Some(state.provider_credential_source())
+            Some(credential_source)
         ),
         load_global_settings(store),
         async {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+mod expiration_projection;
 mod issuer_configuration;
 mod issuer_custom;
 mod issuer_refresh;

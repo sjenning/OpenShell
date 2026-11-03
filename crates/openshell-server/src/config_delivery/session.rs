@@ -85,6 +85,10 @@ pub struct ConfigSessionState {
     pending: Option<SupervisorConfig>,
     /// The configuration the supervisor last applied.
     acknowledged: Option<ConfigFingerprint>,
+    /// Last valid configuration sent with resolved credentials (including an
+    /// in-flight bootstrap). Metadata invalidation reuses only this policy and
+    /// settings, never its secret values, and follows the in-flight update.
+    last_resolved_sandbox: Option<SandboxConfigSnapshot>,
     /// The admission this session last persisted. The admission is written
     /// again only when it changes, so a redelivered configuration writes
     /// nothing.
@@ -139,6 +143,8 @@ struct InFlightConfigUpdate {
     update_id: String,
     fingerprint: ConfigFingerprint,
     admission: SandboxConfigurationAdmission,
+    resolved_sandbox: Option<SandboxConfigSnapshot>,
+    environment_unresolved: bool,
     /// The session's bootstrap, whose result completes session setup.
     bootstrap: bool,
     sent_at: Instant,
@@ -171,6 +177,7 @@ impl ConfigSessionState {
             in_flight: None,
             pending: None,
             acknowledged: None,
+            last_resolved_sandbox: None,
             persisted_admission: None,
             unrecorded_policy_loads: UnrecordedPolicyLoads::default(),
         }
@@ -200,6 +207,15 @@ impl ConfigSessionState {
         if message.encoded_len() > MAX_SUPERVISOR_CONFIG_MESSAGE_BYTES {
             return Err(DeliveryDisposition::PayloadTooLarge);
         }
+        if in_flight.environment_unresolved {
+            // The supervisor revokes static credentials, so the old healthy
+            // acknowledgement no longer describes installed state. Recovery
+            // to equal versions must be delivered rather than suppressed.
+            self.acknowledged = None;
+        }
+        if let Some(snapshot) = &in_flight.resolved_sandbox {
+            self.last_resolved_sandbox = Some(snapshot.clone());
+        }
         self.in_flight = Some(in_flight);
         Ok(Outgoing {
             tx: self.tx.clone(),
@@ -222,6 +238,11 @@ impl ConfigSessionState {
             .ok()
             .filter(|outcome| *outcome != ConfigApplyOutcome::Unspecified)
             .unwrap_or(ConfigApplyOutcome::Unsupported);
+        if in_flight.environment_unresolved && outcome_acknowledges_revision(outcome) {
+            return Err(Status::invalid_argument(
+                "unresolved provider environment cannot be acknowledged as applied",
+            ));
+        }
         Ok(CompletedConfigUpdate {
             update_id: in_flight.update_id.clone(),
             fingerprint: in_flight.fingerprint.clone(),
@@ -326,10 +347,28 @@ impl SupervisorSessionRegistry {
     ) {
         self.with_config_session(sandbox_id, session_id, |session| {
             if let Some(session) = session {
+                session
+                    .last_resolved_sandbox
+                    .clone_from(&bootstrap.0.resolved_sandbox);
                 session.in_flight = Some(bootstrap.0);
                 session.persisted_admission = persisted_admission;
             }
         });
+    }
+
+    /// A metadata failure cannot reconstruct configuration from incomplete
+    /// inputs. Reuse the valid policy/settings already sent on this exact
+    /// session solely to request static-credential revocation. The replacement
+    /// environment's fresh identity forces preparation even after an ack.
+    pub(super) fn credential_invalidation_snapshot(
+        &self,
+        sandbox_id: &str,
+        session_id: &str,
+    ) -> Option<SandboxConfigSnapshot> {
+        self.with_config_session(sandbox_id, session_id, |session| {
+            session.and_then(|session| session.last_resolved_sandbox.clone())
+        })
+        .flatten()
     }
 
     fn complete_config_update(
@@ -490,10 +529,22 @@ fn build_config_update(
         .sandbox_config
         .as_ref()
         .expect("sandbox configuration");
+    let environment_unresolved = update
+        .provider_environment
+        .as_ref()
+        .is_some_and(|provider| {
+            provider.readiness_reason
+                == i32::from(
+                    openshell_core::proto::ProviderReadinessReason::CredentialInstallFailed,
+                )
+        });
     let in_flight = InFlightConfigUpdate {
         update_id,
         fingerprint: ConfigFingerprint::of(snapshot),
         admission: expected_configuration_admission(snapshot),
+        resolved_sandbox: (snapshot.configuration_admitted && !environment_unresolved)
+            .then(|| snapshot.clone()),
+        environment_unresolved,
         bootstrap,
         sent_at: Instant::now(),
     };
@@ -1148,6 +1199,67 @@ mod tests {
             outcome: outcome.into(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn unresolved_invalidation_cannot_acknowledge_health_or_suppress_equal_version_recovery()
+    {
+        let registry = SupervisorSessionRegistry::new();
+        let (_tx, mut outbound) =
+            register_apply_session_with_outbound(&registry, "sb-1", "session-1");
+        let mut healthy = config(1);
+        healthy.sandbox_config.configuration_admitted = true;
+        healthy.sandbox_config.policy = Some(SandboxPolicy::default());
+        healthy.sandbox_config.provider_env_revision = 42;
+        healthy.provider_environment.provider_env_revision = 42;
+        registry.deliver_config("sb-1", "session-1", healthy.clone());
+        let first = sent_update(outbound.recv().await.unwrap());
+        let completed = registry
+            .complete_config_update(
+                "sb-1",
+                "session-1",
+                &update_result(&first, ConfigApplyOutcome::Applied),
+            )
+            .unwrap();
+        registry.finalize_config_update("sb-1", "session-1", &completed, true);
+        assert_eq!(
+            registry.credential_invalidation_snapshot("sb-1", "session-1"),
+            Some(healthy.sandbox_config.clone())
+        );
+        let mut invalidation = healthy.clone();
+        invalidation.sandbox_config.provider_env_revision = 43;
+        invalidation.provider_environment =
+            super::super::unresolved_provider_environment(&invalidation.sandbox_config);
+        assert_eq!(
+            registry.deliver_config("sb-1", "session-1", invalidation),
+            DeliveryDisposition::Queued
+        );
+        let invalidation = sent_update(outbound.recv().await.unwrap());
+        let error = registry
+            .complete_config_update(
+                "sb-1",
+                "session-1",
+                &update_result(&invalidation, ConfigApplyOutcome::Applied),
+            )
+            .err()
+            .expect("an unresolved environment cannot be acknowledged as applied");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        let completed = registry
+            .complete_config_update(
+                "sb-1",
+                "session-1",
+                &update_result(
+                    &invalidation,
+                    ConfigApplyOutcome::FailedRetainedLastKnownGood,
+                ),
+            )
+            .unwrap();
+        registry.finalize_config_update("sb-1", "session-1", &completed, true);
+        assert_eq!(
+            registry.deliver_config("sb-1", "session-1", healthy),
+            DeliveryDisposition::Queued,
+            "the pre-revocation acknowledgement must not suppress recovery to equal versions"
+        );
     }
 
     #[test]

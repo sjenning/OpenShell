@@ -174,6 +174,47 @@ expect_status 10 "consolidated findings remain blocking" \
   "${SCANNER}" gate
 test -s "${TMP_DIR}/summary"
 
+# The issuer chart renders with its own fixture, outside config-defaults. Its
+# findings must reach the ordinary gate, summary and consolidated SARIF even
+# when every other configuration report is clean.
+make_case issuer-only
+write_report "${HEAD}/config-static.json" 0
+write_report "${HEAD}/config-defaults.json" 0
+write_report "${TMP_DIR}/issuer-source.json" 1
+jq '
+  .TrivyProfile = "config-credential-issuer"
+  | .Results[0].Target = "deploy/helm/openshell-credential-issuer/templates/deployment.yaml"
+  | .Results[0].Misconfigurations[0].CauseMetadata.Resource = "Deployment.credential-issuer"
+' "${TMP_DIR}/issuer-source.json" >"${HEAD}/config-credential-issuer.json"
+expect_status 10 "issuer-only findings remain blocking" \
+  env TRIVY_REPORT_DIR="${HEAD}" GITHUB_STEP_SUMMARY="${TMP_DIR}/issuer-summary" \
+  "${SCANNER}" gate
+grep -q 'config-credential-issuer' "${TMP_DIR}/issuer-summary"
+expect_status 0 "issuer-only findings are uploaded in the consolidated analysis" \
+  env TRIVY_REPORT_DIR="${HEAD}" "${SCANNER}" prepare-sarif
+jq -e '
+  [.Results[].Misconfigurations[]] as $findings
+  | ($findings | length) == 1
+    and $findings[0].CauseMetadata.Resource == "Deployment.credential-issuer"
+    and ($findings[0].Message | contains("config-credential-issuer"))
+' "${HEAD}/consolidated/config.json" >/dev/null
+jq -e '
+  (.runs[0].results | length) == 1
+  and .runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri
+    == "deploy/helm/openshell-credential-issuer/templates/deployment.yaml"
+' "${HEAD}/code-scanning/uploads/0/config.sarif" >/dev/null
+jq -e '.Results[0].Misconfigurations | length == 1' \
+  "${HEAD}/config-credential-issuer.json" >/dev/null
+
+make_case malformed-issuer
+write_report "${HEAD}/config-static.json" 0
+write_report "${HEAD}/config-defaults.json" 0
+printf '{}\n' >"${HEAD}/config-credential-issuer.json"
+expect_status 5 "invalid issuer reports cannot pass the ordinary gate" \
+  env TRIVY_REPORT_DIR="${HEAD}" "${SCANNER}" gate
+expect_status 5 "invalid issuer reports cannot clear Code Scanning" \
+  env TRIVY_REPORT_DIR="${HEAD}" "${SCANNER}" prepare-sarif
+
 # Empty configuration is a valid clearing analysis, not a skipped upload.
 make_case empty-sarif
 write_report "${HEAD}/config-static.json" 0

@@ -187,7 +187,9 @@ CredentialStore and CredentialRefresh handlers in process, without a listener.
 Embedded startup adopts supported existing provider, SSH identity, launch-material,
 and refresh records rather than minting replacement values; it still uses the
 configured local backing store and encryption key. Do not delete legacy handles
-or migration journals to force adoption.
+or migration journals to force adoption. Adoption preserves legacy refresh lead
+times, positive lifetime limits, and classified retry deadlines; uncertain mint
+attempts remain parked rather than becoming retryable after upgrade.
 
 If `[openshell.gateway.credential_issuer]` is present, the gateway explicitly
 selects the remote issuer for provider credentials, sandbox SSH private keys,
@@ -210,8 +212,18 @@ falling back to a local store, or replacing identity material. Builtin refresh
 configuration publishes a new pending epoch without copying old values/expirations;
 delivery waits for the
 issuer's first mint. Rotate explicitly rather than changing source selection to
-force readiness. Registered single-output custom configuration is supported;
-custom profile refresh declarations and multi-output custom configuration are not.
+force readiness. Custom profile refresh declarations must match an exact strategy
+in the selected issuer catalog. For multi-output custom strategies, check the
+profile's semantic `additional_outputs` mappings: every sibling and the primary
+credential must have one environment key, and the primary output is the sole
+descriptor output not mapped to a sibling. Without a profile mapping, only a
+single-output custom strategy can be configured. Reject ambiguous mappings and
+check collisions across the complete output bundle rather than relying on
+descriptor order. If a minter was removed, an authorized administrator can repair
+its stored profile to a supported definition or delete it when unused; the old
+definition remains unavailable for runtime use. Outage-time catalog evidence is
+bounded and in memory, so changed or evicted snapshots and gateway restarts need
+issuer validation again.
 Refresh deletion requires issuer grant-detachment support and preserves published
 outputs as static credentials with their original expiry. Pending first values
 must be minted before deleting refresh. A durable transfer claim temporarily

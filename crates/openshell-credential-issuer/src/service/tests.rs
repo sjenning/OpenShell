@@ -18,9 +18,11 @@ use std::{
 use tonic::Code;
 use wire::credential_store_server::CredentialStore as _;
 
+mod cleanup;
 pub(super) mod mtls;
 mod postgres;
 mod reservations;
+mod resolution_ids;
 mod watch;
 
 const A: &str = "spiffe://test.example/gateway/a";

@@ -3,6 +3,7 @@
 use super::*;
 mod catalog_cache;
 mod deletion;
+mod profile_repair;
 mod profiles;
 mod profiles_public;
 use crate::credential_source::{

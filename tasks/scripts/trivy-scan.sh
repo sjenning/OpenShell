@@ -244,7 +244,7 @@ gate() {
 consolidate_config() {
   local report
   local reports=("${REPORT_DIR}/config-static.json" "${REPORT_DIR}/config-defaults.json")
-  for report in "${REPORT_DIR}"/config-fixture-*.json; do
+  for report in "${REPORT_DIR}/config-credential-issuer.json" "${REPORT_DIR}"/config-fixture-*.json; do
     [ -f "${report}" ] && reports+=("${report}")
   done
   mkdir -p "${REPORT_DIR}/consolidated"

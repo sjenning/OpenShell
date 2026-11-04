@@ -3413,7 +3413,7 @@ pub(super) async fn handle_update_provider_profiles(
         .map_err(|err| super::persistence_error_to_status(err, "acquire provider mutation lock"))?;
     let catalog = state
         .provider_profile_sources
-        .snapshot_catalog(state.store.as_ref(), &workspace)
+        .snapshot_catalog_for_profile_repair(state.store.as_ref(), &workspace)
         .await?;
     diagnostics.extend(
         profile_update_target_diagnostics(
@@ -3597,7 +3597,7 @@ pub(super) async fn handle_delete_provider_profile(
         .map_err(|err| super::persistence_error_to_status(err, "acquire provider mutation lock"))?;
     let catalog = state
         .provider_profile_sources
-        .snapshot_catalog(state.store.as_ref(), &workspace)
+        .snapshot_catalog_for_profile_repair(state.store.as_ref(), &workspace)
         .await?;
     if let Some(source_id) = catalog.static_source_for_profile(&id) {
         return Err(Status::failed_precondition(format!(

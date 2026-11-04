@@ -55,10 +55,36 @@ pub(super) struct GrantSlot {
     pub(super) pending_publication: bool,
     #[serde(default)]
     pub(super) detaching: bool,
+    /// Trusted upgrade-only schedule. The ordinary plan remains bounded for
+    /// authored reservations; this complete recipe is never sent to reserve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) legacy_schedule: Option<LegacyGrantSchedule>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyGrantSchedule {
+    pub refresh_before_ms: u64,
+    // Ceil the old WKT duration only at the minter's whole-second boundary.
+    // This must not narrow to the u32 representation of authored GrantPlan.
+    pub max_lifetime_seconds: u64,
+}
+impl LegacyGrantSchedule {
+    fn valid(&self) -> bool {
+        (1..=openshell_core::time::MAX_DURATION_SECONDS as u64 + 1)
+            .contains(&self.max_lifetime_seconds)
+            && self.refresh_before_ms
+                <= openshell_core::time::MAX_DURATION_SECONDS as u64 * 1000 + 1000
+    }
 }
 impl GrantSlot {
     pub(super) fn valid(&self, state: &State) -> bool {
         self.plan.valid()
+            && self.legacy_schedule.as_ref().is_none_or(|schedule| {
+                schedule.valid()
+                    && matches!(state.phase, Phase::Published | Phase::Aborting)
+                    && self.plan.refresh_before_ms == 0
+                    && self.plan.max_lifetime_seconds == 1
+            })
             && (!self.detaching
                 || state.phase == Phase::Published
                     && state.slots.values().all(|slot| !slot.retiring))
@@ -136,6 +162,7 @@ impl StaticHandoff {
                 id: None,
                 pending_publication: false,
                 detaching: false,
+                legacy_schedule: None,
             }),
         )
         .await

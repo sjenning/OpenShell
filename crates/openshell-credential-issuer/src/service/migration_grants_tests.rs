@@ -33,7 +33,7 @@ use std::sync::{
 use tonic::Code;
 
 #[derive(Debug, Default)]
-struct Minter(AtomicUsize);
+struct Minter(AtomicUsize, AtomicBool);
 #[tonic::async_trait]
 impl TokenMinter for Minter {
     fn describe(&self) -> StrategyDescriptor {
@@ -50,7 +50,15 @@ impl TokenMinter for Minter {
     }
     async fn mint(&self, _: MintRequest) -> Result<MintResponse, MintFailure> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        panic!("migration must never call a minter")
+        assert!(
+            self.1.load(Ordering::SeqCst),
+            "migration must never call a minter"
+        );
+        Ok(MintResponse {
+            outputs: std::collections::HashMap::from([("token".into(), "new-token".into())]),
+            expiration_time_ms: openshell_core::time::now_ms() + 60_000,
+            rotated_secret_material: std::collections::HashMap::new(),
+        })
     }
 }
 #[derive(Debug)]
@@ -401,6 +409,22 @@ async fn uncertain_inflight_legacy_mint_is_parked_and_its_attempt_marker_is_reta
     assert_eq!(state.next_refresh_at_ms, i64::MAX);
     assert_eq!(state.failure_code, "mint_outcome_unknown");
     assert_eq!(state.attempt.unwrap().id, "uncertain-attempt");
+    fixture.minter.1.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .client
+            .rotate_grant(
+                openshell_core::proto::credentials::refresh::v1::RotateGrantRequest {
+                    grant: fixture.input.identity.id.clone(),
+                    idempotency_key: "uncertain-rotation".into(),
+                },
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition,
+    );
+    fixture.refresh.runtime.tick().await.unwrap();
     assert_eq!(fixture.minter.0.load(Ordering::SeqCst), 0);
 }
 
@@ -1313,4 +1337,167 @@ async fn original_import_identity_lookup_covers_partial_claims_but_rejects_anoth
         .await
         .unwrap();
     assert!(fixture.claim().await.abandoned);
+}
+
+#[tokio::test]
+async fn legacy_long_schedules_survive_import_activation_and_repository_reload() {
+    for lifetime in [
+        86_400,
+        i64::from(u32::MAX) + 1,
+        openshell_core::time::MAX_DURATION_SECONDS + 1,
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.input.max_lifetime_seconds = lifetime;
+        fixture.input.refresh_before_ms = 46_800_000;
+        fixture
+            .refresh
+            .import_legacy_grant(fixture.input.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .refresh
+                .pending_legacy_grants(None, 128)
+                .await
+                .unwrap()
+                .grants
+                .len(),
+            1
+        );
+        fixture
+            .refresh
+            .activate_legacy_grant(fixture.input.identity.clone())
+            .await
+            .unwrap();
+        let state = fixture.state().await;
+        assert_eq!(state.definition.max_lifetime_seconds, lifetime);
+        assert_eq!(state.definition.refresh_before_ms, 46_800_000);
+        assert_eq!(fixture.minter.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn classified_investigation_import_retains_backoff_and_both_retry_paths() {
+    use openshell_core::proto::credentials::refresh::v1 as refresh;
+    for automatic in [true, false] {
+        let mut fixture = Fixture::new().await;
+        let now = openshell_core::time::now_ms();
+        fixture.input.status.phase = GrantPhase::Failed;
+        fixture.input.status.recovery_action = Some(RecoveryAction::Investigate);
+        fixture.input.status.failure_code = "refresh_failed".into();
+        fixture.input.status.next_refresh_at_ms = now + 60_000;
+        fixture.input.status.expiration_time_ms = Some(now - 1000);
+        fixture.input.status.attempt_id = Some("classified-failed-attempt".into());
+        fixture
+            .refresh
+            .import_legacy_grant(fixture.input.clone())
+            .await
+            .unwrap();
+        fixture
+            .refresh
+            .activate_legacy_grant(fixture.input.identity.clone())
+            .await
+            .unwrap();
+        let state = fixture.state().await;
+        assert_eq!(state.phase, GrantPhase::Failed);
+        assert_eq!(state.next_refresh_at_ms, now + 60_000);
+        assert_eq!(state.recovery_action, Some(RecoveryAction::Investigate));
+        assert!(
+            state.attempt.is_none(),
+            "a classified failure has no unresolved exchange"
+        );
+        fixture.minter.1.store(true, Ordering::SeqCst);
+        fixture.refresh.runtime.tick().await.unwrap();
+        assert_eq!(
+            fixture.minter.0.load(Ordering::SeqCst),
+            0,
+            "automatic work honors backoff"
+        );
+        if automatic {
+            let scope = fixture.host.embedded_scope().unwrap();
+            let loaded = fixture
+                .repository
+                .grants(&scope)
+                .load(&fixture.input.identity.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut due = loaded.state;
+            due.next_refresh_at_ms = now - 1;
+            due.version += 1;
+            fixture
+                .refresh
+                .runtime
+                .save(&scope, loaded.revision, &due, Vec::new())
+                .await
+                .unwrap();
+            fixture.refresh.runtime.tick().await.unwrap();
+        } else {
+            fixture
+                .client
+                .rotate_grant(refresh::RotateGrantRequest {
+                    grant: fixture.input.identity.id.clone(),
+                    idempotency_key: "classified-manual-retry".into(),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(fixture.minter.0.load(Ordering::SeqCst), 1);
+        let refreshed = fixture.state().await;
+        assert_eq!(refreshed.phase, GrantPhase::Refreshed);
+        assert!(refreshed.recovery_action.is_none());
+    }
+}
+
+#[tokio::test]
+async fn native_create_and_reserve_still_reject_legacy_only_long_lifetimes() {
+    use openshell_core::proto::credentials::refresh::v1 as refresh;
+    let fixture = Fixture::new().await;
+    let owner = Some(wire::SecretOwner {
+        workspace: "workspace".into(),
+        provider_id: "provider".into(),
+        credential_key: "TOKEN".into(),
+        ..Default::default()
+    });
+    let lifetime = Some(prost_types::Duration {
+        seconds: 86_400,
+        nanos: 0,
+    });
+    assert_eq!(
+        fixture
+            .client
+            .reserve_grant(refresh::ReserveGrantRequest {
+                owner: owner.clone(),
+                strategy: "custom:legacy".into(),
+                outputs: std::collections::HashMap::from([("token".into(), "TOKEN".into())]),
+                max_lifetime: lifetime,
+                idempotency_key: "new-reservation".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        fixture
+            .client
+            .create_grant(refresh::CreateGrantRequest {
+                owner,
+                strategy: "custom:legacy".into(),
+                outputs: std::collections::HashMap::from([("token".into(), "TOKEN".into())]),
+                secret_material: std::collections::HashMap::from([(
+                    "refresh_token".into(),
+                    "secret".into()
+                )]),
+                max_lifetime: lifetime,
+                idempotency_key: "new-create".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    assert_eq!(fixture.minter.0.load(Ordering::SeqCst), 0);
 }

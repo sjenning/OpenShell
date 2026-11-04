@@ -1046,7 +1046,12 @@ fn validate_input(legacy: &LegacyGrant) -> Result<(), Status> {
         || legacy.source_provider_version == 0
         || legacy.status.version == 0
         || legacy.refresh_before_ms < 0
-        || !(1..=43_200).contains(&legacy.max_lifetime_seconds)
+        // Only this trusted Rust-only upgrade seam admits the old positive
+        // protobuf duration contract. Create/reserve RPC admission stays capped
+        // at twelve hours; importing must not silently shorten an old grant.
+        || !(1..=openshell_core::time::MAX_DURATION_SECONDS + 1)
+            .contains(&legacy.max_lifetime_seconds)
+        || legacy.refresh_before_ms > openshell_core::time::MAX_DURATION_SECONDS * 1000 + 1000
         || legacy.outputs.is_empty()
         || legacy.outputs.len() > 64
         || legacy.outputs.keys().collect::<BTreeSet<_>>() != names

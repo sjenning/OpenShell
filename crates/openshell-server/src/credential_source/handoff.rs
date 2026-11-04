@@ -15,6 +15,7 @@ mod grants;
 mod migration;
 mod partial;
 pub use grants::GrantPlan;
+pub(crate) use grants::LegacyGrantSchedule;
 pub(crate) use grants::publication::PublishedGrant;
 mod recovery;
 mod retirement;

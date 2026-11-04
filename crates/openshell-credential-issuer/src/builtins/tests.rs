@@ -133,3 +133,29 @@ async fn incomplete_aws_credentials_never_fall_back_to_the_issuer_identity() {
         assert_eq!(error.recovery_action, RecoveryAction::FixConfiguration);
     }
 }
+
+#[tokio::test]
+async fn imported_long_oauth_lifetime_is_not_replaced_with_native_twelve_hour_cap() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "long-lived", "expires_in": 172_800
+        })))
+        .expect(2)
+        .mount(&mock)
+        .await;
+    for lifetime in [86_400_i64, i64::from(u32::MAX) + 1] {
+        let mut input = request(
+            "oauth2_client_credentials",
+            &format!("{}/token", mock.uri()),
+        );
+        input
+            .config
+            .insert("max_lifetime_seconds".into(), lifetime.to_string());
+        let before = now_ms();
+        let result = registry().mint(input).await.unwrap();
+        let expected_seconds = lifetime.min(172_800);
+        assert!(result.expiration_time_ms >= before + expected_seconds * 1000);
+        assert!(result.expiration_time_ms <= now_ms() + expected_seconds * 1000);
+    }
+}

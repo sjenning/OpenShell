@@ -250,7 +250,7 @@ pub(super) async fn providers(
             let mut granted = BTreeSet::new();
             let mut activations = Vec::new();
             for state in &states {
-                let Some((plan, id, epoch)) =
+                let Some((plan, id, epoch, schedule)) =
                     grants::prepare(gateway, legacy, host, refresh, &original, state, &mut refs)
                         .await?
                 else {
@@ -287,7 +287,7 @@ pub(super) async fn providers(
                     source,
                     &provider,
                     &keys,
-                    Some((plan, id)),
+                    Some((plan, id, schedule)),
                 )?);
             }
             let static_keys = provider

@@ -83,9 +83,9 @@ fn rounds_profile_durations_without_changing_semantic_output_bindings() {
         .describe()
         .find(|descriptor| descriptor.name == "oauth2_refresh_token")
         .unwrap();
-    let plan = plan(&state, descriptor, Strategy::Oauth2RefreshToken).unwrap();
-    assert_eq!(plan.refresh_before_ms, 1);
-    assert_eq!(plan.max_lifetime_seconds, 61);
+    let (plan, schedule) = plan(&state, descriptor, Strategy::Oauth2RefreshToken).unwrap();
+    assert_eq!(schedule.refresh_before_ms, 1);
+    assert_eq!(schedule.max_lifetime_seconds, 61);
     assert_eq!(
         plan.outputs,
         BTreeMap::from([("access_token".into(), "TOKEN".into())])
@@ -125,6 +125,12 @@ fn persisted_failure_statuses_with_retained_attempts_preserve_classification_and
             Action::Reauthorize,
             GrantPhase::Parked,
             i64::MAX,
+        ),
+        (
+            "investigation_required",
+            Action::Investigate,
+            GrantPhase::Failed,
+            61_000,
         ),
         (
             "investigation_required",
@@ -182,13 +188,21 @@ fn persisted_failure_statuses_with_retained_attempts_preserve_classification_and
 #[test]
 fn protected_client_id_is_projected_to_encrypted_descriptor_configuration() {
     let mut state = legacy();
-    state.secret_material_keys = vec!["client_id".into(), "refresh_token".into(), "scopes".into()];
+    state.secret_material_keys = vec![
+        "client_id".into(),
+        "refresh_token".into(),
+        "scopes".into(),
+        "refresh_before_seconds".into(),
+        "max_lifetime_seconds".into(),
+    ];
     // This is the merged result of inline and resolved protected legacy
     // material; the storage classification must not change minter categories.
     let material = HashMap::from([
         ("client_id".into(), "protected-client-id".into()),
         ("refresh_token".into(), "protected-refresh-token".into()),
         ("scopes".into(), "first,second third".into()),
+        ("refresh_before_seconds".into(), "300".into()),
+        ("max_lifetime_seconds".into(), "0".into()),
     ]);
     let registry = openshell_credential_issuer::builtins::registry();
     let descriptor = registry
@@ -201,6 +215,9 @@ fn protected_client_id_is_projected_to_encrypted_descriptor_configuration() {
     assert_eq!(projected.1["refresh_token"], "protected-refresh-token");
     assert!(!projected.1.contains_key("client_id"));
     assert!(!projected.0.contains_key("refresh_token"));
+    assert!(!projected.0.contains_key("refresh_before_seconds"));
+    assert!(!projected.1.contains_key("refresh_before_seconds"));
+    assert_eq!(projected.0["max_lifetime_seconds"], "3600");
     state.secret_material_keys.clear();
     assert_eq!(
         project_material(&state, descriptor, material, 3600).unwrap(),
@@ -209,4 +226,45 @@ fn protected_client_id_is_projected_to_encrypted_descriptor_configuration() {
     let unknown = HashMap::from([("undeclared_secret".into(), "private-value".into())]);
     state.secret_material_keys.push("undeclared_secret".into());
     assert!(project_material(&state, descriptor, unknown, 3600).is_err());
+}
+
+#[test]
+fn legacy_schedule_retains_full_protobuf_range_beyond_native_and_u32_limits() {
+    let registry = openshell_credential_issuer::builtins::registry();
+    let descriptor = registry
+        .describe()
+        .find(|value| value.name == "oauth2_refresh_token")
+        .unwrap();
+    let mut state = legacy();
+    for seconds in [
+        86_400,
+        i64::from(u32::MAX) + 1,
+        openshell_core::time::MAX_DURATION_SECONDS,
+    ] {
+        state.max_lifetime = Some(prost_types::Duration { seconds, nanos: 1 });
+        state.refresh_before = Some(prost_types::Duration {
+            seconds: 46_800,
+            nanos: 1,
+        });
+        let (_, schedule) = plan(&state, descriptor, Strategy::Oauth2RefreshToken).unwrap();
+        assert_eq!(
+            schedule.max_lifetime_seconds,
+            u64::try_from(seconds).unwrap() + 1
+        );
+        assert_eq!(schedule.refresh_before_ms, 46_800_001);
+        let (_, projected) = plan(&state, descriptor, Strategy::Oauth2RefreshToken).unwrap();
+        let (config, _) = project_material(
+            &state,
+            descriptor,
+            HashMap::new(),
+            projected.max_lifetime_seconds,
+        )
+        .unwrap();
+        assert_eq!(config["max_lifetime_seconds"], (seconds + 1).to_string());
+    }
+    state.max_lifetime = Some(prost_types::Duration {
+        seconds: 0,
+        nanos: 0,
+    });
+    assert!(plan(&state, descriptor, Strategy::Oauth2RefreshToken).is_err());
 }

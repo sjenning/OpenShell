@@ -41,7 +41,7 @@ pub(super) fn requests(request: &store::ResolveSecretsRequest, max: u32) -> Resu
                 | store::ResolvePurpose::MetadataInspection)
         )
         || request.secrets.iter().any(|item| {
-            !id(&item.request_id)
+            !crate::service::valid_resolution_request_id(&item.request_id)
                 || !id(&item.reference)
                 || !ids.insert(&item.request_id)
                 || item

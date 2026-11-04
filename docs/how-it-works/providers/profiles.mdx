@@ -529,6 +529,19 @@ Profile import, update, and lint check the selected issuer catalog. A `custom:`
 prefix does not establish registration, and built-in minters must also appear
 in that catalog. Offline structural checks cannot approve an unavailable strategy.
 
+If a minter is removed, an authorized administrator can still update its stored
+profile to a definition supported by the selected issuer, or delete the profile
+when no providers use it. These operations retain source-ownership, scope, and
+resource-version checks; they do not authorize the old definition for runtime
+use. Keep the exported definition and its `resource_version` when preparing a
+repair.
+
+During an issuer outage, the gateway retains a bounded, in-memory set of catalog
+validation results for unchanged profile-source snapshots across workspaces.
+Changed profiles, a newly selected issuer, a gateway restart, or an evicted
+snapshot require issuer validation again. This evidence does not replace live
+validation of submitted profile changes or refresh configuration.
+
 The issuer descriptor determines which material fields are secret. Profile
 `material.secret` declarations must agree with it; caller annotations cannot
 turn configuration fields into secret-material fields or expose secret fields

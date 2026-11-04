@@ -586,3 +586,103 @@ async fn whole_bundle_replacement_claims_the_old_grant_atomically() {
     );
     assert_eq!(minter.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn migration_writer_rejects_noncanonical_bundles_before_publication() {
+    let (issuer, source, _) = issuer().await;
+    let store = test_store().await;
+    let mut provider = provider();
+    provider.credential_handles = HashMap::from([
+        (
+            "TOKEN".into(),
+            source
+                .reference_handle("first-reference", Some("legacy-grant"))
+                .unwrap(),
+        ),
+        (
+            "OTHER_TOKEN".into(),
+            source
+                .reference_handle("second-reference", Some("legacy-grant"))
+                .unwrap(),
+        ),
+    ]);
+    let keys = vec!["TOKEN".into(), "OTHER_TOKEN".into()];
+    let recipe = || {
+        let mut plan = plan();
+        plan.refresh_before_ms = 0;
+        plan.max_lifetime_seconds = 1;
+        (
+            plan,
+            "legacy-grant".into(),
+            LegacyGrantSchedule {
+                refresh_before_ms: 46_800_000,
+                max_lifetime_seconds: 86_400,
+            },
+        )
+    };
+    assert!(StaticHandoff::migration_write(&source, &provider, &keys, Some(recipe())).is_ok());
+    assert!(
+        StaticHandoff::migration_write(&source, &provider, &keys[..1], Some(recipe())).is_err()
+    );
+    let (mut malformed, id, schedule) = recipe();
+    malformed.outputs.insert("third".into(), "TOKEN".into());
+    assert!(
+        StaticHandoff::migration_write(&source, &provider, &keys, Some((malformed, id, schedule)))
+            .is_err()
+    );
+    let (plan, id, mut schedule) = recipe();
+    schedule.max_lifetime_seconds = 0;
+    assert!(
+        StaticHandoff::migration_write(&source, &provider, &keys, Some((plan, id, schedule)))
+            .is_err()
+    );
+    let journal =
+        StaticHandoff::migration_write(&source, &provider, &keys, Some(recipe())).unwrap();
+    store
+        .write_atomically(&[write(&provider), journal])
+        .await
+        .unwrap();
+    let owned = StaticHandoff::published_for_provider(&store, &source, &provider)
+        .await
+        .unwrap();
+    assert_eq!(owned.len(), 1);
+    let revision = store
+        .get("provider", provider.object_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .resource_version;
+    StaticHandoff::delete_provider(&store, &source, provider.object_id(), revision, &owned)
+        .await
+        .unwrap();
+    let retired = StaticHandoff::load(&store, owned[0].id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retired.state.phase,
+        Phase::Aborting,
+        "legacy recipes must remain readable after retirement"
+    );
+    assert_eq!(issuer.resolves.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn authored_handoffs_cannot_use_the_legacy_schedule_admission_path() {
+    let store = test_store().await;
+    let (_issuer, source, minter) = issuer().await;
+    for long_lead in [true, false] {
+        let mut plan = plan();
+        if long_lead {
+            plan.refresh_before_ms = 46_800_000;
+        } else {
+            plan.max_lifetime_seconds = 86_400;
+        }
+        assert!(
+            StaticHandoff::begin_grant(&store, &source, &provider(), plan, None)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(minter.calls.load(Ordering::SeqCst), 0);
+}

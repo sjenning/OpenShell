@@ -3,7 +3,7 @@
 
 //! Gateway-local provider profile sources.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +41,10 @@ pub const PROVIDER_PROFILE_SOURCE_REFRESH_INTERVAL: Duration = Duration::from_se
 /// stale profile could keep injecting credentials for an endpoint its source
 /// has withdrawn.
 const CACHED_SNAPSHOT_MAX_AGE_INTERVALS: u32 = 3;
+
+/// Bound registration evidence across authored workspace snapshots. Eviction
+/// requires live revalidation; it never broadens the snapshots an entry covers.
+const STRATEGY_CATALOG_CACHE_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileScope {
@@ -288,7 +292,7 @@ pub struct ProviderProfileSources {
     cached: Vec<Arc<CachedProviderProfileSource>>,
     refresh_interval: Duration,
     strategy_source: Option<Arc<dyn crate::credential_source::ProviderCredentialSource>>,
-    strategy_catalog: Arc<tokio::sync::Mutex<Option<StrategyCatalogSnapshot>>>,
+    strategy_catalog: Arc<tokio::sync::Mutex<VecDeque<StrategyCatalogSnapshot>>>,
 }
 
 #[derive(Debug)]
@@ -533,20 +537,33 @@ impl ProviderProfileSources {
                     )
                     .is_ok_and(openshell_providers::is_gateway_mintable_strategy)
             });
-        let strategies = match self.strategy_source.as_ref().filter(|_| needs_strategies) {
+        let catalog = match self.strategy_source.as_ref().filter(|_| needs_strategies) {
             Some(source) => {
                 // Runtime builds reuse catalog evidence for the exact authored
                 // snapshot. They must not depend on a fresh issuer RPC when
                 // versioned credential values are already cached. Public profile
                 // mutations and refresh configuration still validate live.
                 let mut hasher = Sha256::new();
-                hasher.update(b"openshell-profile-strategy-catalog-v1");
+                hasher.update(b"openshell-profile-strategy-catalog-v2");
+                hasher.update((workspace.len() as u64).to_le_bytes());
+                hasher.update(workspace.as_bytes());
+                hasher.update((snapshots.len() as u64).to_le_bytes());
                 for snapshot in &snapshots {
                     hasher.update((snapshot.source_id.len() as u64).to_le_bytes());
                     hasher.update(snapshot.source_id.as_bytes());
                     hasher.update((snapshot.revision.len() as u64).to_le_bytes());
                     hasher.update(snapshot.revision.as_bytes());
+                    hasher.update([
+                        u8::from(snapshot.user_managed),
+                        u8::from(snapshot.allow_empty),
+                    ]);
+                    hasher.update((snapshot.profiles.len() as u64).to_le_bytes());
                     for profile in &snapshot.profiles {
+                        hasher.update([match profile.scope {
+                            ProfileScope::Static => 0,
+                            ProfileScope::Platform => 1,
+                            ProfileScope::Workspace => 2,
+                        }]);
                         let bytes = canonical_provider_profile_bytes(&profile.profile);
                         hasher.update((bytes.len() as u64).to_le_bytes());
                         hasher.update(bytes);
@@ -554,25 +571,49 @@ impl ProviderProfileSources {
                 }
                 let revision = format!("sha256:{:x}", hasher.finalize());
                 let mut cached = self.strategy_catalog.lock().await;
-                if let Some(cached) = cached
-                    .as_ref()
-                    .filter(|cached| cached.profiles_revision == revision)
+                if let Some(index) = cached
+                    .iter()
+                    .position(|entry| entry.profiles_revision == revision)
                 {
-                    Some(cached.strategies.clone())
+                    let catalog = build_effective_profiles_with_strategies(
+                        snapshots,
+                        Some(&cached[index].strategies),
+                    )?;
+                    let entry = cached.remove(index).expect("located catalog cache entry");
+                    cached.push_back(entry);
+                    catalog
                 } else {
+                    // A stalled miss in one workspace must not hold another
+                    // workspace's already-validated offline evidence hostage.
+                    drop(cached);
                     let strategies = source.remote_mutations().ok_or_else(|| {
                         Status::failed_precondition("selected credential source does not expose an issuer strategy catalog")
                     })?.issuer().list_strategies().await?.strategies;
-                    *cached = Some(StrategyCatalogSnapshot {
+                    // Failed structural, topology, or descriptor validation is
+                    // not registration evidence and must not evict good entries.
+                    let catalog =
+                        build_effective_profiles_with_strategies(snapshots, Some(&strategies))?;
+                    let mut cached = self.strategy_catalog.lock().await;
+                    // Concurrent misses can validate the same snapshot. Replace
+                    // its evidence rather than retaining duplicate LRU entries.
+                    if let Some(index) = cached
+                        .iter()
+                        .position(|entry| entry.profiles_revision == revision)
+                    {
+                        cached.remove(index);
+                    }
+                    if cached.len() == STRATEGY_CATALOG_CACHE_CAPACITY {
+                        cached.pop_front();
+                    }
+                    cached.push_back(StrategyCatalogSnapshot {
                         profiles_revision: revision,
-                        strategies: strategies.clone(),
+                        strategies,
                     });
-                    Some(strategies)
+                    catalog
                 }
             }
-            None => None,
+            None => build_effective_profiles_with_strategies(snapshots, None)?,
         };
-        let catalog = build_effective_profiles_with_strategies(snapshots, strategies.as_deref())?;
         debug!(
             catalog_revision = %catalog.revision(),
             source_fetch_count = catalog.source_count(),
@@ -580,6 +621,23 @@ impl ProviderProfileSources {
             "captured provider profile catalog snapshot"
         );
         Ok(catalog)
+    }
+
+    /// Management-only topology for authorized repair and deletion. Stored
+    /// refresh declarations may outlive their minter. Preserve source and scope
+    /// conflicts, but do not validate or bind runtime refresh eligibility here.
+    /// Proposed replacement content still requires live issuer validation.
+    /// This deliberately checks topology only: accepting a `custom:` spelling
+    /// here grants no runtime eligibility and is not structural authorization.
+    pub(crate) async fn snapshot_catalog_for_profile_repair(
+        &self,
+        store: &Store,
+        workspace: &str,
+    ) -> Result<EffectiveProviderProfileCatalog, Status> {
+        build_effective_profile_topology(
+            self.snapshots(store, workspace).await?,
+            CatalogValidation::RepairTopology,
+        )
     }
 
     async fn snapshots(
@@ -814,6 +872,23 @@ fn build_effective_profiles_with_strategies(
     snapshots: Vec<CollectedProviderProfileSnapshot>,
     strategies: Option<&[openshell_core::proto::credentials::minter::v1::StrategyDescriptor]>,
 ) -> Result<EffectiveProviderProfileCatalog, Status> {
+    build_effective_profile_topology(snapshots, CatalogValidation::Runtime(strategies))
+}
+
+#[derive(Clone, Copy)]
+enum CatalogValidation<'a> {
+    Runtime(Option<&'a [openshell_core::proto::credentials::minter::v1::StrategyDescriptor]>),
+    RepairTopology,
+}
+
+fn build_effective_profile_topology(
+    snapshots: Vec<CollectedProviderProfileSnapshot>,
+    validation: CatalogValidation<'_>,
+) -> Result<EffectiveProviderProfileCatalog, Status> {
+    let strategies = match validation {
+        CatalogValidation::Runtime(strategies) => strategies,
+        CatalogValidation::RepairTopology => None,
+    };
     let mut source_ids = BTreeSet::new();
     let mut profiles: BTreeMap<String, EffectiveProfileEntry> = BTreeMap::new();
     let source_count = snapshots.len();
@@ -851,47 +926,49 @@ fn build_effective_profiles_with_strategies(
         catalog_hasher.update((source_revision.len() as u64).to_le_bytes());
         catalog_hasher.update(source_revision.as_bytes());
 
-        if snapshot.user_managed {
-            let platform: Vec<_> = snapshot
-                .profiles
-                .iter()
-                .filter(|sp| sp.scope == ProfileScope::Platform)
-                .map(|sp| {
-                    (
-                        source_id.to_string(),
-                        ProviderTypeProfile::from_proto(&sp.profile),
-                    )
-                })
-                .collect();
-            if !platform.is_empty() {
-                validate_source_profiles(source_id, &platform, strategies)?;
+        if matches!(validation, CatalogValidation::Runtime(_)) {
+            if snapshot.user_managed {
+                let platform: Vec<_> = snapshot
+                    .profiles
+                    .iter()
+                    .filter(|sp| sp.scope == ProfileScope::Platform)
+                    .map(|sp| {
+                        (
+                            source_id.to_string(),
+                            ProviderTypeProfile::from_proto(&sp.profile),
+                        )
+                    })
+                    .collect();
+                if !platform.is_empty() {
+                    validate_source_profiles(source_id, &platform, strategies)?;
+                }
+                let workspace: Vec<_> = snapshot
+                    .profiles
+                    .iter()
+                    .filter(|sp| sp.scope == ProfileScope::Workspace)
+                    .map(|sp| {
+                        (
+                            source_id.to_string(),
+                            ProviderTypeProfile::from_proto(&sp.profile),
+                        )
+                    })
+                    .collect();
+                if !workspace.is_empty() {
+                    validate_source_profiles(source_id, &workspace, strategies)?;
+                }
+            } else {
+                let source_profiles = snapshot
+                    .profiles
+                    .iter()
+                    .map(|sp| {
+                        (
+                            source_id.to_string(),
+                            ProviderTypeProfile::from_proto(&sp.profile),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                validate_source_profiles(source_id, &source_profiles, strategies)?;
             }
-            let workspace: Vec<_> = snapshot
-                .profiles
-                .iter()
-                .filter(|sp| sp.scope == ProfileScope::Workspace)
-                .map(|sp| {
-                    (
-                        source_id.to_string(),
-                        ProviderTypeProfile::from_proto(&sp.profile),
-                    )
-                })
-                .collect();
-            if !workspace.is_empty() {
-                validate_source_profiles(source_id, &workspace, strategies)?;
-            }
-        } else {
-            let source_profiles = snapshot
-                .profiles
-                .iter()
-                .map(|sp| {
-                    (
-                        source_id.to_string(),
-                        ProviderTypeProfile::from_proto(&sp.profile),
-                    )
-                })
-                .collect::<Vec<_>>();
-            validate_source_profiles(source_id, &source_profiles, strategies)?;
         }
 
         for scoped_profile in snapshot.profiles {
@@ -916,11 +993,12 @@ fn build_effective_profiles_with_strategies(
             }
             let [(_, profile)] = bound;
 
-            // Conversion and source normalization preserve unsupported and
-            // duplicate MCP revisions, so validation above cannot have
-            // malformed evidence repaired into an accepted profile. Normalize
-            // the valid response shape only after that check succeeds.
-            normalize_provider_profile_mcp_fields(&mut response);
+            // Runtime validation precedes normalization, so malformed MCP
+            // evidence cannot be repaired into an accepted runtime profile.
+            // Management topology deliberately preserves the authored shape.
+            if matches!(validation, CatalogValidation::Runtime(_)) {
+                normalize_provider_profile_mcp_fields(&mut response);
+            }
 
             let new_entry = ScopedProfileEntry {
                 source_id: source_id.to_string(),
@@ -1178,6 +1256,91 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response};
+
+    #[tokio::test]
+    async fn strategy_catalog_evidence_is_bounded_lru_and_only_caches_valid_snapshots() {
+        use crate::credential_source::{RemoteProviderSource, tests::issuer::Issuer};
+        use openshell_core::proto::{ProviderCredentialRefresh, ProviderCredentialRefreshStrategy};
+
+        let issuer =
+            Issuer::with_minters(Arc::new(openshell_credential_issuer::builtins::registry())).await;
+        let source: Arc<dyn crate::credential_source::ProviderCredentialSource> =
+            Arc::new(RemoteProviderSource::new("cache-test", issuer.watched.clone()).unwrap());
+        let sources = ProviderProfileSources::with_default_sources().with_strategy_source(source);
+        let store = crate::persistence::test_store().await;
+        let mut stored = stored_profile_in_workspace("refresh-profile", "first");
+        stored.profile.as_mut().unwrap().credentials[0].env_vars = vec!["REFRESH_TOKEN".into()];
+        stored.profile.as_mut().unwrap().credentials[0].refresh = Some(ProviderCredentialRefresh {
+            strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials.into(),
+            token_url: "https://issuer.example/token".into(),
+            ..Default::default()
+        });
+        store.put_message(&stored).await.unwrap();
+        sources.snapshot_catalog(&store, "first").await.unwrap();
+        let first_key = sources.strategy_catalog.lock().await[0]
+            .profiles_revision
+            .clone();
+        for index in 1..STRATEGY_CATALOG_CACHE_CAPACITY {
+            let workspace = format!("workspace-{index}");
+            let mut next = stored.clone();
+            let metadata = next.metadata.as_mut().unwrap();
+            metadata.id = uuid::Uuid::new_v4().to_string();
+            metadata.workspace = workspace.clone();
+            metadata.resource_version = 0;
+            next.profile.as_mut().unwrap().display_name = workspace.clone();
+            store.put_message(&next).await.unwrap();
+            sources.snapshot_catalog(&store, &workspace).await.unwrap();
+        }
+        assert_eq!(
+            sources.strategy_catalog.lock().await.len(),
+            STRATEGY_CATALOG_CACHE_CAPACITY
+        );
+        // A hit keeps the first workspace alive when the next success evicts.
+        sources.snapshot_catalog(&store, "first").await.unwrap();
+        let evicted_key = sources.strategy_catalog.lock().await[0]
+            .profiles_revision
+            .clone();
+        let mut next = stored.clone();
+        let metadata = next.metadata.as_mut().unwrap();
+        metadata.id = uuid::Uuid::new_v4().to_string();
+        metadata.workspace = "overflow".into();
+        metadata.resource_version = 0;
+        next.profile.as_mut().unwrap().display_name = "overflow".into();
+        store.put_message(&next).await.unwrap();
+        sources.snapshot_catalog(&store, "overflow").await.unwrap();
+        let keys_before = sources
+            .strategy_catalog
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.profiles_revision.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(keys_before.len(), STRATEGY_CATALOG_CACHE_CAPACITY);
+        assert!(keys_before.contains(&first_key));
+        assert!(!keys_before.contains(&evicted_key));
+        // A bad profile must not retain the fetched strategy descriptors or
+        // displace evidence for another already-validated workspace.
+        next.profile.as_mut().unwrap().credentials[0]
+            .refresh
+            .as_mut()
+            .unwrap()
+            .strategy = 0;
+        next.profile.as_mut().unwrap().credentials[0]
+            .refresh
+            .as_mut()
+            .unwrap()
+            .strategy_name = "custom:missing".into();
+        store.put_message(&next).await.unwrap();
+        assert!(sources.snapshot_catalog(&store, "overflow").await.is_err());
+        let keys_after = sources
+            .strategy_catalog
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.profiles_revision.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(keys_before, keys_after);
+    }
 
     #[derive(Clone)]
     struct MockProfileInterceptor {

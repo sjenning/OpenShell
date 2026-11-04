@@ -241,6 +241,21 @@ async fn legacy_refresh_adoption_publishes_then_activates_without_changing_epoch
         .unwrap();
     fixture.gateway.put_message(&input).await.unwrap();
     let now = crate::persistence::current_time_ms();
+    let protected_aliases = fixture
+        .legacy
+        .store_refresh_material_with_object_id(
+            crate::credentials::RefreshMaterialScope {
+                provider_name: "display",
+                workspace: "default",
+                provider_id: "provider",
+                credential_key: "TOKEN",
+            },
+            "legacy-alias-material",
+            &HashMap::from([("refresh_before_seconds".into(), "46800".into())]),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
     let state = StoredProviderCredentialRefreshStateV2 {
         metadata: Some(ObjectMeta {
             id: "legacy-grant".into(),
@@ -261,7 +276,18 @@ async fn legacy_refresh_adoption_publishes_then_activates_without_changing_epoch
         material: HashMap::from([
             ("refresh_token".into(), "protected-refresh".into()),
             ("client_id".into(), "client".into()),
+            ("max_lifetime_seconds".into(), "86400".into()),
         ]),
+        secret_material_keys: vec!["refresh_before_seconds".into()],
+        secret_material_handles: protected_aliases,
+        refresh_before: Some(prost_types::Duration {
+            seconds: 46_800,
+            nanos: 0,
+        }),
+        max_lifetime: Some(prost_types::Duration {
+            seconds: 86_400,
+            nanos: 0,
+        }),
         ..Default::default()
     };
     provider_refresh::put_refresh_state(&fixture.gateway, &state)
@@ -304,6 +330,7 @@ async fn legacy_refresh_adoption_publishes_then_activates_without_changing_epoch
         .await
         .unwrap();
     assert_eq!(value.values["TOKEN"], "existing-token");
+    assert_migrated_schedule(&fixture, &issuer, "legacy-grant", 46_800_000, 86_400).await;
     let before = fixture
         .gateway
         .get("provider", "provider")
@@ -336,13 +363,67 @@ async fn legacy_refresh_adoption_publishes_then_activates_without_changing_epoch
         .await
         .unwrap();
     assert_eq!(values.values["TOKEN"], "existing-token");
+    assert_migrated_schedule(&fixture, &restarted, "legacy-grant", 46_800_000, 86_400).await;
+}
+
+async fn assert_migrated_schedule(
+    fixture: &Fixture,
+    issuer: &EmbeddedIssuer,
+    id: &str,
+    lead: i64,
+    lifetime: i64,
+) {
+    let repository = Repository::open(&fixture.database).await.unwrap();
+    let scope = issuer.store.embedded_scope().unwrap();
+    let state = repository
+        .grants(&scope)
+        .load(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .state;
+    assert_eq!(state.definition.refresh_before_ms, lead);
+    assert_eq!(state.definition.max_lifetime_seconds, lifetime);
+    let rows = fixture
+        .gateway
+        .list_object_page(
+            "credential_issuer_handoff_v1",
+            crate::persistence::ObjectListQuery::AllWorkspaces,
+            None,
+            128,
+        )
+        .await
+        .unwrap();
+    for row in &rows.records {
+        assert!(
+            crate::credential_source::handoff::StaticHandoff::load(&fixture.gateway, &row.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(!rows.records.is_empty());
+    let journal = rows
+        .records
+        .iter()
+        .find(|row| {
+            let value: serde_json::Value = serde_json::from_slice(&row.payload).unwrap();
+            value["grant"]["id"] == id
+        })
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&journal.payload).unwrap();
+    assert_eq!(value["grant"]["legacy_schedule"]["refresh_before_ms"], lead);
+    assert_eq!(
+        value["grant"]["legacy_schedule"]["max_lifetime_seconds"],
+        lifetime
+    );
 }
 
 #[tokio::test]
 async fn startup_activation_recovery_requires_the_complete_published_gateway_bundle() {
     use crate::credential_source::{
         IssuerReferenceBinding,
-        handoff::{GrantPlan, StaticHandoff},
+        handoff::{GrantPlan, LegacyGrantSchedule, StaticHandoff},
     };
     use crate::persistence::AtomicWrite;
     use openshell_credential_issuer::{
@@ -409,8 +490,8 @@ async fn startup_activation_recovery_requires_the_complete_published_gateway_bun
             )]),
             config: BTreeMap::from([("token_url".into(), "https://idp.invalid/token".into())]),
             secret_material: BTreeMap::from([("refresh_token".into(), "refresh-private".into())]),
-            refresh_before_ms: 1000,
-            max_lifetime_seconds: 3600,
+            refresh_before_ms: 46_800_000,
+            max_lifetime_seconds: 86_400,
             status: LegacyGrantStatus {
                 version: 1,
                 phase: GrantPhase::Refreshed,
@@ -472,10 +553,14 @@ async fn startup_activation_recovery_requires_the_complete_published_gateway_bun
                 credential_key: "TOKEN".into(),
                 strategy: "oauth2_refresh_token".into(),
                 outputs: BTreeMap::from([("access_token".into(), "TOKEN".into())]),
-                refresh_before_ms: 1000,
-                max_lifetime_seconds: 3600,
+                refresh_before_ms: 0,
+                max_lifetime_seconds: 1,
             },
             identity.id.clone(),
+            LegacyGrantSchedule {
+                refresh_before_ms: 46_800_000,
+                max_lifetime_seconds: 86_400,
+            },
         )),
     )
     .unwrap();
@@ -526,6 +611,7 @@ async fn startup_activation_recovery_requires_the_complete_published_gateway_bun
         .await
         .unwrap();
     assert_eq!(values.values["TOKEN"], "original-token");
+    assert_migrated_schedule(&fixture, &issuer, "recovery-grant", 46_800_000, 86_400).await;
     let before = fixture
         .gateway
         .get("provider", "provider")
@@ -1099,4 +1185,90 @@ async fn unknown_legacy_strategy_fails_closed_before_cleanup_or_publication() {
         .unwrap();
     assert_eq!(retained.credentials["TOKEN"], "untouched-output");
     assert!(retained.credential_handles.is_empty());
+}
+
+#[tokio::test]
+async fn startup_preserves_classified_investigation_deadline_but_parks_unknown_exchanges() {
+    use crate::{provider_refresh, storage_proto::StoredProviderCredentialRefreshStateV2};
+    use openshell_core::proto::{
+        ProviderCredentialRefreshRecoveryAction as Action,
+        ProviderCredentialRefreshStrategy as Strategy,
+    };
+    use openshell_credential_issuer::{minter::RecoveryAction, repository::grants::GrantPhase};
+    for uncertain in [false, true] {
+        let fixture = Fixture::new().await;
+        let mut input = provider();
+        input
+            .credentials
+            .insert("TOKEN".into(), "existing-token".into());
+        fixture.gateway.put_message(&input).await.unwrap();
+        let now = crate::persistence::current_time_ms();
+        let deadline = now + 3_600_000;
+        let state = StoredProviderCredentialRefreshStateV2 {
+            metadata: Some(ObjectMeta {
+                id: "investigation-grant".into(),
+                name: provider_refresh::refresh_state_name("provider", "TOKEN"),
+                workspace: "default".into(),
+                annotations: HashMap::from([(
+                    "openshell.nvidia.com/refresh-attempt".into(),
+                    "failed-attempt".into(),
+                )]),
+                ..Default::default()
+            }),
+            provider_id: "provider".into(),
+            provider_name: "display".into(),
+            credential_key: "TOKEN".into(),
+            strategy: Strategy::Oauth2RefreshToken as i32,
+            authorization_epoch: "original-epoch".into(),
+            status: "investigation_required".into(),
+            recovery_action: Action::Investigate as i32,
+            failure_code: if uncertain {
+                "mint_outcome_unknown"
+            } else {
+                "refresh_failed"
+            }
+            .into(),
+            next_refresh_at_ms: deadline,
+            expires_at_ms: now + 7_200_000,
+            token_url: "https://idp.invalid/token".into(),
+            material: HashMap::from([("refresh_token".into(), "refresh-private".into())]),
+            ..Default::default()
+        };
+        provider_refresh::put_refresh_state(&fixture.gateway, &state)
+            .await
+            .unwrap();
+        let issuer = fixture.host().await;
+        let repository = Repository::open(&fixture.database).await.unwrap();
+        let scope = issuer.store.embedded_scope().unwrap();
+        let observed = repository
+            .grants(&scope)
+            .load("investigation-grant")
+            .await
+            .unwrap()
+            .unwrap()
+            .state;
+        assert_eq!(observed.recovery_action, Some(RecoveryAction::Investigate));
+        assert_eq!(
+            observed.phase,
+            if uncertain {
+                GrantPhase::Parked
+            } else {
+                GrantPhase::Failed
+            }
+        );
+        assert_eq!(
+            observed.next_refresh_at_ms,
+            if uncertain { i64::MAX } else { deadline }
+        );
+        assert_eq!(
+            observed.definition.identity.authorization_epoch,
+            "original-epoch"
+        );
+        assert!(
+            provider_refresh::list_refresh_states_for_provider(&fixture.gateway, "provider")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod mtls;
+mod timeouts;
 
 use super::*;
 use std::{collections::HashMap, sync::Mutex, time::SystemTime};

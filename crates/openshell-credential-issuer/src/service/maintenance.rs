@@ -84,7 +84,11 @@ impl Runtime {
                     {
                         Ok(()) => {}
                         Err(error) if error.code() == tonic::Code::NotFound => {}
-                        Err(_) => continue,
+                        Err(error) => {
+                            crate::observability::cleanup_deferred(error.code());
+                            tracing::warn!(code=?error.code(), "issuer candidate cleanup deferred");
+                            continue;
+                        }
                     }
                     store
                         .commit(
@@ -126,7 +130,11 @@ impl Runtime {
                         {
                             Ok(()) => {}
                             Err(error) if error.code() == tonic::Code::NotFound => {}
-                            Err(_) => continue,
+                            Err(error) => {
+                                crate::observability::cleanup_deferred(error.code());
+                                tracing::warn!(code=?error.code(), "issuer reference cleanup deferred");
+                                continue;
+                            }
                         }
                         refs.registry()
                             .acknowledge_deletion(&key, &state.owner, backing)

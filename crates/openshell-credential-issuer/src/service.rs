@@ -39,6 +39,15 @@ const VALUE_PURPOSE: &str = "provider-value-v1";
 const IDEMPOTENCY_KIND: &str = "secret-idempotency-v1";
 const CANDIDATE_KIND: &str = "secret-candidate-v1";
 
+/// Resolution correlation IDs may be public provider credential keys. Keep
+/// handler and client validation aligned with that established 256-byte bound.
+pub(crate) fn valid_resolution_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 #[derive(Clone)]
 pub struct CredentialStoreService {
     runtime: Arc<Runtime>,
@@ -257,12 +266,11 @@ impl Runtime {
         // Validate every supplied scope and captured state before reading any
         // value. A bad sibling never causes partial authorization/value export.
         for item in request.secrets {
-            if item.request_id.is_empty()
-                || item.request_id.len() > 128
+            if !valid_resolution_request_id(&item.request_id)
                 || !ids.insert(item.request_id.clone())
             {
                 return Err(Status::invalid_argument(
-                    "issuer resolution request IDs must be unique and nonempty",
+                    "issuer resolution request IDs must be unique, nonempty, and at most 256 bytes",
                 ));
             }
             valid_reference(&item.reference)?;

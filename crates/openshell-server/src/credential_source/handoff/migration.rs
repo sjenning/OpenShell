@@ -9,13 +9,13 @@ impl StaticHandoff {
         source: &RemoteProviderSource,
         provider: &Provider,
         keys: &[String],
-        grant: Option<(GrantPlan, String)>,
+        grant: Option<(GrantPlan, String, LegacyGrantSchedule)>,
     ) -> Result<AtomicWrite, Status> {
         let identity = serde_json::to_vec(&(
             source.name.as_ref(),
             provider.object_workspace(),
             provider.object_id(),
-            grant.as_ref().map(|(_, id)| id.as_str()),
+            grant.as_ref().map(|(_, id, _)| id.as_str()),
             keys,
         ))
         .map_err(|_| invalid())?;
@@ -48,22 +48,35 @@ impl StaticHandoff {
             expected_provider_version: None,
             phase: Phase::Published,
             slots,
-            grant: grant.map(|(plan, id)| grants::GrantSlot {
+            grant: grant.map(|(plan, id, schedule)| grants::GrantSlot {
                 plan,
                 id: Some(id),
                 pending_publication: false,
                 detaching: false,
+                legacy_schedule: Some(schedule),
             }),
         };
-        if state.slots.is_empty() {
-            return Err(invalid());
-        }
+        // Run the public loader's complete canonical validation BEFORE the
+        // caller can atomically rewrite the provider and remove the legacy DTO.
+        // A committed migration journal must always be recoverably readable.
+        let payload = encode(&state)?;
+        Self::from_record(crate::persistence::ObjectRecord {
+            object_type: KIND.into(),
+            id: id.clone(),
+            name: id.clone(),
+            workspace: state.workspace.clone(),
+            payload: payload.clone(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            labels: None,
+            resource_version: 1,
+        })?;
         Ok(AtomicWrite::Create {
             object_type: KIND.into(),
             id: id.clone(),
             name: id,
-            workspace: state.workspace.clone(),
-            payload: encode(&state)?,
+            workspace: state.workspace,
+            payload,
         })
     }
 

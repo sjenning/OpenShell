@@ -6,7 +6,7 @@
 use crate::{
     credential_source::{
         DRIVER,
-        handoff::{GrantPlan, StaticHandoff},
+        handoff::{GrantPlan, LegacyGrantSchedule, StaticHandoff},
     },
     credentials::CredentialRuntime,
     persistence::{ObjectListQuery, Store},
@@ -54,7 +54,7 @@ pub(super) async fn prepare(
     provider: &Provider,
     state: &LegacyState,
     refs: &mut BTreeMap<String, String>,
-) -> Result<Option<(GrantPlan, String, String)>, Status> {
+) -> Result<Option<(GrantPlan, String, String, LegacyGrantSchedule)>, Status> {
     let metadata = state
         .metadata
         .as_ref()
@@ -109,7 +109,7 @@ pub(super) async fn prepare(
         .find(|descriptor| descriptor.name == strategy_name)
         .cloned()
         .ok_or_else(|| invalid("legacy refresh strategy is unavailable"))?;
-    let plan = plan(state, &descriptor, strategy)?;
+    let (plan, schedule) = plan(state, &descriptor, strategy)?;
     reject_published_authority(
         gateway,
         provider,
@@ -179,7 +179,7 @@ pub(super) async fn prepare(
             .await?,
     );
     let (config, secrets) =
-        project_material(state, &descriptor, material, plan.max_lifetime_seconds)?;
+        project_material(state, &descriptor, material, schedule.max_lifetime_seconds)?;
     let retired = retired_material(legacy, host, state, &owner, &epoch)?;
     let status = status(state)?;
     let id = refresh
@@ -195,14 +195,15 @@ pub(super) async fn prepare(
             outputs,
             config,
             secret_material: secrets,
-            refresh_before_ms: i64::try_from(plan.refresh_before_ms)
+            refresh_before_ms: i64::try_from(schedule.refresh_before_ms)
                 .map_err(|_| invalid("legacy refresh window exceeds range"))?,
-            max_lifetime_seconds: i64::from(plan.max_lifetime_seconds),
+            max_lifetime_seconds: i64::try_from(schedule.max_lifetime_seconds)
+                .map_err(|_| invalid("legacy grant lifetime exceeds range"))?,
             status,
             retired,
         })
         .await?;
-    Ok(Some((plan, id, epoch)))
+    Ok(Some((plan, id, epoch, schedule)))
 }
 
 #[derive(serde::Deserialize)]
@@ -378,7 +379,7 @@ fn project_material(
     state: &LegacyState,
     descriptor: &StrategyDescriptor,
     material: HashMap<String, String>,
-    max_lifetime_seconds: u32,
+    max_lifetime_seconds: u64,
 ) -> Result<ProjectedMaterial, Status> {
     let scopes = if state.scopes.is_empty() {
         provider_refresh::material_scopes(&material)
@@ -388,6 +389,15 @@ fn project_material(
     let mut config = BTreeMap::new();
     let mut secrets = BTreeMap::new();
     for (key, value) in material {
+        // Configure already extracted these scheduling aliases into the DTO's
+        // typed durations, including zero/default semantics. They are not
+        // minter arguments, regardless of their old physical storage category.
+        if matches!(
+            key.as_str(),
+            "refresh_before_seconds" | "max_lifetime_seconds"
+        ) {
+            continue;
+        }
         // Legacy secret_material_keys selected protected physical storage, not
         // a minter's argument category. Both issuer categories are encrypted;
         // the pinned descriptor determines which category receives each field.
@@ -419,7 +429,7 @@ fn plan(
     state: &LegacyState,
     descriptor: &StrategyDescriptor,
     strategy: Strategy,
-) -> Result<GrantPlan, Status> {
+) -> Result<(GrantPlan, LegacyGrantSchedule), Status> {
     let primary = if strategy == Strategy::AwsStsAssumeRole {
         "access_key_id"
     } else {
@@ -446,7 +456,7 @@ fn plan(
         state.max_lifetime.as_ref(),
         std::time::Duration::from_hours(1),
     )?;
-    if lifetime.is_zero() || lifetime > std::time::Duration::from_hours(12) {
+    if lifetime.is_zero() {
         return Err(invalid("legacy grant lifetime is invalid"));
     }
     let seconds = lifetime.as_secs() + u64::from(lifetime.subsec_nanos() != 0);
@@ -454,14 +464,21 @@ fn plan(
         before.as_millis() + u128::from(!before.subsec_nanos().is_multiple_of(1_000_000)),
     )
     .map_err(|_| invalid("legacy refresh window exceeds range"))?;
-    Ok(GrantPlan {
-        credential_key: state.credential_key.clone(),
-        strategy: descriptor.name.clone(),
-        outputs,
-        refresh_before_ms,
-        max_lifetime_seconds: u32::try_from(seconds)
-            .map_err(|_| invalid("legacy grant lifetime exceeds range"))?,
-    })
+    Ok((
+        GrantPlan {
+            credential_key: state.credential_key.clone(),
+            strategy: descriptor.name.clone(),
+            outputs,
+            // This published-only migration recipe never reserves a new grant.
+            // The complete schedule is explicit, not a silently capped plan.
+            refresh_before_ms: 0,
+            max_lifetime_seconds: 1,
+        },
+        LegacyGrantSchedule {
+            refresh_before_ms,
+            max_lifetime_seconds: seconds,
+        },
+    ))
 }
 fn duration(
     value: Option<&prost_types::Duration>,
@@ -490,7 +507,16 @@ fn status(state: &LegacyState) -> Result<LegacyGrantStatus, Status> {
         "error" => Some((GrantPhase::Failed, RecoveryAction::Retry)),
         "configuration_required" => Some((GrantPhase::Failed, RecoveryAction::FixConfiguration)),
         "reauthorization_required" => Some((GrantPhase::Parked, RecoveryAction::Reauthorize)),
-        "investigation_required" => Some((GrantPhase::Parked, RecoveryAction::Investigate)),
+        // Investigate is also a classified retryable failure. Only the parked
+        // deadline (or an explicitly unknown exchange below) prohibits replay.
+        "investigation_required" => Some((
+            if state.next_refresh_at_ms == i64::MAX {
+                GrantPhase::Parked
+            } else {
+                GrantPhase::Failed
+            },
+            RecoveryAction::Investigate,
+        )),
         _ => None,
     };
     let action = match Action::try_from(state.recovery_action) {

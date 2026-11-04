@@ -45,13 +45,23 @@ impl RemoteMinter {
     }
 
     async fn discover(channel: Channel, registration: &str) -> Result<Self, Status> {
+        Self::discover_with_timeout(channel, registration, DISCOVERY_TIMEOUT).await
+    }
+
+    async fn discover_with_timeout(
+        channel: Channel,
+        registration: &str,
+        timeout: Duration,
+    ) -> Result<Self, Status> {
         let mut client = wire::token_minter_client::TokenMinterClient::new(channel)
             .max_decoding_message_size(1024 * 1024);
         let mut request = tonic::Request::new(wire::DescribeRequest {});
-        request.set_timeout(DISCOVERY_TIMEOUT);
-        let response = client
-            .describe(request)
+        request.set_timeout(timeout);
+        // Tonic's transport deadline ends at response headers. Bound the whole
+        // generated unary call, including readiness, message, and trailers.
+        let response = tokio::time::timeout(timeout, client.describe(request))
             .await
+            .map_err(|_| Status::unavailable("remote minter discovery failed"))?
             .map_err(|_| Status::unavailable("remote minter discovery failed"))?
             .into_inner();
         let expected = format!("custom:{registration}");
@@ -93,6 +103,39 @@ impl RemoteMinter {
             client: minter.client.clone(),
         }))?;
         Ok(minter)
+    }
+
+    async fn mint_with_timeout(
+        &self,
+        request: MintRequest,
+        timeout: Duration,
+    ) -> Result<MintResponse, MintFailure> {
+        let mut client = self.client.clone();
+        let mut request = tonic::Request::new(wire::MintRequest {
+            strategy: request.strategy,
+            config: request.config,
+            secret_material: request.secret_material,
+            attempt_id: request.attempt_id,
+        });
+        request.set_timeout(timeout);
+        // No automatic replay: a connection failure or deadline may follow an
+        // upstream exchange that rotated irreplaceable refresh material. The
+        // local deadline also covers readiness, the response body, and trailers.
+        let response = tokio::time::timeout(timeout, client.mint(request))
+            .await
+            .map_err(|_| uncertain_response())?
+            .map_err(|status| remote_failure(&status))?
+            .into_inner();
+        let expiration_time_ms = response
+            .expiration_time
+            .as_ref()
+            .and_then(|time| openshell_core::time::timestamp_to_millis(time).ok())
+            .ok_or_else(uncertain_response)?;
+        Ok(MintResponse {
+            outputs: response.outputs,
+            expiration_time_ms,
+            rotated_secret_material: response.rotated_secret_material,
+        })
     }
 }
 
@@ -178,31 +221,7 @@ impl TokenMinter for RemoteMinter {
         self.descriptor.clone()
     }
     async fn mint(&self, request: MintRequest) -> Result<MintResponse, MintFailure> {
-        let mut client = self.client.clone();
-        let mut request = tonic::Request::new(wire::MintRequest {
-            strategy: request.strategy,
-            config: request.config,
-            secret_material: request.secret_material,
-            attempt_id: request.attempt_id,
-        });
-        request.set_timeout(MINT_TIMEOUT);
-        // No automatic replay: a connection failure or deadline may follow an
-        // upstream exchange that rotated irreplaceable refresh material.
-        let response = client
-            .mint(request)
-            .await
-            .map_err(|status| remote_failure(&status))?
-            .into_inner();
-        let expiration_time_ms = response
-            .expiration_time
-            .as_ref()
-            .and_then(|time| openshell_core::time::timestamp_to_millis(time).ok())
-            .ok_or_else(uncertain_response)?;
-        Ok(MintResponse {
-            outputs: response.outputs,
-            expiration_time_ms,
-            rotated_secret_material: response.rotated_secret_material,
-        })
+        self.mint_with_timeout(request, MINT_TIMEOUT).await
     }
 }
 

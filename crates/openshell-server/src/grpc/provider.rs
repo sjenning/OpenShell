@@ -381,28 +381,44 @@ pub(super) async fn update_provider_record_with_catalog(
 
 async fn reject_refresh_owned_credential_updates(
     store: &Store,
-    provider_id: &str,
+    existing: &Provider,
     credential_updates: &HashMap<String, String>,
+    source: Option<&crate::credential_source::RemoteProviderSource>,
 ) -> Result<(), Status> {
     if credential_updates.is_empty() {
         return Ok(());
     }
 
     let mut refresh_owned_keys = HashSet::new();
-    for refresh_state in
-        crate::provider_refresh::list_refresh_states_for_provider(store, provider_id).await?
-    {
-        let strategy =
-            ProviderCredentialRefreshStrategy::try_from(refresh_state.strategy).unwrap_or_default();
-        if !crate::provider_refresh::is_gateway_mintable_strategy(strategy) {
-            continue;
-        }
-
-        for key in std::iter::once(refresh_state.credential_key)
-            .chain(refresh_state.additional_output_keys.into_values())
+    if let Some(source) = source {
+        // Selected embedded and remote issuers publish grant ownership in the
+        // immutable handles, not in legacy gateway refresh rows. Inspect every
+        // output, including empty-string deletions and complete replacements,
+        // before allocating a static handoff. No issuer value read is needed.
+        use crate::credential_source::ProviderCredentialSource as _;
+        refresh_owned_keys.extend(
+            source
+                .refresh_authorization_epochs(existing)?
+                .into_keys()
+                .filter(|key| credential_updates.contains_key(key)),
+        );
+    } else {
+        for refresh_state in
+            crate::provider_refresh::list_refresh_states_for_provider(store, existing.object_id())
+                .await?
         {
-            if credential_updates.contains_key(&key) {
-                refresh_owned_keys.insert(key);
+            let strategy = ProviderCredentialRefreshStrategy::try_from(refresh_state.strategy)
+                .unwrap_or_default();
+            if !crate::provider_refresh::is_gateway_mintable_strategy(strategy) {
+                continue;
+            }
+
+            for key in std::iter::once(refresh_state.credential_key)
+                .chain(refresh_state.additional_output_keys.into_values())
+            {
+                if credential_updates.contains_key(&key) {
+                    refresh_owned_keys.insert(key);
+                }
             }
         }
     }
@@ -487,7 +503,7 @@ async fn update_provider_record_with_source(
         ));
     }
 
-    reject_refresh_owned_credential_updates(store, existing.object_id(), &provider.credentials)
+    reject_refresh_owned_credential_updates(store, &existing, &provider.credentials, remote)
         .await?;
 
     if remote.is_none() {
@@ -506,14 +522,25 @@ async fn update_provider_record_with_source(
         .await?;
     }
 
-    let mut response_expiration_metadata = existing.clone();
-    if let Some(source) = remote {
+    let expiration_intent = if let Some(source) = remote {
         source.register_provider(&existing)?;
-        response_expiration_metadata
-            .credential_handles
-            .retain(|key, _| !provider.credentials.contains_key(key));
-        source.project_expiration_times(&mut response_expiration_metadata)?;
-    }
+        // Authenticate every explicitly addressed retained expiration, even
+        // when merging would leave the provider spec unchanged. Carry those
+        // versions to publication rather than trusting watch catch-up.
+        Some(
+            Box::pin(
+                crate::credential_source::handoff::ExpirationIntent::capture(
+                    source,
+                    &existing,
+                    &provider,
+                    clear_credential_expiration_keys,
+                ),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let credentials = if remote.is_some() { None } else { credentials };
     let current_version = existing.metadata.as_ref().map_or(0, |m| m.resource_version);
 
@@ -547,6 +574,36 @@ async fn update_provider_record_with_source(
         candidate.credential_expiration_times,
         provider.credential_expiration_times,
     );
+
+    if let Some(source) = remote {
+        // Validate expiration-only edits before staging any unrelated values.
+        // Publication repeats the version-one fence against the exact retained
+        // references; later versions and active grants own their expiration.
+        crate::credential_source::handoff::StaticHandoff::check_retained_expirations(
+            source,
+            &existing,
+            &candidate,
+            updated_credential_values
+                .keys()
+                .chain(removed_credential_handles.keys()),
+        )
+        .await?;
+    }
+
+    let mut response_expiration_metadata = candidate.clone();
+    if let Some(source) = remote {
+        // Project the edited legacy spec, not the previous projection: using
+        // the old minimum here would prevent version-one expiry extensions or
+        // clears from appearing in the successful response.
+        response_expiration_metadata.credentials.clear();
+        response_expiration_metadata
+            .credential_handles
+            .retain(|key, _| {
+                !updated_credential_values.contains_key(key)
+                    && !removed_credential_handles.contains_key(key)
+            });
+        source.project_expiration_times(&mut response_expiration_metadata)?;
+    }
 
     // Validate BEFORE writing to prevent persisting invalid state.
     // Validate only the mutable fields (credentials/config) plus metadata and
@@ -666,14 +723,15 @@ async fn update_provider_record_with_source(
         response_provider = Some(projected);
 
         if let Some(source) = remote {
-            return issuer_mutations::publish(
+            return Box::pin(issuer_mutations::publish_with_expiration_intent(
                 store,
                 source,
                 &candidate,
                 Some(&existing),
                 Some(cas_version),
                 remote_handoff.as_mut(),
-            )
+                expiration_intent.as_ref(),
+            ))
             .await;
         }
         let labels_map = candidate.object_labels();

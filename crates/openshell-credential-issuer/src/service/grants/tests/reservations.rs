@@ -29,6 +29,85 @@ async fn reserve(fixture: &Fixture) -> wire::ReserveGrantResponse {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn create_and_reserve_share_the_256_byte_output_credential_key_bound() {
+    let fixture = Fixture::new().await;
+    for length in [129, 256] {
+        // Exercise a sibling binding independently of the primary owner's
+        // credential key, which already has its own 256-byte admission bound.
+        let credential_key = "K".repeat(length);
+        let mut create = request();
+        create
+            .outputs
+            .insert("second".into(), credential_key.clone());
+        let created = fixture
+            .runtime()
+            .create(test_scope(A), create, format!("create-long-{length}"))
+            .await
+            .unwrap();
+        let mut reserve = reservation();
+        reserve
+            .outputs
+            .insert("second".into(), credential_key.clone());
+        let reserved = fixture
+            .runtime()
+            .reserve(test_scope(A), reserve, format!("reserve-long-{length}"))
+            .await
+            .unwrap();
+        for grant in [&created.grant, &reserved.grant] {
+            let loaded = fixture.runtime().load(&test_scope(A), grant).await.unwrap();
+            assert_eq!(
+                loaded.state.definition.outputs["second"].credential_key,
+                credential_key
+            );
+        }
+    }
+    assert_eq!(fixture.minter.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn create_and_reserve_reject_overlong_blank_padded_and_control_output_keys() {
+    let fixture = Fixture::new().await;
+    for (index, credential_key) in [
+        "K".repeat(257),
+        String::new(),
+        " TOKEN".into(),
+        "TOKEN ".into(),
+        "TOKEN\nVALUE".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut create = request();
+        create
+            .outputs
+            .insert("second".into(), credential_key.clone());
+        assert_eq!(
+            fixture
+                .runtime()
+                .create(test_scope(A), create, format!("create-invalid-{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+        let mut reserve = reservation();
+        reserve.outputs.insert("second".into(), credential_key);
+        assert_eq!(
+            fixture
+                .runtime()
+                .reserve(test_scope(A), reserve, format!("reserve-invalid-{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+    }
+    assert_eq!(fixture.minter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.resolves.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn descriptor_changes_reject_initialization_before_any_backend_access() {
     let fixture = Fixture::new().await;

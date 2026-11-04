@@ -34,6 +34,7 @@ use std::{
     time::Duration,
 };
 use tonic::Status;
+mod watch_gate;
 #[derive(Debug)]
 struct Driver {
     inner: DbCredstoreCredentialDriver,
@@ -69,6 +70,7 @@ pub struct Issuer {
     pub watched: WatchedIssuer,
     pub resolves: Arc<AtomicUsize>,
     pub fail_resolves: Arc<AtomicBool>,
+    pub hold_secret_watch: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     _directory: tempfile::TempDir,
 }
@@ -144,9 +146,14 @@ impl Issuer {
             })
             .buffer_unordered(16)
             .filter_map(|socket| async { socket.map(Ok::<_, std::io::Error>) });
+        let hold_secret_watch = Arc::new(AtomicBool::new(false));
+        let gated_store = watch_gate::Store {
+            inner: store,
+            hold: hold_secret_watch.clone(),
+        };
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(store.into_service())
+                .add_service(gated_store.into_service())
                 .add_service(refresh.into_service())
                 .serve_with_incoming(Box::pin(incoming))
                 .await
@@ -188,6 +195,7 @@ impl Issuer {
             watched,
             resolves,
             fail_resolves,
+            hold_secret_watch,
             task,
             _directory: directory,
         }

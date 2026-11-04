@@ -140,28 +140,30 @@ impl Intent {
         }
         let keys = self.state.references.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            let identity = self.state.identity();
-            let id = reservation_key(identity, &self.state.operation, &key)?;
-            // Also recover a reservation whose acknowledgement was lost before
-            // bind. Reusing its secret-free receipt never allocates a new value.
-            let reserved = source
-                .client
-                .reserve_secret(wire::ReserveSecretRequest {
-                    owner: Some(owner(identity, &key)?),
-                    idempotency_key: format!("internal-reserve:{id}"),
-                })
-                .await?;
-            let slot = self.state.references.get_mut(&key).ok_or_else(invalid)?;
-            if slot.as_ref().is_some_and(|old| old != &reserved.reference) {
-                return Err(Status::data_loss(
-                    "internal reservation identity changed during recovery",
-                ));
-            }
-            if slot.is_none() {
-                *slot = Some(reserved.reference.clone());
+            // A durable bound reference is the immutable cleanup identity.
+            // Re-reserving it after restart would require spare watch capacity
+            // because the new client has not observed the allocation receipt.
+            let reference = if let Some(reference) = &self.state.references[&key] {
+                reference.clone()
+            } else {
+                let identity = self.state.identity();
+                let id = reservation_key(identity, &self.state.operation, &key)?;
+                // Only an unknown acknowledgement needs value-free discovery.
+                // Persist that identity before deletion so later retries can
+                // also clean up without allocating or replaying a reservation.
+                let reserved = source
+                    .client
+                    .reserve_secret(wire::ReserveSecretRequest {
+                        owner: Some(owner(identity, &key)?),
+                        idempotency_key: format!("internal-reserve:{id}"),
+                    })
+                    .await?;
+                *self.state.references.get_mut(&key).ok_or_else(invalid)? =
+                    Some(reserved.reference.clone());
                 self.persist().await?;
-            }
-            let handle = source.reference_handle(&reserved.reference, None)?;
+                reserved.reference
+            };
+            let handle = source.reference_handle(&reference, None)?;
             source
                 .delete_internal(self.state.identity(), &HashMap::from([(key, handle)]))
                 .await?;

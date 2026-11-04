@@ -6,6 +6,7 @@ use crate::credential_source::{
     tests::issuer::Issuer,
 };
 use std::sync::{Arc, atomic::Ordering};
+mod protections;
 fn request_provider(value: &str, version: u64) -> Provider {
     Provider {
         metadata: Some(openshell_core::proto::ObjectMeta {

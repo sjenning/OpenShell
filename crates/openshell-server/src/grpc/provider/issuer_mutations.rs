@@ -5,7 +5,10 @@ mod configuration;
 mod custom;
 mod refresh;
 use crate::{
-    credential_source::{RemoteProviderSource, handoff::StaticHandoff},
+    credential_source::{
+        RemoteProviderSource,
+        handoff::{ExpirationIntent, StaticHandoff},
+    },
     persistence::{AtomicWrite, Store},
 };
 pub(super) use configuration::{Configuration, configure};
@@ -16,6 +19,7 @@ pub(super) use refresh::delete_refresh;
 pub(super) use refresh::rotate;
 use std::collections::HashMap;
 use tonic::Status;
+
 pub(super) async fn stage(
     store: &Store,
     source: &RemoteProviderSource,
@@ -60,6 +64,22 @@ pub(super) async fn publish(
     expected: Option<u64>,
     handoff: Option<&mut StaticHandoff>,
 ) -> Result<u64, Status> {
+    // Keep the optional intent path out of every configure/rotate caller's
+    // stack-resident future, including mutation replay's dispatch enum.
+    Box::pin(publish_with_expiration_intent(
+        store, source, candidate, existing, expected, handoff, None,
+    ))
+    .await
+}
+pub(super) async fn publish_with_expiration_intent(
+    store: &Store,
+    source: &RemoteProviderSource,
+    candidate: &Provider,
+    existing: Option<&Provider>,
+    expected: Option<u64>,
+    handoff: Option<&mut StaticHandoff>,
+    expiration_intent: Option<&ExpirationIntent>,
+) -> Result<u64, Status> {
     let owned = if let Some(existing) = existing {
         StaticHandoff::published_for_provider(store, source, existing).await?
     } else {
@@ -85,10 +105,24 @@ pub(super) async fn publish(
             },
         );
         handoff
-            .publish_replacing(store, source, write, &owned)
+            .publish_replacing_with_expiration_intent(
+                store,
+                source,
+                write,
+                &owned,
+                expiration_intent,
+            )
             .await?;
     } else if let Some(expected) = expected {
-        StaticHandoff::update_preserving(store, source, candidate, expected, &owned).await?;
+        StaticHandoff::update_preserving_with_expiration_intent(
+            store,
+            source,
+            candidate,
+            expected,
+            &owned,
+            expiration_intent,
+        )
+        .await?;
     } else {
         store
             .write_atomically(&[AtomicWrite::CreateLabeled {

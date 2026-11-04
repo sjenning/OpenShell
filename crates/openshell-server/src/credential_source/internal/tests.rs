@@ -10,12 +10,16 @@ use crate::{
 };
 use openshell_core::proto::{CredentialHandle, ObjectMeta, Sandbox};
 use openshell_credential_issuer::SecretOwnerKind;
+use openshell_credential_issuer::remote_issuer::WatchedIssuer;
 use prost::Message as _;
 use std::{
     collections::HashMap,
     sync::{Arc, atomic::Ordering},
 };
 use tonic::{Code, Status};
+
+#[path = "recovery_capacity_tests.rs"]
+mod recovery_capacity;
 
 struct Fixture {
     issuer: Issuer,
@@ -214,20 +218,24 @@ async fn lost_reservation_ack_is_recovered_and_stale_bind_cannot_fill() {
         .unwrap();
     let key = intent::reservation_key(identity(), "lost", SSH_KEY).unwrap();
     let reserved = fixture
-        .source
-        .client
+        .issuer
+        .raw
         .reserve_secret(wire::ReserveSecretRequest {
             owner: Some(owner(identity(), SSH_KEY).unwrap()),
             idempotency_key: format!("internal-reserve:{key}"),
         })
         .await
         .unwrap();
-    let page = fixture
-        .source
+    // Neither the journal nor this restarted watch client knows the response.
+    let restarted =
+        RemoteProviderSource::new("primary", WatchedIssuer::new(fixture.issuer.raw.clone()))
+            .unwrap()
+            .with_gateway_store(fixture.store.clone());
+    let page = restarted
         .recover_internal_page(None, 32, i64::MAX)
         .await
         .unwrap();
-    assert_eq!(page.cleaned, 1);
+    assert_eq!((page.cleaned, page.failures), (1, 0));
     assert_eq!(
         intent
             .bind(SSH_KEY, &reserved.reference)

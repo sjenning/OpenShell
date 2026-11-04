@@ -65,6 +65,7 @@ fn response(reference: &str, value: &str) -> store::ResolveSecretsResponse {
         }],
     }
 }
+mod controllers;
 mod lifecycle;
 mod mutations;
 mod reconciliation;

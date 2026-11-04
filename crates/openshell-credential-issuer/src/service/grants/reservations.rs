@@ -122,7 +122,7 @@ impl GrantRuntime {
             != intent.outputs.keys().collect::<BTreeSet<_>>()
             || intent.outputs.values().any(|key| {
                 key.is_empty()
-                    || key.len() > 128
+                    || key.len() > 256
                     || key.trim() != key
                     || key.chars().any(char::is_control)
             })

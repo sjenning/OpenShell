@@ -2,13 +2,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Execute the release action's actual shell with a fake OCI client. Verify all
-# chart identities, metadata, SHA-pinning, immutable reruns, and partial failures
-# without any registry write. Run from a source checkout with Helm and yq.
+# image workflow permissions, chart identities, metadata, SHA-pinning, immutable
+# reruns, and partial failures without registry writes. Requires Helm and yq.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${ROOT}"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
+images=.github/workflows/build-images.yml
+# Same-run artifact downloads use the Actions runtime artifact service, not a
+# GITHUB_TOKEN-authenticated cross-run API request. Keep that contract explicit
+# so the issuer smoke job needs no new permission from existing callers.
+yq e -e '.jobs."smoke-credential-issuer".needs == "credential-issuer"' "${images}" >/dev/null
+yq e -e '.jobs."smoke-credential-issuer".steps[] | select(.name == "Download candidate image archive") |
+  ((.uses | test("^actions/download-artifact@")) and
+  (.with.name == "image-credential-issuer") and (.with.path == "artifacts") and
+  (.with.github-token == null) and (.with.run-id == null) and (.with.repository == null))' "${images}" >/dev/null
+for caller in branch-e2e release-dev release-build; do
+  yq e -o=json -I=0 '.jobs[] | select(.uses == "./.github/workflows/build-images.yml") | .permissions' \
+    ".github/workflows/${caller}.yml" >"${work}/caller-permissions.json"
+  [[ "$(wc -l <"${work}/caller-permissions.json" | tr -d ' ')" == 1 ]]
+  # Check every explicit workflow/job request, not only the new smoke job.
+  while IFS=$'\t' read -r permission requested; do
+    granted="$(PERMISSION="${permission}" yq e -r '.[strenv(PERMISSION)] // "none"' "${work}/caller-permissions.json")"
+    case "${requested}:${granted}" in
+      none:*|read:read|read:write|write:write) ;;
+      *) echo "FAIL: build-images requests ${permission}:${requested}, but ${caller} grants ${granted}" >&2; exit 1 ;;
+    esac
+  done < <(yq e -r '[.permissions, .jobs[].permissions] | .[] | select(. != null) | to_entries | .[] | [.key, .value] | @tsv' "${images}")
+done
 action=.github/actions/release-helm-oci/action.yml
 export RUNNER_TEMP="${work}/runner" GITHUB_OUTPUT="${work}/outputs"
 export CHART_VERSION=1.2.3 APP_VERSION=1.2.3 PIN_SHA=0123456789abcdef0123456789abcdef01234567
@@ -74,4 +96,4 @@ for chart in helm-chart openshell-workspace openshell-credential-issuer; do
   test -f "${archive}"
   [[ "$("${REAL_HELM}" show chart "${archive}" | yq e '.appVersion')" == "${PIN_SHA}" ]]
 done
-echo 'issuer release chart packaging, immutable rerun/partial failure guards, and SHA-pinned publication passed (no registry writes)'
+echo 'issuer image workflow permissions, release chart packaging, immutable rerun/partial failure guards, and SHA-pinned publication passed (no registry writes)'

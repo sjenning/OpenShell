@@ -268,3 +268,38 @@ fn legacy_schedule_retains_full_protobuf_range_beyond_native_and_u32_limits() {
     });
     assert!(plan(&state, descriptor, Strategy::Oauth2RefreshToken).is_err());
 }
+
+#[test]
+fn token_uri_normalization_retains_only_the_profile_endpoint_authority() {
+    let mut state = legacy();
+    state.token_url = "https://profile.invalid/token".into();
+    state.secret_material_keys.push("token_uri".into());
+    let registry = openshell_credential_issuer::builtins::registry();
+    let descriptor = registry
+        .describe()
+        .find(|descriptor| descriptor.name == "oauth2_refresh_token")
+        .unwrap();
+    for alias in ["", " \t\r\n"] {
+        let (config, secrets) = project_material(
+            &state,
+            descriptor,
+            HashMap::from([("token_uri".into(), alias.into())]),
+            3600,
+        )
+        .unwrap();
+        assert_eq!(config["token_url"], state.token_url);
+        assert!(!config.contains_key("token_uri"));
+        assert!(!secrets.contains_key("token_uri"));
+    }
+    for alias in [state.token_url.as_str(), " https://attacker.invalid/token "] {
+        assert!(
+            project_material(
+                &state,
+                descriptor,
+                HashMap::from([("token_uri".into(), alias.into())]),
+                3600,
+            )
+            .is_err()
+        );
+    }
+}

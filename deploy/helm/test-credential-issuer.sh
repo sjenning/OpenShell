@@ -54,6 +54,17 @@ reject --set config.database_url=postgresql://do-not-inline
 reject --set service.type=LoadBalancer
 reject --set-json 'registrationSecrets=[{"name":"../escape","secretName":"identity"}]'
 reject --set-json 'registrationSecrets=[{"name":"same","secretName":"a"},{"name":"same","secretName":"b"}]'
+# The registration- prefix consumes 13 of Kubernetes' 63 volume-name characters.
+# Reject both the first invalid length and the previously accepted DNS maximum.
+registration_name="$(printf 'r%049d' 0)"
+reject --set-string "registrationSecrets[0].name=${registration_name}x" --set 'registrationSecrets[0].secretName=identity'
+reject --set-string "registrationSecrets[0].name=${registration_name}1234567890123" --set 'registrationSecrets[0].secretName=identity'
+render --set-string "registrationSecrets[0].name=${registration_name}" --set 'registrationSecrets[0].secretName=identity' >"${work}/render.yaml"
+export REGISTRATION_NAME="${registration_name}"
+expect 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == ("registration-" + strenv(REGISTRATION_NAME))) | .name | length == 63'
+expect 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == ("registration-" + strenv(REGISTRATION_NAME))) | .secret.secretName == "identity"'
+expect 'select(.kind == "Deployment") | .spec.template.spec.containers[0].volumeMounts[] | select(.name == ("registration-" + strenv(REGISTRATION_NAME))) | .mountPath == ("/etc/openshell-issuer/registrations/" + strenv(REGISTRATION_NAME))'
+expect 'select(.kind == "Deployment") | .spec.template.spec.containers[0].volumeMounts[] | select(.name == ("registration-" + strenv(REGISTRATION_NAME))) | .readOnly'
 render --set replicaCount=3 >"${work}/render.yaml"
 expect 'select(.kind == "Deployment") | .spec.replicas == 3 and .spec.strategy.type == "RollingUpdate"'
 render --set database.kind=sqlite --set database.existingClaim=issuer-data >"${work}/render.yaml"

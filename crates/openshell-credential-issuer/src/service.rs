@@ -35,6 +35,10 @@ mod watch;
 
 const MESSAGE_LIMIT: usize = 1024 * 1024;
 const BATCH_LIMIT: usize = 64;
+// Preserve parallel backend reads without allowing each admitted batch to fan
+// out an unbounded number of requests. The batch read semaphore bounds the
+// number of independently admitted groups as well.
+const RESOLVE_CONCURRENCY: usize = 16;
 const VALUE_PURPOSE: &str = "provider-value-v1";
 const IDEMPOTENCY_KIND: &str = "secret-idempotency-v1";
 const CANDIDATE_KIND: &str = "secret-candidate-v1";
@@ -245,6 +249,7 @@ impl Runtime {
         scope: &GatewayScope,
         request: wire::ResolveSecretsRequest,
     ) -> Result<wire::ResolveSecretsResponse, Status> {
+        use futures::{StreamExt as _, TryStreamExt as _};
         let purpose = wire::ResolvePurpose::try_from(request.purpose)
             .map_err(|_| Status::invalid_argument("invalid issuer resolution purpose"))?;
         if purpose == wire::ResolvePurpose::Unspecified
@@ -298,35 +303,41 @@ impl Runtime {
             }
             snapshots.push((item, state));
         }
-        let mut values = Vec::with_capacity(snapshots.len());
-        for (item, state) in &snapshots {
-            let (value, expiration) = if purpose == wire::ResolvePurpose::MetadataInspection {
-                (String::new(), state.expiration_time_ms)
-            } else {
-                unexpired(state.expiration_time_ms, now_ms()?)?;
-                let resolved = self
-                    .storage
-                    .resolve(scope, &state.owner, VALUE_PURPOSE, &state.backing)
-                    .await?;
-                let expiration = match (state.expiration_time_ms, resolved.expiration_time_ms) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
+        // Complete authorization above before polling any backend future. Keep
+        // response ordering and all-or-nothing errors, then recheck every value
+        // version/expiry below after even the slowest sibling has completed.
+        let mut values: Vec<_> = futures::stream::iter(snapshots.iter().cloned())
+            .map(|(item, state)| async move {
+                let (value, expiration) = if purpose == wire::ResolvePurpose::MetadataInspection {
+                    (String::new(), state.expiration_time_ms)
+                } else {
+                    unexpired(state.expiration_time_ms, now_ms()?)?;
+                    let resolved = self
+                        .storage
+                        .resolve(scope, &state.owner, VALUE_PURPOSE, &state.backing)
+                        .await?;
+                    let expiration = match (state.expiration_time_ms, resolved.expiration_time_ms) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    unexpired(expiration, now_ms()?)?;
+                    (resolved.value, expiration)
                 };
-                unexpired(expiration, now_ms()?)?;
-                (resolved.value, expiration)
-            };
-            values.push(wire::ResolvedSecret {
-                request_id: item.request_id.clone(),
-                value,
-                version: state.version,
-                expiration_time: expiration
-                    .map(openshell_core::time::timestamp_from_millis)
-                    .transpose()
-                    .map_err(|_| Status::data_loss("invalid issuer expiration metadata"))?,
-                cache_ttl: None,
-                pending_value: state.pending_value,
-            });
-        }
+                Ok::<_, Status>(wire::ResolvedSecret {
+                    request_id: item.request_id.clone(),
+                    value,
+                    version: state.version,
+                    expiration_time: expiration
+                        .map(openshell_core::time::timestamp_from_millis)
+                        .transpose()
+                        .map_err(|_| Status::data_loss("invalid issuer expiration metadata"))?,
+                    cache_ttl: None,
+                    pending_value: state.pending_value,
+                })
+            })
+            .buffered(RESOLVE_CONCURRENCY)
+            .try_collect()
+            .await?;
         for (item, state) in &snapshots {
             let live = refs
                 .load(&item.reference)

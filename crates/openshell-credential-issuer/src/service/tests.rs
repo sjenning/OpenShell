@@ -18,6 +18,7 @@ use std::{
 use tonic::Code;
 use wire::credential_store_server::CredentialStore as _;
 
+mod batch_resolution;
 mod cleanup;
 pub(super) mod mtls;
 mod postgres;

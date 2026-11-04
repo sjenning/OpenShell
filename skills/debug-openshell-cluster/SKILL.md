@@ -107,6 +107,9 @@ the complete `issuer.toml` (including SQL credentials), `tls.crt`, `tls.key`,
 read-only source mounts. The `prepare-key` init container checks the shared KEK
 is 32 bytes and copies it to a UID-owned `0600` memory-backed file because the
 encrypted-store loader chmods the key; a projected Secret cannot be used directly.
+Each `registrationSecrets[].name` must be a lowercase DNS label of at most 50
+characters, leaving room for the `registration-` volume prefix; the referenced
+`secretName` is separate and does not need to match that mount alias.
 A failing `check-config` init container indicates invalid TOML
 or identity/workspace declarations; runtime startup additionally validates keys,
 backend connectivity, and minter discovery. Keep TOML `replicas` equal to Helm

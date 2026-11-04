@@ -371,7 +371,14 @@ after confirmed issuer revocation, retaining active siblings and their original
 operation IDs. Recovery processes these explicit flags, not parent absence.
 `update_preserving` supports metadata-only changes and key removal without issuer
 value reads. It rejects reference injection and expiration changes to retained
-credentials; changing issuer-owned expiration currently requires a new value.
+issuer-owned credentials. Retained static legacy version-one references still
+accept provider-authored expiration edits and clears, with a value-free issuer
+version check repeated before publication. Version-one projection preserves the
+minimum of provider and issuer deadlines; later issuer versions supersede these
+legacy fields. Explicit retained-expiration requests authenticate fresh issuer
+metadata even for spec no-ops, and carry those exact versions to publication.
+Ordinary provider updates cannot replace or remove any configured
+grant output, including a complete bundle; use the explicit refresh operations.
 Publication derives the label
 index from the validated provider payload; payload, labels, and journal commit
 or roll back together, including clearing removed labels. The issuer's independent

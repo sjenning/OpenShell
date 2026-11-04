@@ -398,6 +398,15 @@ fn project_material(
         ) {
             continue;
         }
+        // Configure accepted this endpoint alias only when blank. The typed
+        // profile endpoint remains authoritative, including for protected
+        // legacy material. Never normalize a nonempty override into authority.
+        if key == "token_uri" {
+            if !value.trim().is_empty() {
+                return Err(invalid("legacy token endpoint override is not permitted"));
+            }
+            continue;
+        }
         // Legacy secret_material_keys selected protected physical storage, not
         // a minter's argument category. Both issuer categories are encrypted;
         // the pinned descriptor determines which category receives each field.

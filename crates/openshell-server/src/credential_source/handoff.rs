@@ -17,6 +17,7 @@ mod partial;
 pub use grants::GrantPlan;
 pub(crate) use grants::LegacyGrantSchedule;
 pub(crate) use grants::publication::PublishedGrant;
+pub(crate) use partial::ExpirationIntent;
 mod recovery;
 mod retirement;
 pub use recovery::{HandoffPage, HandoffReconciler, RecoveryPage};
@@ -413,6 +414,17 @@ impl StaticHandoff {
         provider_write: AtomicWrite,
         retiring: &[Self],
     ) -> Result<(), Status> {
+        self.publish_replacing_with_expiration_intent(store, source, provider_write, retiring, None)
+            .await
+    }
+    pub(crate) async fn publish_replacing_with_expiration_intent(
+        &mut self,
+        store: &Store,
+        source: &RemoteProviderSource,
+        provider_write: AtomicWrite,
+        retiring: &[Self],
+        expiration_intent: Option<&ExpirationIntent>,
+    ) -> Result<(), Status> {
         self.source(source)?;
         if self.state.phase != Phase::Ready {
             return Err(invalid());
@@ -450,6 +462,7 @@ impl StaticHandoff {
         {
             return Err(invalid());
         }
+        let mut retained_expiration_provider = None;
         let mut writes = if let Some(expected) = expected {
             let row = store
                 .get("provider", &self.state.provider_id)
@@ -469,20 +482,15 @@ impl StaticHandoff {
             // New bindings come only from this handoff; all other bindings
             // must preserve an exact, non-retiring old immutable reference.
             for (key, handle) in &provider.credential_handles {
-                if !self.state.slots.contains_key(key) {
-                    if old.credential_handles.get(key) != Some(handle) {
-                        return Err(invalid());
-                    }
-                    if old.credential_expiration_times.get(key)
-                        != provider.credential_expiration_times.get(key)
-                    {
-                        return Err(Status::failed_precondition(
-                            "retained issuer credential expiration requires a new credential value",
-                        ));
-                    }
+                if !self.state.slots.contains_key(key)
+                    && old.credential_handles.get(key) != Some(handle)
+                {
+                    return Err(invalid());
                 }
             }
-            retirement::claims(source, &old, Some(&provider), retiring)?
+            let writes = retirement::claims(source, &old, Some(&provider), retiring)?;
+            retained_expiration_provider = Some(old);
+            writes
         } else {
             if !retiring.is_empty() || provider.credential_handles.len() != self.state.slots.len() {
                 return Err(invalid());
@@ -577,6 +585,13 @@ impl StaticHandoff {
             payload: encode(&published)?,
             expected_version: self.revision,
         });
+        if let Some(old) = retained_expiration_provider {
+            Self::check_retained_expirations(source, &old, &provider, self.state.slots.keys())
+                .await?;
+        }
+        if let Some(intent) = expiration_intent {
+            intent.check(source, &provider).await?;
+        }
         store.write_atomically(&writes).await.map_err(storage)?;
         self.state = published;
         self.revision = self.revision.checked_add(1).ok_or_else(invalid)?;

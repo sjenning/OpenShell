@@ -307,8 +307,10 @@ for multi-output bundles and checking every output key before allocation.
 `spawn_maintenance()` to retry owned cleanup. Every RPC authenticates its TLS
 peer; value access additionally checks workspace, durable creator, and immutable
 owner. All batch members pass authorization before any backend value read.
-Resolution captures versions, resolves immutable backings, then rechecks the
-whole snapshot. No partial result escapes a failed sibling or version fence.
+Resolution captures versions, resolves immutable backings with at most 16
+concurrent backend reads per batch, then rechecks the whole snapshot. The separate
+16-batch admission limit bounds aggregate read fanout. Response order follows the
+request; no partial result escapes a failed sibling or version fence.
 
 Put/delete use bounded, detached coordination plus PostgreSQL leases, durable
 idempotency receipts, and atomic reference/event publication. Reusing a key with
@@ -479,7 +481,12 @@ before waiting for synchronization. `wait_synchronized` also requires reconciled
 tracked metadata; a checkpoint by itself is insufficient. Inspection never reads
 backend values.
 A failed batch is inspected individually so one missing binding cannot revoke
-unrelated siblings.
+unrelated siblings. Each controller keeps consuming watch events while one
+metadata reconciliation pass runs. Heartbeats coalesce another pass rather than
+canceling the current RPC; a changed metadata epoch stops obsolete work at the
+next RPC boundary. The continuous watch read retains its fifteen-second stall
+watchdog, and resets cancel only that stream's old reconciliation. Replayed
+events cannot restore watch health before the first checkpoint.
 
 Both watches must be healthy before any cached value is usable. Breaks, resets,
 and stalled/malformed streams discard cached values, invalidate affected local

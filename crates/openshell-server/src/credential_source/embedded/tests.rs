@@ -8,10 +8,14 @@ use openshell_core::{
 };
 use std::collections::HashMap;
 
+#[path = "legacy_contract_tests.rs"]
+mod legacy_contract;
+
 struct Fixture {
     directory: tempfile::TempDir,
     database: String,
     gateway: Arc<Store>,
+    repository: Arc<Repository>,
     legacy: CredentialRuntime,
     crypto: toml::Table,
 }
@@ -37,10 +41,14 @@ impl Fixture {
                     .into_owned(),
             ),
         )]);
+        // Opening a repository initializes its schema with writes. Retain an
+        // inspection handle before any hosted maintenance worker can start.
+        let repository = Repository::open(&database).await.unwrap();
         Self {
             directory,
             database,
             gateway,
+            repository,
             legacy,
             crypto,
         }
@@ -373,9 +381,9 @@ async fn assert_migrated_schedule(
     lead: i64,
     lifetime: i64,
 ) {
-    let repository = Repository::open(&fixture.database).await.unwrap();
     let scope = issuer.store.embedded_scope().unwrap();
-    let state = repository
+    let state = fixture
+        .repository
         .grants(&scope)
         .load(id)
         .await

@@ -37,7 +37,8 @@ impl GrantPlan {
             && self.outputs.values().any(|key| key == &self.credential_key)
             && self.outputs.values().all(|key| {
                 let mut bytes = key.bytes();
-                key.len() <= 128
+                // Match static handoff and legacy refresh environment keys.
+                key.len() <= 256
                     && bytes
                         .next()
                         .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
@@ -348,5 +349,44 @@ impl StaticHandoff {
             .await
             .map_err(storage)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn grant_output_keys_share_the_256_byte_environment_identifier_contract() {
+        let mut plan = GrantPlan {
+            credential_key: "TOKEN".into(),
+            strategy: "oauth2_refresh_token".into(),
+            outputs: BTreeMap::from([("access_token".into(), "TOKEN".into())]),
+            refresh_before_ms: 0,
+            max_lifetime_seconds: 3600,
+        };
+        for key in ["_".into(), "K".repeat(129), "K".repeat(256)] {
+            plan.credential_key = key.clone();
+            plan.outputs.insert("access_token".into(), key);
+            assert!(plan.valid());
+        }
+        for key in [
+            String::new(),
+            "K".repeat(257),
+            "1TOKEN".into(),
+            "TOKEN-NAME".into(),
+            "TOKEN NAME".into(),
+            "TOKEN\n".into(),
+            "TÖKEN".into(),
+        ] {
+            plan.credential_key = key.clone();
+            plan.outputs.insert("access_token".into(), key.clone());
+            assert!(!plan.valid(), "invalid primary key: {key:?}");
+            plan.credential_key = "TOKEN".into();
+            plan.outputs.insert("access_token".into(), "TOKEN".into());
+            plan.outputs.insert("secondary".into(), key.clone());
+            assert!(!plan.valid(), "invalid sibling key: {key:?}");
+            plan.outputs.remove("secondary");
+        }
     }
 }

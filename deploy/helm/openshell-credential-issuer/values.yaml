@@ -40,7 +40,7 @@ encryption:
   key: key
   # -- Pinned multi-arch BusyBox image for staging the read-only Secret as a UID-owned 0600 file required by the encrypted-store loader.
   initImage: busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
-# -- Existing Secrets mounted read-only below `/etc/openshell-issuer/registrations/<name>`. Use for minter CA/client identities and backend credentials.
+# -- Existing Secrets mounted read-only below `/etc/openshell-issuer/registrations/<name>`. Each name must be a DNS label of at most 50 characters, leaving room for the registration- volume prefix. Use for minter CA/client identities and backend credentials.
 registrationSecrets: []
 # Example (names only, never secret contents):
 # - name: company-minter-identity

@@ -96,11 +96,14 @@ database and KEK separately; losing the key makes recovery state unreadable.
 Register remote minters and first-party Vault/Kubernetes storage in the TOML
 using the [credential issuer reference](https://docs.nvidia.com/openshell/latest/extensibility/credential-issuer).
 Add each minter CA/client identity or backend token Secret to
-`registrationSecrets`; no secret contents go into values. The chart defaults to
-no API token or RBAC. If Kubernetes Secrets storage or Vault Kubernetes auth
-requires a token, enable `serviceAccount.automountServiceAccountToken` and grant
-only the backend-specific permissions to the dedicated ServiceAccount outside
-this chart. It has no permission to read gateway Secrets.
+`registrationSecrets`; no secret contents go into values. Each `name` must be a
+lowercase DNS label of at most 50 characters so the `registration-` volume name
+fits Kubernetes' 63-character limit. This limit does not shorten `secretName`.
+The chart defaults to no API token or RBAC. If Kubernetes Secrets storage or Vault
+Kubernetes auth requires a token, enable
+`serviceAccount.automountServiceAccountToken` and grant only the backend-specific
+permissions to the dedicated ServiceAccount outside this chart. It has no
+permission to read gateway Secrets.
 
 ## Upgrade and diagnose
 
@@ -175,7 +178,7 @@ Do not assume a version is published until its release jobs have succeeded.
 | networkPolicy.ingressFrom | list | `[]` | Kubernetes NetworkPolicyPeer entries for authorized gateway namespaces/pods or routed private CIDRs. mTLS and workspace authorization still apply. |
 | nodeSelector | object | `{}` | Node selection. |
 | podAnnotations | object | `{}` | Pod annotations (never include secret values). |
-| registrationSecrets | list | `[]` | Existing Secrets mounted read-only below `/etc/openshell-issuer/registrations/<name>`. Use for minter CA/client identities and backend credentials. |
+| registrationSecrets | list | `[]` | Existing Secrets mounted read-only below `/etc/openshell-issuer/registrations/<name>`. Each name must be a DNS label of at most 50 characters, leaving room for the registration- volume prefix. Use for minter CA/client identities and backend credentials. |
 | replicaCount | int | `1` | Issuer replicas; values above one require database.kind=postgresql. |
 | resources | object | `{"limits":{"memory":"1Gi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Resources for the issuer. |
 | serviceAccount.annotations | object | `{}` | ServiceAccount annotations. |

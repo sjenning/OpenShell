@@ -80,7 +80,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     permissions:
-      actions: read
       contents: read
       packages: read
     strategy:
@@ -102,6 +101,8 @@ jobs:
           prepare-shell: "true"
 
       - name: Download candidate image archive
+        # Same-run downloads use the artifact service, not GITHUB_TOKEN, so
+        # this job must not require actions:read from reusable-workflow callers.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: image-credential-issuer

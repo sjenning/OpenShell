@@ -63,6 +63,7 @@ fn owner() -> SecretOwner {
         workspace: "workspace".into(),
         provider_id: "provider-id".into(),
         credential_key: "API_KEY".into(),
+        ..Default::default()
     }
 }
 
@@ -333,3 +334,5 @@ async fn replacements_require_immutable_fresh_handles_and_do_not_wrap_versions()
         Code::ResourceExhausted
     );
 }
+
+mod owner_kinds;

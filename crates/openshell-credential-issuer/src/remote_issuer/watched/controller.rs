@@ -173,7 +173,10 @@ pub(super) fn grant_event(
     {
         entry.version = event.version;
         entry.metadata = None;
-        entry.gone |= event.deleted;
+        // An earlier authenticated NOT_FOUND may precede trusted embedded
+        // import activation. Its nonterminal absence is superseded by a real
+        // creation event; explicit deletion/detachment remains irreversible.
+        entry.gone = entry.terminal || event.deleted;
         entry.terminal |= event.deleted;
     }
     drop(state);

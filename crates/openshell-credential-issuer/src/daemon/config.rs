@@ -22,6 +22,10 @@ pub(super) struct OpenShell {
 #[serde(deny_unknown_fields)]
 pub(super) struct Issuer {
     pub listen: SocketAddr,
+    /// Optional plaintext Prometheus listener. Prefer loopback (127.0.0.1:9091)
+    /// or an explicitly isolated monitoring network; disabled when omitted.
+    #[serde(default)]
+    pub metrics_bind_address: Option<SocketAddr>,
     pub database_url: String,
     #[serde(default = "one")]
     pub replicas: u32,
@@ -41,9 +45,9 @@ pub(super) struct Issuer {
     #[serde(default)]
     pub minters: BTreeMap<String, Minter>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Minter {
+pub struct Minter {
     pub endpoint: String,
     pub tls_ca_cert_path: PathBuf,
     pub tls_client_cert_path: Option<PathBuf>,
@@ -108,6 +112,9 @@ impl Config {
             }
         }
         if config.cache_ttl_seconds > 60
+            || config
+                .metrics_bind_address
+                .is_some_and(|address| address.port() == 0 || address == config.listen)
             || !(1..=3600).contains(&config.refresh_interval_seconds)
             || !(1..=300).contains(&config.shutdown_timeout_seconds)
             || config.minters.len() > 60
@@ -156,7 +163,7 @@ impl Config {
     }
 }
 impl Minter {
-    pub(super) fn identity(&self) -> Result<ExtensionClientIdentity, Status> {
+    pub fn identity(&self) -> Result<ExtensionClientIdentity, Status> {
         match (
             &self.tls_client_cert_path,
             &self.tls_client_key_path,
@@ -196,3 +203,9 @@ impl std::fmt::Debug for Config {
 }
 #[cfg(test)]
 mod tests;
+
+impl std::fmt::Debug for Minter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MinterConfig(<redacted>)")
+    }
+}

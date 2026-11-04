@@ -210,16 +210,19 @@ expect_status 0 "scan selected profiles and retain distinct packaged chart versi
   env TRIVY_REPORT_DIR="${TMP_DIR}/scan-reports" "${SCANNER}" config \
   --chart-ref oci://registry-a.example/charts/helm-chart:1.0.0 \
   --chart-ref oci://registry-a.example/charts/helm-chart:1.1.0 \
-  --chart-ref oci://registry-b.example/charts/helm-chart:1.0.0
+  --chart-ref oci://registry-b.example/charts/helm-chart:1.0.0 \
+  --chart-ref oci://registry-a.example/charts/openshell-credential-issuer:1.0.0
 jq -se '
-  length == 19
+  length == 21
   and ([.[] | select(.[-1] == "deploy")] | length) == 1
   and ([.[] | select(.[-1] == "deploy/helm")] | length) == 1
   and ([.[] | select(.[-1] == "deploy/helm/openshell")] | length) == 14
+  and ([.[] | select(.[-1] == "deploy/helm/openshell-credential-issuer")] | length) == 1
+  and ([.[] | select(index("deploy/helm/openshell-credential-issuer/ci/values-test.yaml") != null)] | length) == 2
   and all(.[]; (join(" ") | contains("values-spire-stack.yaml")) | not)
   and all(.[]; index("UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL") != null)
 ' "${TRIVY_TEST_CALLS}" >/dev/null
-jq -se 'length == 3' "${TMP_DIR}/scan-reports/"config-packaged-*.json >/dev/null
+jq -se 'length == 4' "${TMP_DIR}/scan-reports/"config-packaged-*.json >/dev/null
 test -z "$(find "${TMP_DIR}/scan-reports" -name '*.sarif' -print -quit)"
 
 expect_status 0 "retain image registry, path and platform identity" \

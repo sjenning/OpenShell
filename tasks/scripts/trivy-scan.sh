@@ -108,7 +108,18 @@ scan() {
 scan_config() {
   scan config config-static deploy/ "${SKIP_DOCKERFILES[@]}" \
     --skip-dirs deploy/helm deploy
-  scan config config-defaults deploy/helm/ "${PREFLIGHT_OFF[@]}" deploy/helm
+  # The issuer intentionally requires pre-existing Secret references, so its
+  # defaults cannot render. Scan it separately using names-only test values.
+  scan config config-defaults deploy/helm/ "${PREFLIGHT_OFF[@]}" \
+    --skip-dirs deploy/helm/openshell-credential-issuer deploy/helm
+  local issuer_values=deploy/helm/openshell-credential-issuer/ci/values-test.yaml
+  if [ -f "${issuer_values}" ]; then
+    scan config config-credential-issuer deploy/helm/openshell-credential-issuer/ \
+      --helm-values "${issuer_values}" deploy/helm/openshell-credential-issuer
+  elif [ "${SOURCE_ROOT}" = "${REPO_ROOT}" ]; then
+    echo "Error: issuer Helm scan fixture not found: ${issuer_values}" >&2
+    return 2
+  fi
 
   local values fixture
   for fixture in "${HELM_PROFILES[@]}"; do
@@ -159,8 +170,12 @@ scan_packaged_chart() {
   trap 'rm -rf "${dir}"' RETURN
 
   helm pull "${repo}" --version "${ref##*:}" --destination "${dir}"
+  local helm_args=("${PREFLIGHT_OFF[@]}")
+  if [ "${chart_name}" = openshell-credential-issuer ]; then
+    helm_args=(--helm-values deploy/helm/openshell-credential-issuer/ci/values-test.yaml)
+  fi
   scan config "config-packaged-$(artifact_slug "${ref}")" "${chart_dir}" \
-    "${PREFLIGHT_OFF[@]}" "$(find "${dir}" -name '*.tgz' -print -quit)"
+    "${helm_args[@]}" "$(find "${dir}" -name '*.tgz' -print -quit)"
 }
 
 scan_images() {

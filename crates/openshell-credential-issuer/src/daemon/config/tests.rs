@@ -35,6 +35,33 @@ fn strict_configuration_has_no_secret_debug_or_parser_excerpts() {
     }
 }
 #[test]
+fn metrics_are_opt_in_and_require_a_distinct_nonzero_listen_address() {
+    let input = example();
+    assert!(
+        Config::parse(&input)
+            .unwrap()
+            .openshell
+            .credential_issuer
+            .metrics_bind_address
+            .is_none()
+    );
+    let enabled = input.replace(
+        "listen =",
+        "metrics_bind_address = \"127.0.0.1:9091\"\nlisten =",
+    );
+    assert_eq!(
+        Config::parse(&enabled)
+            .unwrap()
+            .openshell
+            .credential_issuer
+            .metrics_bind_address,
+        Some("127.0.0.1:9091".parse().unwrap())
+    );
+    for address in ["127.0.0.1:0", "127.0.0.1:8443", "invalid"] {
+        assert!(Config::parse(&enabled.replace("127.0.0.1:9091", address)).is_err());
+    }
+}
+#[test]
 fn durable_storage_replica_and_timing_requirements_fail_closed() {
     let input = example();
     for invalid in [

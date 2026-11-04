@@ -10,6 +10,7 @@ fn owner(key: &str) -> SecretOwner {
         workspace: "default".to_string(),
         provider_id: "provider-id".to_string(),
         credential_key: key.to_string(),
+        ..Default::default()
     }
 }
 fn grant_put(expected: Option<u64>, receipt: &str) -> Mutation {

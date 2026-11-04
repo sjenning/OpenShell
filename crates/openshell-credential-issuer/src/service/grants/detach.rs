@@ -119,6 +119,7 @@ impl GrantRuntime {
             state.next_refresh_at_ms = i64::MAX;
             state.recovery_action = None;
             state.failure_code.clear();
+            state.provider_error_subtype.clear();
             let (mutation, event) = self
                 .store
                 .repository
@@ -162,6 +163,9 @@ impl GrantRuntime {
             expected: 1,
         });
         store.commit(&mutations, &events).await?;
+        if events.iter().any(|event| event.kind == "grant") {
+            crate::observability::grant_transition(&scope, &state);
+        }
         Ok(response)
     }
 }

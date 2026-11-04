@@ -15,6 +15,7 @@ cat >"${TEST_TMP}/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${OPENSHELL_REPLAY_TEST_DATABASE_URL:-}" >"${POSTGRES_RUNNER_TEST_RESULT}"
+printf '%s\n' "${OPENSHELL_TEST_ISSUER_POSTGRES_URL:-}" >"${POSTGRES_RUNNER_TEST_RESULT}.issuer"
 printf '%s\n' "$@" >"${POSTGRES_RUNNER_TEST_ARGS}"
 EOF
 chmod +x "${TEST_TMP}/cargo"
@@ -37,10 +38,14 @@ expect_filter() {
 }
 
 for legacy_url in "" "postgres://stale.example/other"; do
-  run_runner OPENSHELL_REPLAY_TEST_DATABASE_URL="${legacy_url}" OPENSHELL_TEST_POSTGRES_PREFIX=
+  run_runner OPENSHELL_REPLAY_TEST_DATABASE_URL="${legacy_url}" OPENSHELL_TEST_ISSUER_POSTGRES_URL="postgres://stale.example/issuer" OPENSHELL_TEST_POSTGRES_PREFIX=
 
   if [ "$(cat "${TEST_TMP}/database-url")" != "postgres://selected.example/disposable" ]; then
     echo "FAIL: the PostgreSQL test runner did not use the selected database" >&2
+    exit 1
+  fi
+  if [ "$(cat "${TEST_TMP}/database-url.issuer")" != "postgres://selected.example/disposable" ]; then
+    echo "FAIL: issuer tests did not use the selected disposable database" >&2
     exit 1
   fi
   expect_filter postgres_

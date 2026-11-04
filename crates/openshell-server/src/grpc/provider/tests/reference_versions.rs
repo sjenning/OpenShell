@@ -228,6 +228,7 @@ async fn remote_subject_metadata_and_cache_hits_do_not_depend_on_available_value
         provider_id: provider.object_id().into(),
         credential_key: "SUBJECT_TOKEN".into(),
         provider: "display".into(),
+        ..Default::default()
     };
     let expiration = current_time_ms() + 60_000;
     let stored = issuer
@@ -347,6 +348,7 @@ async fn public_get_and_list_use_selected_remote_expiration_without_value_reads_
         provider_id: provider.object_id().into(),
         credential_key: "SUBJECT_TOKEN".into(),
         provider: "display".into(),
+        ..Default::default()
     };
     let stored = issuer
         .raw

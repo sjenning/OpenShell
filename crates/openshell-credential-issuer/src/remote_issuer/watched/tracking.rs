@@ -23,11 +23,12 @@ enum Reservation {
 }
 
 pub(super) fn owner(mut owner: store::SecretOwner) -> Result<store::SecretOwner, Status> {
-    if !validation::id(&owner.workspace)
-        || !validation::id(&owner.provider_id)
-        || !validation::id(&owner.credential_key)
-    {
-        return Err(Status::invalid_argument("invalid issuer reference binding"));
+    let canonical = crate::SecretOwner::from_wire(&owner)?;
+    if canonical.kind == crate::SecretOwnerKind::Provider {
+        // Normalize additive provider owners to the legacy representation so
+        // equivalent requests share reservation fingerprints and bindings.
+        owner.provider_id = canonical.provider_id;
+        owner.kind = None;
     }
     // Display names are audit-only and must not inflate retained bindings.
     owner.provider = String::new();

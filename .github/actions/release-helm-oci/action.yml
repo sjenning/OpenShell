@@ -3,7 +3,7 @@
 
 name: Release Helm OCI
 description: >
-  Patch chart version/appVersion, package the gateway and workspace charts, and
+  Patch chart version/appVersion, package the gateway, workspace, and issuer charts, and
   push them to GHCR OCI. Public releases never overwrite published versions.
 
 inputs:
@@ -53,17 +53,29 @@ runs:
         set -euo pipefail
         GATEWAY_CHART_DIR="${RUNNER_TEMP}/gateway-chart-build"
         WORKSPACE_CHART_DIR="${RUNNER_TEMP}/workspace-chart-build"
+        ISSUER_CHART_DIR="${RUNNER_TEMP}/issuer-chart-build"
+        cp -a deploy/helm/openshell-credential-issuer/. "${ISSUER_CHART_DIR}"
         cp -a deploy/helm/openshell/. "${GATEWAY_CHART_DIR}"
         cp -a deploy/helm/openshell-workspace/. "${WORKSPACE_CHART_DIR}"
-        for chart_dir in "${GATEWAY_CHART_DIR}" "${WORKSPACE_CHART_DIR}"; do
+        for chart_dir in "${GATEWAY_CHART_DIR}" "${WORKSPACE_CHART_DIR}" "${ISSUER_CHART_DIR}"; do
           sed -i "s/^version:.*/version: ${CHART_VERSION}/" "${chart_dir}/Chart.yaml"
           sed -i "s/^appVersion:.*/appVersion: \"${APP_VERSION}\"/" "${chart_dir}/Chart.yaml"
         done
         echo "gateway_chart_dir=${GATEWAY_CHART_DIR}" >> "$GITHUB_OUTPUT"
         echo "workspace_chart_dir=${WORKSPACE_CHART_DIR}" >> "$GITHUB_OUTPUT"
+        echo "issuer_chart_dir=${ISSUER_CHART_DIR}" >> "$GITHUB_OUTPUT"
         echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
 
-    # Public chart versions are never overwritten. A rerun keeps both published
+    - name: Validate issuer deployment chart
+      env:
+        ISSUER_CHART_DIR: ${{ steps.prep.outputs.issuer_chart_dir }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        helm lint "${ISSUER_CHART_DIR}" --strict -f "${ISSUER_CHART_DIR}/ci/values-test.yaml"
+        helm template issuer "${ISSUER_CHART_DIR}" -f "${ISSUER_CHART_DIR}/ci/values-test.yaml" >/dev/null
+
+    # Public chart versions are never overwritten. A rerun keeps all published
     # charts; a partial publication still fails for manual repair.
     - name: Check for published chart version
       id: published
@@ -74,7 +86,7 @@ runs:
       run: |
         set -euo pipefail
         found=0
-        for chart in helm-chart openshell-workspace; do
+        for chart in helm-chart openshell-workspace openshell-credential-issuer; do
           OCI_CHART="oci://ghcr.io/nvidia/openshell/${chart}"
           # Only "not found" means unpublished; any other lookup error fails
           # rather than risk overwriting.
@@ -85,11 +97,11 @@ runs:
             exit 1
           fi
         done
-        if [ "${found}" -eq 2 ]; then
+        if [ "${found}" -eq 3 ]; then
           echo "Charts ${CHART_VERSION} are already published; keeping them."
           echo "published=true" >> "$GITHUB_OUTPUT"
         elif [ "${found}" -ne 0 ]; then
-          echo "::error::Only one chart is published at ${CHART_VERSION}. Delete it or publish the other chart manually."
+          echo "::error::Only ${found} of three charts are published at ${CHART_VERSION}. Repair the partial publication manually."
           exit 1
         fi
 
@@ -98,12 +110,14 @@ runs:
       env:
         GATEWAY_CHART_DIR: ${{ steps.prep.outputs.gateway_chart_dir }}
         WORKSPACE_CHART_DIR: ${{ steps.prep.outputs.workspace_chart_dir }}
+        ISSUER_CHART_DIR: ${{ steps.prep.outputs.issuer_chart_dir }}
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p /tmp/helm-charts
         helm package "${GATEWAY_CHART_DIR}" --destination /tmp/helm-charts
         helm package "${WORKSPACE_CHART_DIR}" --destination /tmp/helm-charts
+        helm package "${ISSUER_CHART_DIR}" --destination /tmp/helm-charts
         ls /tmp/helm-charts/*.tgz
 
     - name: Push Helm chart to GHCR OCI
@@ -137,6 +151,7 @@ runs:
         PIN_SHA: ${{ inputs.pin-sha }}
         GATEWAY_CHART_DIR: ${{ steps.prep.outputs.gateway_chart_dir }}
         WORKSPACE_CHART_DIR: ${{ steps.prep.outputs.workspace_chart_dir }}
+        ISSUER_CHART_DIR: ${{ steps.prep.outputs.issuer_chart_dir }}
       shell: bash
       run: |
         set -euo pipefail
@@ -155,7 +170,7 @@ runs:
           return 1
         }
         mkdir -p /tmp/sha-pin
-        for source_dir in "${GATEWAY_CHART_DIR}" "${WORKSPACE_CHART_DIR}"; do
+        for source_dir in "${GATEWAY_CHART_DIR}" "${WORKSPACE_CHART_DIR}" "${ISSUER_CHART_DIR}"; do
           chart_name="$(basename "${source_dir}")"
           sha_chart_dir="${RUNNER_TEMP}/${chart_name}-sha"
           cp -a "${source_dir}/." "${sha_chart_dir}"

@@ -19,6 +19,7 @@ fn grant() -> GrantIdentity {
             workspace: "default".into(),
             provider_id: "provider".into(),
             credential_key: "TOKEN".into(),
+            ..Default::default()
         },
     }
 }

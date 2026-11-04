@@ -75,6 +75,12 @@ impl Runtime {
                 &event.into_iter().collect::<Vec<_>>(),
             )
             .await?;
+        crate::observability::audit_store_mutation(
+            crate::observability::Operation::ReserveSecret,
+            &scope,
+            &state.owner,
+            &reference,
+        );
         tracing::info!(
             gateway = scope.identity(),
             operation = "reserve",

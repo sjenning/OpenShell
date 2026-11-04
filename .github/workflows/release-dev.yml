@@ -183,7 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           REGISTRY="ghcr.io/nvidia/openshell"
-          for component in gateway sandbox supervisor; do
+          for component in gateway credential-issuer sandbox supervisor; do
             echo "Tagging ${REGISTRY}/${component}:${{ github.sha }} as dev..."
             docker buildx imagetools create \
               --prefer-index=false \
@@ -309,6 +309,13 @@ jobs:
           path: release/
           merge-multiple: true
 
+      - name: Download credential issuer binary artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: credential-issuer-binary-*
+          path: release/
+          merge-multiple: true
+
       - name: Download supervisor binary artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -426,6 +433,10 @@ jobs:
             openshell-gateway-aarch64-apple-darwin.tar.gz > openshell-gateway-checksums-sha256.txt
           cat openshell-gateway-checksums-sha256.txt
           sha256sum -- \
+            openshell-credential-issuer-x86_64-unknown-linux-gnu.tar.gz \
+            openshell-credential-issuer-aarch64-unknown-linux-gnu.tar.gz > openshell-credential-issuer-checksums-sha256.txt
+          cat openshell-credential-issuer-checksums-sha256.txt
+          sha256sum -- \
             openshell-sandbox-x86_64-unknown-linux-musl.tar.gz \
             openshell-sandbox-aarch64-unknown-linux-musl.tar.gz > openshell-sandbox-checksums-sha256.txt
           cat openshell-sandbox-checksums-sha256.txt
@@ -442,6 +453,13 @@ jobs:
             --release-dir release \
             --output release/openshell.rb
           cat release/openshell.rb
+
+      - name: Attest credential issuer artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            release/openshell-credential-issuer-x86_64-unknown-linux-gnu.tar.gz
+            release/openshell-credential-issuer-aarch64-unknown-linux-gnu.tar.gz
 
       - name: Attest VM driver artifacts
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -536,6 +554,9 @@ jobs:
             release/openshell-gateway-x86_64-unknown-linux-gnu.tar.gz
             release/openshell-gateway-aarch64-unknown-linux-gnu.tar.gz
             release/openshell-gateway-aarch64-apple-darwin.tar.gz
+            release/openshell-credential-issuer-x86_64-unknown-linux-gnu.tar.gz
+            release/openshell-credential-issuer-aarch64-unknown-linux-gnu.tar.gz
+            release/openshell-credential-issuer-checksums-sha256.txt
             release/openshell-sandbox-x86_64-unknown-linux-musl.tar.gz
             release/openshell-sandbox-aarch64-unknown-linux-musl.tar.gz
             release/openshell-supervisor-x86_64-unknown-linux-gnu.tar.gz

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Secret references only; tests never provision actual credentials.
+config:
+  existingSecret: issuer-config
+tls:
+  existingSecret: issuer-tls
+encryption:
+  existingSecret: issuer-kek
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gateways
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: openshell

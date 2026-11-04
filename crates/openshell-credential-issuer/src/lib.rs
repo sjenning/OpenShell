@@ -14,6 +14,7 @@ pub mod grant;
 pub mod hosted_minter;
 pub mod mint_spool;
 pub mod minter;
+pub mod observability;
 pub mod refresh;
 pub mod remote_issuer;
 pub mod remote_minter;
@@ -31,11 +32,78 @@ use tonic::{Code, Status};
 const RETRIES: usize = 16;
 
 /// Immutable authorization scope. Display names are deliberately excluded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretOwner {
     pub workspace: String,
     pub provider_id: String,
     pub credential_key: String,
+    // Omit the legacy provider kind to preserve existing serialized physical
+    // owner identities and encrypted-spool bindings byte for byte.
+    #[serde(default, skip_serializing_if = "SecretOwnerKind::is_provider")]
+    pub kind: SecretOwnerKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretOwnerKind {
+    #[default]
+    Provider,
+    Sandbox,
+    SupervisorInstance,
+}
+impl SecretOwnerKind {
+    // serde's skip_serializing_if hook requires a reference argument.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_provider(&self) -> bool {
+        *self == Self::Provider
+    }
+}
+
+impl SecretOwner {
+    /// Normalize the additive wire owner without permitting an ambiguous mix
+    /// of legacy provider fields and a typed, non-provider identity.
+    pub fn from_wire(
+        owner: &openshell_core::proto::credentials::store::v1::SecretOwner,
+    ) -> Result<Self, Status> {
+        use openshell_core::proto::credentials::store::v1::secret_owner::Kind;
+        let (id, kind) = match &owner.kind {
+            None => (owner.provider_id.clone(), SecretOwnerKind::Provider),
+            Some(kind) => {
+                if !owner.provider_id.is_empty() || !owner.provider.is_empty() {
+                    return Err(Status::invalid_argument("ambiguous issuer secret owner"));
+                }
+                match kind {
+                    Kind::ProviderOwner(value) => {
+                        (value.provider_id.clone(), SecretOwnerKind::Provider)
+                    }
+                    Kind::Sandbox(value) => (value.sandbox_id.clone(), SecretOwnerKind::Sandbox),
+                    Kind::SupervisorInstance(value) => (
+                        value.instance_id.clone(),
+                        SecretOwnerKind::SupervisorInstance,
+                    ),
+                }
+            }
+        };
+        if id.is_empty()
+            || owner.workspace.is_empty()
+            || owner.credential_key.is_empty()
+            || [&id, &owner.workspace, &owner.credential_key]
+                .iter()
+                .any(|value| {
+                    value.len() > 256
+                        || value.trim() != value.as_str()
+                        || value.chars().any(char::is_control)
+                })
+        {
+            return Err(Status::invalid_argument("invalid issuer secret owner"));
+        }
+        Ok(Self {
+            workspace: owner.workspace.clone(),
+            provider_id: id,
+            credential_key: owner.credential_key.clone(),
+            kind,
+        })
+    }
 }
 
 /// Durable, non-secret reference metadata. `backing` is an encoded opaque

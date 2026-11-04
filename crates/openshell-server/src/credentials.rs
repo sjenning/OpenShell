@@ -110,6 +110,7 @@ pub struct RefreshMaterialScope<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CredentialRuntime {
+    issuer: Option<crate::credential_source::RemoteProviderSource>,
     references: Option<Arc<openshell_credential_issuer::ReferenceRegistry>>,
     reference_changes: tokio::sync::broadcast::Sender<(String, String)>,
     registry: CredentialDriverRegistry,
@@ -118,14 +119,14 @@ pub struct CredentialRuntime {
     negotiated_extensions: Vec<NegotiatedExtension>,
 }
 
-/// Gateway-owned secret storage, separate from provider credential delivery.
+/// Typed internal-secret operations, separate from provider delivery.
 ///
-/// This interface deliberately has no provider refresh or snapshot operations.
-/// It shares the embedded driver's lifetime and handles with the provider
-/// runtime, preserving existing SSH identities and launch records. A remote
-/// provider source must not replace this local backend.
+/// Serving gateways route these operations through their selected issuer in
+/// both hosting modes. Legacy driver access exists only for trusted startup
+/// adoption and callers that have not selected an issuer (including fixtures).
 #[derive(Debug, Clone)]
 pub struct InternalSecretStore {
+    issuer: Option<crate::credential_source::RemoteProviderSource>,
     registry: CredentialDriverRegistry,
     drivers: BTreeMap<String, Arc<dyn CredentialDriver>>,
     // Keep UDS subprocesses alive even if the provider runtime is dropped.
@@ -136,12 +137,48 @@ pub struct InternalSecretStore {
 /// workspace, display name, and ID unchanged to preserve backend ownership checks.
 #[derive(Debug, Clone, Copy)]
 pub struct InternalSecretOwner<'a> {
+    pub kind: openshell_credential_issuer::SecretOwnerKind,
     pub name: &'a str,
     pub workspace: &'a str,
     pub id: &'a str,
 }
 
+impl InternalSecretOwner<'_> {
+    fn legacy_id(&self) -> &str {
+        if self.kind == openshell_credential_issuer::SecretOwnerKind::SupervisorInstance {
+            self.name
+                .strip_prefix("sandbox-instance-")
+                .unwrap_or(self.id)
+        } else {
+            self.id
+        }
+    }
+}
+
 impl InternalSecretStore {
+    /// Join the issuer intent fence to the owning record's final native write.
+    /// Legacy drivers have no gateway-side issuer intent to consume.
+    pub(crate) async fn publication_writes(
+        &self,
+        owner: InternalSecretOwner<'_>,
+        operation: &str,
+        candidate_id: &str,
+        handles: &HashMap<String, CredentialHandle>,
+    ) -> Result<Vec<crate::persistence::AtomicWrite>, Status> {
+        match &self.issuer {
+            Some(issuer) => {
+                Box::pin(issuer.internal_publication_writes(
+                    owner,
+                    operation,
+                    candidate_id,
+                    handles,
+                ))
+                .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn driver(&self, name: &str) -> Result<&Arc<dyn CredentialDriver>, Status> {
         self.drivers.get(name).ok_or_else(|| {
             Status::failed_precondition(format!("internal secret driver '{name}' is not connected"))
@@ -154,6 +191,9 @@ impl InternalSecretStore {
         object_id: &str,
         values: &HashMap<String, String>,
     ) -> Result<HashMap<String, CredentialHandle>, Status> {
+        if let Some(issuer) = &self.issuer {
+            return issuer.store_internal(owner, object_id, values).await;
+        }
         if values.is_empty() {
             return Ok(HashMap::new());
         }
@@ -170,7 +210,7 @@ impl InternalSecretStore {
                     value: value.clone(),
                     existing_handle: None,
                     workspace: owner.workspace.to_string(),
-                    provider_id: owner.id.to_string(),
+                    provider_id: owner.legacy_id().to_string(),
                     object_id: object_id.to_string(),
                 })
                 .await?;
@@ -208,6 +248,9 @@ impl InternalSecretStore {
         owner: InternalSecretOwner<'_>,
         handles: &HashMap<String, CredentialHandle>,
     ) -> Result<HashMap<String, String>, Status> {
+        if let Some(issuer) = &self.issuer {
+            return issuer.resolve_internal(owner, handles).await;
+        }
         let mut batches: BTreeMap<String, Vec<ResolveCredentialRequest>> = BTreeMap::new();
         for (key, handle) in handles {
             let driver_name = self.registry.driver_for_handle(key, handle)?;
@@ -222,7 +265,7 @@ impl InternalSecretStore {
                     credential_key: key.clone(),
                     handle: Some(handle),
                     workspace: owner.workspace.to_string(),
-                    provider_id: owner.id.to_string(),
+                    provider_id: owner.legacy_id().to_string(),
                 });
         }
         let mut values = HashMap::new();
@@ -268,6 +311,9 @@ impl InternalSecretStore {
         owner: InternalSecretOwner<'_>,
         handles: &HashMap<String, CredentialHandle>,
     ) -> Result<(), Status> {
+        if let Some(issuer) = &self.issuer {
+            return issuer.delete_internal(owner, handles).await;
+        }
         let deletions = handles.iter().map(|(key, handle)| async move {
             let driver_name = self.registry.driver_for_handle(key, handle)?;
             self.driver(&driver_name)?
@@ -276,7 +322,7 @@ impl InternalSecretStore {
                     credential_key: key.clone(),
                     handle: Some(handle.clone()),
                     workspace: owner.workspace.to_string(),
-                    provider_id: owner.id.to_string(),
+                    provider_id: owner.legacy_id().to_string(),
                 })
                 .await
         });
@@ -320,10 +366,32 @@ impl InternalSecretStore {
 }
 
 impl CredentialRuntime {
-    /// Capture the local embedded backend for gateway-internal consumers.
-    /// Keep this separate from any future remote provider credential source.
+    /// A remote gateway owns no value backend and never loads a database KEK.
+    pub(crate) fn from_issuer(
+        config: &Config,
+        issuer: crate::credential_source::RemoteProviderSource,
+    ) -> CoreResult<Self> {
+        Ok(Self {
+            issuer: Some(issuer),
+            references: None,
+            reference_changes: tokio::sync::broadcast::channel(128).0,
+            registry: CredentialDriverRegistry::from_config(config)?,
+            drivers: BTreeMap::new(),
+            driver_processes: Vec::new(),
+            negotiated_extensions: Vec::new(),
+        })
+    }
+    pub(crate) fn use_issuer(&mut self, source: crate::credential_source::RemoteProviderSource) {
+        self.issuer = Some(source);
+    }
+    pub(crate) fn issuer_drivers(&self) -> (BTreeMap<String, Arc<dyn CredentialDriver>>, String) {
+        (self.drivers.clone(), self.registry.storage_owner_name())
+    }
+    /// Capture the selected issuer and retain any legacy driver's lifetime
+    /// while metadata-only startup adoption still references its backing.
     pub(crate) fn internal_secrets(&self) -> InternalSecretStore {
         InternalSecretStore {
+            issuer: self.issuer.clone(),
             registry: self.registry.clone(),
             drivers: self.drivers.clone(),
             _driver_processes: self.driver_processes.clone(),
@@ -364,6 +432,7 @@ impl CredentialRuntime {
             .map(|name| negotiate_builtin_credential_driver(name))
             .collect::<CoreResult<Vec<_>>>()?;
         Ok(Self {
+            issuer: None,
             registry,
             drivers,
             driver_processes: Vec::new(),
@@ -435,6 +504,7 @@ impl CredentialRuntime {
         }
 
         Ok(Self {
+            issuer: None,
             registry,
             drivers,
             driver_processes,
@@ -2426,6 +2496,7 @@ mod tests {
         let store = Arc::new(crate::persistence::test_store().await);
         let runtime = CredentialRuntime::from_config_with_store(&Config::new(None), store).unwrap();
         let owner = InternalSecretOwner {
+            kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
             name: "sandbox-ssh-test-sandbox",
             workspace: "test-workspace",
             id: "test-sandbox",
@@ -2465,6 +2536,7 @@ mod tests {
         let internal = runtime.internal_secrets();
         drop(runtime);
         let owner = InternalSecretOwner {
+            kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
             name: "sandbox-ssh-test-sandbox",
             workspace: "test-workspace",
             id: "test-sandbox",
@@ -2492,6 +2564,7 @@ mod tests {
         .unwrap();
         let internal = runtime.internal_secrets();
         let owner = InternalSecretOwner {
+            kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
             name: "internal-owner",
             workspace: "test-workspace",
             id: "test-owner",
@@ -2520,6 +2593,7 @@ mod tests {
         .unwrap();
         let internal = runtime.internal_secrets();
         let owner = InternalSecretOwner {
+            kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
             name: "supervisor-launch",
             workspace: "test-workspace",
             id: "test-assignment",

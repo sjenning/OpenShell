@@ -125,3 +125,62 @@ async fn final_grant_recovery_is_distinct_from_partial_status_publications() {
     inner.ready(ChangeKind::Grants).unwrap();
     assert_eq!(*health.borrow_and_update(), complete);
 }
+
+#[tokio::test]
+async fn activation_event_recovers_transient_missing_grants_but_never_terminal_ones() {
+    let inner = inner();
+    inner.track_grant("imported".into()).unwrap();
+    {
+        let mut state = inner.lock().unwrap();
+        state.retire_grant("imported", 0);
+        state.grants.get_mut("imported").unwrap().terminal = false;
+    }
+    controller::grant_event(
+        &inner,
+        &refresh::WatchGrantsResponse {
+            grant: "imported".into(),
+            version: 12,
+            sequence: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!inner.lock().unwrap().grants["imported"].gone);
+    let before = inner.observe_grant("imported").unwrap();
+    cache::grant(
+        &inner,
+        &refresh::GrantStatus {
+            grant: "imported".into(),
+            state: "refreshed".into(),
+            version: 12,
+            ..Default::default()
+        },
+        &before,
+    )
+    .unwrap();
+    assert!(inner.lock().unwrap().grants["imported"].metadata.is_some());
+    controller::grant_event(
+        &inner,
+        &refresh::WatchGrantsResponse {
+            grant: "imported".into(),
+            version: 13,
+            sequence: 2,
+            deleted: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    controller::grant_event(
+        &inner,
+        &refresh::WatchGrantsResponse {
+            grant: "imported".into(),
+            version: 14,
+            sequence: 3,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let state = inner.lock().unwrap();
+    assert!(state.grants["imported"].gone);
+    assert!(state.grants["imported"].terminal);
+}

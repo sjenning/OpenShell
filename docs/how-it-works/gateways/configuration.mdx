@@ -102,10 +102,60 @@ version = 2
 
 The gateway selector is `compute_driver = "<driver>"`. It accepts one scalar driver name. Omit it to retain auto-detection.
 
+## Embedded credential issuer
+
+Omit `[openshell.gateway.credential_issuer]` to host the issuer inside the gateway.
+Embedded and remote modes execute the same credential store, refresh, watch,
+authorization, and cache handlers; embedded calls do not open a network listener.
+The selected issuer owns provider values, refresh material, sandbox SSH host
+private keys, and stored supervisor launch material. Internal secrets use typed
+sandbox or supervisor-instance owners, not synthetic provider records. Gateway
+TLS identity and launch-signing key files remain separate bootstrap configuration.
+
+Embedded startup upgrades existing inline provider values, driver-backed
+references, internal secret handles, and refresh grants before serving requests.
+Handle adoption retains existing reference identities, versions, revocation,
+and cleanup ownership without copying output values. Grant adoption preserves
+existing authorization epochs, schedules, expiration, recovery state, and mint
+attempt fences rather than reconfiguring grants or minting new tokens. Inline
+values move into issuer-owned storage. The upgrade is restartable and fences
+legacy publication before enabling issuer scheduling. Keep the original backend
+and encryption key available until it completes; do not run incompatible gateway
+versions against the same records. This is not a driver-to-driver or
+embedded-to-remote migration mechanism.
+
+### Register embedded custom minters
+
+Use file-only `[openshell.gateway.credential_minters.<name>]` tables to register
+stateless HTTPS minters with the embedded issuer. The map is empty by default.
+For example:
+
+```toml
+[openshell.gateway.credential_minters.company-sts]
+endpoint = "https://minter.security.example.org:8443"
+tls_ca_cert_path = "/etc/openshell/minter/ca.pem"
+tls_client_cert_path = "/etc/openshell/minter/client.pem"
+tls_client_key_path = "/etc/openshell/minter/client.key"
+```
+
+The registration must advertise exactly `custom:company-sts`. Paths must be
+absolute. Instead of the PEM client pair, use `workload_api_endpoint` and
+`spiffe_id` to select one exact local SPIFFE Workload API identity. Do not combine
+the two identity modes. Both modes require explicit server trust and normal
+HTTPS hostname verification. Discovery failure or a mismatched descriptor fails
+startup. Restart the gateway after changing registrations.
+
+These tables use the same minter configuration as the
+[standalone issuer](/extensibility/credential-issuer#register-a-remote-minter).
+At most 60 custom registrations are supported. Do not combine gateway
+`credential_minters` with a remote `credential_issuer`; configure minters in the
+selected standalone issuer instead. Profiles and refresh requests must name a
+strategy in the selected issuer catalog, including built-in strategies.
+
 ## Remote credential issuer
 
-Omit `[openshell.gateway.credential_issuer]` to keep embedded provider storage.
-To select the experimental standalone issuer, configure its private HTTPS
+To select the experimental standalone issuer instead of embedded hosting,
+configure its private HTTPS
 endpoint and a gateway client identity:
 
 ```toml
@@ -135,15 +185,19 @@ Restart the gateway to change the server trust bundle or issuer endpoint.
 Startup validates issuer capabilities, registers existing references without
 reading values, and waits for metadata reconciliation before serving. The startup
 budget defaults to 30 seconds (range 1–300). Existing inline credentials, local
-driver handles, and embedded refresh grants require explicit migration; the
+provider or internal-secret handles, and embedded refresh grants require explicit
+migration to remote storage; the
 gateway fails startup rather than moving them or falling back. Keep the
 registration name and authority stable, and configure every gateway replica
 consistently. Removing or changing the table is not a migration mechanism.
 
-Remote mode supports static provider create/update/delete, delivery, operator
-export, refresh-status reads, builtin and single-output custom refresh
-configuration, grant rotation, and refresh deletion that preserves the latest
-published values as static credentials. See the
+Remote mode supports provider create/update/delete, delivery, operator export,
+refresh metadata, built-in and registered custom strategy configuration,
+multi-output grants, rotation, and refresh deletion that preserves published
+values as static credentials. Sandbox SSH host keys and supervisor launch
+material also use the selected issuer with typed internal owners. The gateway
+does not initialize a local value driver or load a credential-encryption KEK in
+remote mode; configure value backends and their keys on the standalone issuer. See the
 [custom minter requirements](/extensibility/credential-issuer#configure-a-custom-refresh)
 and [refresh deletion behavior](/extensibility/credential-issuer#delete-refresh-without-deleting-credentials).
 Configuring refresh replaces the output references with a
@@ -154,9 +208,8 @@ without waiting for the issuer scheduler.
 
 Use a stable request ID when retrying configuration or rotation. Replay returns
 the captured status metadata without repeating the operation and refuses
-replaced or retired grant bindings. SSH host keys and supervisor launch secrets
-remain in the gateway's local credential store. The embedded provider refresh
-worker does not run in remote mode.
+replaced or retired grant bindings. The issuer schedules refresh in either
+hosting mode; the gateway does not run a second legacy provider-refresh worker.
 
 Each replica invalidates its local push sessions when issuer watches change,
 become unknown, or reconcile. A background reconciler retains and retries
@@ -988,7 +1041,7 @@ The gateway validates snapshot structure and provider-profile semantics. It trea
 
 ## Credential Drivers
 
-Set `credential_drivers` only when the gateway should store provider secrets in an external credential backend. Provider secrets include injectable credentials and gateway-only refresh material such as OAuth refresh tokens, client secrets, and service-account private keys. OpenShell supports at most one enabled credential driver at a time. When `credential_drivers` is omitted, the gateway uses its default encrypted database credential storage. `credential_drivers = []` is invalid in the TOML file; omit the field for the default encrypted store, or select a backend such as `kubernetes-secrets` or `vault`.
+In embedded mode, set `credential_drivers` when the issuer should store values in an external credential backend. Issuer-owned values include injectable provider credentials, refresh material, sandbox SSH host private keys, and stored supervisor launch material. Remote mode initializes no gateway value backend or credential-encryption KEK; configure storage on the standalone issuer instead. OpenShell supports at most one enabled credential driver at a time. When `credential_drivers` is omitted, the gateway uses its default encrypted database credential storage. `credential_drivers = []` is invalid in the TOML file; omit the field for the default encrypted store, or select a backend such as `kubernetes-secrets` or `vault`.
 
 Credential driver tables are backend-owned and live under `[openshell.credential_drivers.<name>]`. Built-in drivers default to in-tree transport, so they do not need a `transport` field. Use `transport = "uds"` with an absolute `socket_path` only for a remote gRPC driver over a Unix domain socket.
 
@@ -1039,7 +1092,7 @@ For `vault`, `address` points at the Vault service. Non-loopback endpoints must 
 
 For Helm deployments, set `credentialDrivers.vault.caConfigMapName` to a ConfigMap containing the private CA bundle under the `ca.crt` key. The chart mounts that key and derives `ca_bundle` automatically.
 
-Provider records that already contain inline database credentials remain readable for upgrade compatibility. New provider create/update requests still submit credential values through the normal API, but the gateway stores those values through the active credential storage path and persists only handles. Before OpenShell 0.1.0, OpenShell does not automatically migrate inline refresh material or credential handles between drivers. Reconfigure refresh grants after an upgrade. Before changing credential drivers, remove affected credentials while the original driver is still available, then select the new driver and create them again. Do not run mixed gateway versions against the same refresh records.
+Embedded startup performs the restartable adoption described in [Embedded credential issuer](#embedded-credential-issuer), including inline values, existing handles, and refresh grants without resetting their authorization epochs. New provider mutations retain only issuer references in gateway records. Changing credential drivers or moving to a standalone issuer still requires an explicit migration plan; source selection does not copy values between backends. Keep the original driver and encryption key available, and do not run incompatible gateway versions against the same refresh records.
 
 For remote credential drivers, set `transport = "uds"` with `socket_path`. Omit `command`, `args`, and `startup_timeout_secs` when another service manager prestarts the driver socket. Keep backend tokens out of TOML; point the driver at mounted token files or native identity mechanisms instead.
 

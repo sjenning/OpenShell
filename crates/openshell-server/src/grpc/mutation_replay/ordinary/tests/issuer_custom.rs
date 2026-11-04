@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+mod catalog_cache;
 mod deletion;
+mod profiles;
+mod profiles_public;
 use crate::credential_source::{
     ProviderCredentialSource as _, RemoteProviderSource, handoff::StaticHandoff,
     tests::issuer::Issuer,
 };
 use openshell_credential_issuer::minter::{
-    MaterialDescriptor, MintFailure, MintRequest, MintResponse, MinterRegistry, StrategyDescriptor,
-    TokenMinter,
+    MaterialDescriptor, MintFailure, MintRequest, MintResponse, StrategyDescriptor, TokenMinter,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -48,7 +50,21 @@ impl TokenMinter for Minter {
         );
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(MintResponse {
-            outputs: HashMap::from([("company_token".into(), "private-company-token".into())]),
+            outputs: self
+                .descriptor
+                .outputs
+                .iter()
+                .map(|output| {
+                    (
+                        output.clone(),
+                        if output == "company_token" {
+                            "private-company-token".into()
+                        } else {
+                            format!("private-{output}")
+                        },
+                    )
+                })
+                .collect(),
             expiration_time_ms: crate::persistence::current_time_ms() + 60_000,
             rotated_secret_material: HashMap::new(),
         })
@@ -68,12 +84,19 @@ async fn context(
         calls: AtomicUsize::new(0),
         descriptor,
     });
-    let mut registry = MinterRegistry::default();
+    let mut registry = openshell_credential_issuer::builtins::registry();
     registry.register_custom(minter.clone()).unwrap();
     let issuer = Issuer::with_minters(Arc::new(registry)).await;
     Arc::get_mut(&mut state).unwrap().provider_source = Some(Arc::new(
         RemoteProviderSource::new("primary", issuer.watched.clone()).unwrap(),
     ));
+    {
+        let state = Arc::get_mut(&mut state).unwrap();
+        state.provider_profile_sources = state
+            .provider_profile_sources
+            .clone()
+            .with_strategy_source(state.provider_source.as_ref().unwrap().clone());
+    }
     let imported = run(
         &state,
         authed_request(ImportProviderProfilesRequest {

@@ -22,9 +22,15 @@ use tonic::{Request, Response, Status};
 
 mod grants;
 mod maintenance;
+mod migration;
+pub use migration::LegacyReference;
 mod mutations;
 mod reservations;
 pub use grants::CredentialRefreshService;
+pub use grants::migration::{
+    LegacyGrant, LegacyGrantActivation, LegacyGrantActivationPage, LegacyGrantOutput,
+    LegacyGrantStatus,
+};
 mod watch;
 
 const MESSAGE_LIMIT: usize = 1024 * 1024;
@@ -98,11 +104,7 @@ struct Candidate {
 
 fn owner(owner: Option<&wire::SecretOwner>) -> Result<SecretOwner, Status> {
     let owner = owner.ok_or_else(|| Status::invalid_argument("issuer secret owner is required"))?;
-    Ok(SecretOwner {
-        workspace: owner.workspace.clone(),
-        provider_id: owner.provider_id.clone(),
-        credential_key: owner.credential_key.clone(),
-    })
+    SecretOwner::from_wire(owner)
 }
 fn now_ms() -> Result<i64, Status> {
     SystemTime::now()
@@ -161,6 +163,25 @@ fn unexpired(expiration: Option<i64>, now: i64) -> Result<(), Status> {
 }
 
 impl CredentialStoreService {
+    /// Host the same store handlers in process with a fixed local gateway
+    /// identity. No operator workspace allowlist or transport listener is used.
+    pub fn embedded(
+        repository: Arc<Repository>,
+        storage: CredentialStorage,
+        cache_ttl: Duration,
+    ) -> Result<Self, Status> {
+        Self::new(repository, storage, GatewayPolicy::embedded()?, cache_ttl)
+    }
+
+    /// Fixed trusted scope for Rust-only embedded migration/maintenance. This
+    /// does not accept an identity, workspace allowlist, or RPC metadata, and
+    /// fails when called on a remotely authenticated service.
+    pub fn embedded_scope(&self) -> Result<GatewayScope, Status> {
+        self.runtime
+            .policy
+            .authenticate(&crate::auth::local_request(Request::new(())))
+    }
+
     pub fn new(
         repository: Arc<Repository>,
         storage: CredentialStorage,
@@ -354,94 +375,109 @@ impl wire::credential_store_server::CredentialStore for CredentialStoreService {
         &self,
         request: Request<wire::GetCapabilitiesRequest>,
     ) -> Result<Response<wire::GetCapabilitiesResponse>, Status> {
-        self.runtime.policy.authenticate(&request)?;
-        Ok(Response::new(wire::GetCapabilitiesResponse {
-            protocol_version: 1,
-            supports_watch: true,
-            supports_expiration: true,
-            max_batch_size: u32::try_from(BATCH_LIMIT).expect("bounded batch size"),
-            max_response_bytes: u32::try_from(MESSAGE_LIMIT).expect("bounded message size"),
-            supports_metadata_inspection: true,
-            supports_pending_reservations: true,
-        }))
+        crate::observability::observe(crate::observability::Operation::GetCapabilities, async {
+            self.runtime.policy.authenticate(&request)?;
+            Ok(Response::new(wire::GetCapabilitiesResponse {
+                protocol_version: 1,
+                supports_watch: true,
+                supports_expiration: true,
+                max_batch_size: u32::try_from(BATCH_LIMIT).expect("bounded batch size"),
+                max_response_bytes: u32::try_from(MESSAGE_LIMIT).expect("bounded message size"),
+                supports_metadata_inspection: true,
+                supports_pending_reservations: true,
+            }))
+        })
+        .await
     }
     async fn reserve_secret(
         &self,
         request: Request<wire::ReserveSecretRequest>,
     ) -> Result<Response<wire::ReserveSecretResponse>, Status> {
-        let scope = self.runtime.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        scope.authorize_owner(&owner(request.owner.as_ref())?)?;
-        if request.encoded_len() > MESSAGE_LIMIT {
-            return Err(Status::resource_exhausted("issuer request exceeds limit"));
-        }
-        let key = idempotency(&request.idempotency_key)?;
-        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
-        let runtime = self.runtime.clone();
-        let response = self
-            .runtime
-            .coordinator
-            .run(&coordination, async move {
-                runtime.reserve(scope, request, key).await
-            })
-            .await?;
-        Ok(Response::new(response))
+        crate::observability::observe(crate::observability::Operation::ReserveSecret, async {
+            let scope = self.runtime.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            scope.authorize_owner(&owner(request.owner.as_ref())?)?;
+            if request.encoded_len() > MESSAGE_LIMIT {
+                return Err(Status::resource_exhausted("issuer request exceeds limit"));
+            }
+            let key = idempotency(&request.idempotency_key)?;
+            let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+            let runtime = self.runtime.clone();
+            let response = self
+                .runtime
+                .coordinator
+                .run(&coordination, async move {
+                    runtime.reserve(scope, request, key).await
+                })
+                .await?;
+            Ok(Response::new(response))
+        })
+        .await
     }
     async fn put_secret(
         &self,
         request: Request<wire::PutSecretRequest>,
     ) -> Result<Response<wire::PutSecretResponse>, Status> {
-        let scope = self.runtime.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        scope.authorize_owner(&owner(request.owner.as_ref())?)?;
-        if request.encoded_len() > MESSAGE_LIMIT {
-            return Err(Status::resource_exhausted("issuer request exceeds limit"));
-        }
-        let key = idempotency(&request.idempotency_key)?;
-        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
-        let runtime = self.runtime.clone();
-        let response = self
-            .runtime
-            .coordinator
-            .run(&coordination, async move {
-                runtime.put(scope, request, key).await
-            })
-            .await?;
-        Ok(Response::new(response))
+        crate::observability::observe(crate::observability::Operation::PutSecret, async {
+            let scope = self.runtime.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            scope.authorize_owner(&owner(request.owner.as_ref())?)?;
+            if request.encoded_len() > MESSAGE_LIMIT {
+                return Err(Status::resource_exhausted("issuer request exceeds limit"));
+            }
+            let key = idempotency(&request.idempotency_key)?;
+            let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+            let runtime = self.runtime.clone();
+            let response = self
+                .runtime
+                .coordinator
+                .run(&coordination, async move {
+                    runtime.put(scope, request, key).await
+                })
+                .await?;
+            Ok(Response::new(response))
+        })
+        .await
     }
     async fn delete_secret(
         &self,
         request: Request<wire::DeleteSecretRequest>,
     ) -> Result<Response<wire::DeleteSecretResponse>, Status> {
-        let scope = self.runtime.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        scope.authorize_owner(&owner(request.owner.as_ref())?)?;
-        if request.encoded_len() > MESSAGE_LIMIT {
-            return Err(Status::resource_exhausted("issuer request exceeds limit"));
-        }
-        let key = idempotency(&request.idempotency_key)?;
-        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
-        let runtime = self.runtime.clone();
-        let response = self
-            .runtime
-            .coordinator
-            .run(&coordination, async move {
-                runtime.delete(scope, request, key).await
-            })
-            .await?;
-        Ok(Response::new(response))
+        crate::observability::observe(crate::observability::Operation::DeleteSecret, async {
+            let scope = self.runtime.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            scope.authorize_owner(&owner(request.owner.as_ref())?)?;
+            if request.encoded_len() > MESSAGE_LIMIT {
+                return Err(Status::resource_exhausted("issuer request exceeds limit"));
+            }
+            let key = idempotency(&request.idempotency_key)?;
+            let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+            let runtime = self.runtime.clone();
+            let response = self
+                .runtime
+                .coordinator
+                .run(&coordination, async move {
+                    runtime.delete(scope, request, key).await
+                })
+                .await?;
+            Ok(Response::new(response))
+        })
+        .await
     }
     async fn resolve_secrets(
         &self,
         request: Request<wire::ResolveSecretsRequest>,
     ) -> Result<Response<wire::ResolveSecretsResponse>, Status> {
-        let scope = self.runtime.policy.authenticate(&request)?;
-        if request.get_ref().encoded_len() > MESSAGE_LIMIT {
-            return Err(Status::resource_exhausted("issuer request exceeds limit"));
-        }
-        Ok(Response::new(
-            self.runtime.resolve(&scope, request.into_inner()).await?,
-        ))
+        crate::observability::observe(crate::observability::Operation::ResolveSecrets, async {
+            let scope = self.runtime.policy.authenticate(&request)?;
+            if request.get_ref().encoded_len() > MESSAGE_LIMIT {
+                return Err(Status::resource_exhausted("issuer request exceeds limit"));
+            }
+            Ok(Response::new(
+                self.runtime.resolve(&scope, request.into_inner()).await?,
+            ))
+        })
+        .await
     }
     type WatchSecretsStream =
         tokio_stream::wrappers::ReceiverStream<Result<wire::WatchSecretsResponse, Status>>;
@@ -449,14 +485,17 @@ impl wire::credential_store_server::CredentialStore for CredentialStoreService {
         &self,
         request: Request<wire::WatchSecretsRequest>,
     ) -> Result<Response<Self::WatchSecretsStream>, Status> {
-        let scope = self.runtime.policy.authenticate(&request)?;
-        watch::start(
-            self.runtime.clone(),
-            scope,
-            request.into_inner().after_sequence,
-        )
+        crate::observability::observe(crate::observability::Operation::WatchSecrets, async {
+            let scope = self.runtime.policy.authenticate(&request)?;
+            watch::start(
+                self.runtime.clone(),
+                scope,
+                request.into_inner().after_sequence,
+            )
+            .await
+            .map(Response::new)
+        })
         .await
-        .map(Response::new)
     }
 }
 

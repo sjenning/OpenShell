@@ -483,17 +483,35 @@ impl Store {
         provider_id: &str,
         credential_key: &str,
     ) -> PersistenceResult<RefreshMutationGuard> {
+        self.acquire_refresh_guards(provider_id, &[credential_key])
+            .await
+    }
+
+    /// Hold a provider's legacy grant locks throughout a single atomic upgrade.
+    pub(crate) async fn acquire_refresh_guards(
+        &self,
+        provider_id: &str,
+        credential_keys: &[&str],
+    ) -> PersistenceResult<RefreshMutationGuard> {
         use sha2::{Digest, Sha256};
-        let mut digest = Sha256::new();
-        digest.update(b"openshell-provider-refresh-lock-v1\0");
-        digest.update(provider_id.as_bytes());
-        digest.update(b"\0");
-        digest.update(credential_key.as_bytes());
-        let hash = digest.finalize();
-        let key = i64::from_be_bytes(hash[..8].try_into().expect("eight digest bytes"));
+        if credential_keys.is_empty() {
+            return Ok(RefreshMutationGuard { _postgres: None });
+        }
+        let keys = credential_keys
+            .iter()
+            .map(|credential_key| {
+                let mut digest = Sha256::new();
+                digest.update(b"openshell-provider-refresh-lock-v1\0");
+                digest.update(provider_id.as_bytes());
+                digest.update(b"\0");
+                digest.update(credential_key.as_bytes());
+                let hash = digest.finalize();
+                i64::from_be_bytes(hash[..8].try_into().expect("eight digest bytes"))
+            })
+            .collect::<Vec<_>>();
         match self {
             Self::Postgres(store) => Ok(RefreshMutationGuard {
-                _postgres: Some(store.acquire_data_pool_lock(key).await?),
+                _postgres: Some(store.acquire_data_pool_locks(&keys).await?),
             }),
             Self::Sqlite(_) => Ok(RefreshMutationGuard { _postgres: None }),
         }

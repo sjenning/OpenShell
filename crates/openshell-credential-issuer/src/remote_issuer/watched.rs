@@ -123,9 +123,13 @@ fn unavailable() -> Status {
     Status::unavailable("issuer watch metadata is not synchronized")
 }
 fn same_owner(a: &store::SecretOwner, b: &store::SecretOwner) -> bool {
-    a.workspace == b.workspace
-        && a.provider_id == b.provider_id
-        && a.credential_key == b.credential_key
+    match (
+        crate::SecretOwner::from_wire(a),
+        crate::SecretOwner::from_wire(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 impl State {
     fn values_changed(&mut self) {

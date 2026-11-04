@@ -35,16 +35,62 @@ struct Backing {
     purpose: String,
     #[serde(default)]
     allocation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy: Option<LegacyAddress>,
+}
+/// Trusted embedded migration retains the original physical authorization
+/// tuple. This metadata cannot be supplied by an issuer RPC caller.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAddress {
+    namespace: String,
+    owner: SecretOwner,
+    provider: String,
+    workspace: String,
+    provider_id: String,
+    credential_key: String,
+}
+/// Same wire shape as `CredentialHandle`, with stable metadata ordering. Legacy
+/// adoption compares durable byte identities across retries; decode/re-encode
+/// through a randomized `HashMap` must not invent a changed physical backing.
+#[derive(Clone, PartialEq, prost::Message)]
+struct CanonicalHandle {
+    #[prost(string, tag = "1")]
+    driver: String,
+    #[prost(string, tag = "2")]
+    handle: String,
+    #[prost(btree_map = "string, string", tag = "3")]
+    metadata: BTreeMap<String, String>,
+}
+fn canonical_handle(handle: &CredentialHandle) -> Vec<u8> {
+    CanonicalHandle {
+        driver: handle.driver.clone(),
+        handle: handle.handle.clone(),
+        metadata: handle
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    }
+    .encode_to_vec()
 }
 struct DecodedBacking<'a> {
     handle: CredentialHandle,
     driver: &'a Arc<dyn CredentialDriver>,
     allocation: Option<String>,
+    legacy: Option<LegacyAddress>,
 }
 struct Address {
     provider: String,
     workspace: String,
     provider_id: String,
+}
+/// Original authorization tuple of an adopted physical backend handle.
+pub struct LegacyPhysicalOwner<'a> {
+    pub registration: &'a str,
+    pub provider: &'a str,
+    pub owner_id: &'a str,
+    pub credential_key: &'a str,
 }
 
 pub struct ResolvedBacking {
@@ -181,6 +227,42 @@ impl CredentialStorage {
             handle: handle.encode_to_vec(),
             purpose: purpose.to_string(),
             allocation: Some(allocation),
+            legacy: None,
+        })
+        .map_err(|_| encode_error())
+    }
+    /// Adopt physical ownership without reading or copying its secret value.
+    /// Only trusted embedded migration uses this Rust API; no RPC exposes it.
+    pub fn legacy_backing(
+        &self,
+        scope: &GatewayScope,
+        owner: &SecretOwner,
+        physical: LegacyPhysicalOwner<'_>,
+        purpose: &str,
+        handle: &CredentialHandle,
+    ) -> Result<Vec<u8>, Status> {
+        scope.authorize_owner(owner)?;
+        if !self.drivers.contains_key(physical.registration)
+            || handle.handle.is_empty()
+            || physical.provider.is_empty()
+            || physical.credential_key.is_empty()
+        {
+            return Err(Status::invalid_argument("invalid legacy issuer backing"));
+        }
+        serde_json::to_vec(&Backing {
+            version: 3,
+            registration: physical.registration.into(),
+            handle: canonical_handle(handle),
+            purpose: purpose.into(),
+            allocation: None,
+            legacy: Some(LegacyAddress {
+                namespace: scope.namespace().into(),
+                owner: owner.clone(),
+                provider: physical.provider.into(),
+                workspace: owner.workspace.clone(),
+                provider_id: physical.owner_id.into(),
+                credential_key: physical.credential_key.into(),
+            }),
         })
         .map_err(|_| encode_error())
     }
@@ -190,9 +272,13 @@ impl CredentialStorage {
             (1, None) => true,
             (2, Some(id)) => uuid::Uuid::parse_str(id)
                 .is_ok_and(|value| !value.is_nil() && value.to_string() == id),
+            (3, None) => backing.legacy.is_some(),
             _ => false,
         };
-        if !valid_allocation || backing.purpose != purpose {
+        if !valid_allocation
+            || backing.purpose != purpose
+            || (backing.version != 3 && backing.legacy.is_some())
+        {
             return Err(encode_error());
         }
         let handle =
@@ -207,6 +293,7 @@ impl CredentialStorage {
             handle,
             driver,
             allocation: backing.allocation,
+            legacy: backing.legacy,
         })
     }
     pub async fn resolve(
@@ -221,14 +308,16 @@ impl CredentialStorage {
             handle,
             driver,
             allocation,
+            legacy,
         } = self.decode(backing, purpose)?;
         let address = address(scope, owner, purpose, allocation.as_deref())?;
+        let (address, credential_key) = legacy_address(scope, owner, legacy, address)?;
         let request_id = uuid::Uuid::new_v4().to_string();
         let mut values = driver
             .resolve_credentials(vec![ResolveCredentialRequest {
                 request_id: request_id.clone(),
                 provider: address.provider,
-                credential_key: "VALUE".to_string(),
+                credential_key,
                 handle: Some(handle),
                 workspace: address.workspace,
                 provider_id: address.provider_id,
@@ -264,18 +353,49 @@ impl CredentialStorage {
             handle,
             driver,
             allocation,
+            legacy,
         } = self.decode(backing, purpose)?;
         let address = address(scope, owner, purpose, allocation.as_deref())?;
+        let (address, credential_key) = legacy_address(scope, owner, legacy, address)?;
         driver
             .delete_credential(DeleteCredentialRequest {
                 provider: address.provider,
-                credential_key: "VALUE".to_string(),
+                credential_key,
                 handle: Some(handle),
                 workspace: address.workspace,
                 provider_id: address.provider_id,
             })
             .await
             .map_err(error)
+    }
+}
+
+fn legacy_address(
+    scope: &GatewayScope,
+    owner: &SecretOwner,
+    legacy: Option<LegacyAddress>,
+    address: Address,
+) -> Result<(Address, String), Status> {
+    match legacy {
+        None => Ok((address, "VALUE".into())),
+        Some(legacy) => {
+            if legacy.namespace != scope.namespace()
+                || legacy.workspace != owner.workspace
+                || legacy.owner != *owner
+            {
+                return Err(Status::permission_denied(
+                    "legacy issuer backing owner mismatch",
+                ));
+            }
+            Ok((
+                Address {
+                    provider: legacy.provider,
+                    workspace: legacy.workspace,
+                    provider_id: legacy.provider_id,
+                },
+                legacy.credential_key,
+            ))
+        }
     }
 }
 

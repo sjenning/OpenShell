@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Configure registered single-output minters without inventing a primary-output
-//! convention. Custom profile declarations and multi-output bindings need a
-//! separate profile-catalog integration; neither is inferred from output order.
+//! Registered custom strategies use profile semantic output bindings and the
+//! same fixed-bundle handoff, publication, retirement, and replay fences as
+//! built-ins. No output identity is inferred from descriptor ordering.
 use crate::{
     ServerState, compute::MutationScope, credential_source::handoff::GrantPlan,
     grpc::mutation_replay::ordinary::Facts,
@@ -11,11 +11,34 @@ use openshell_core::proto::{
     ConfigureProviderRefreshRequest, ConfigureProviderRefreshResponse, Provider,
     ProviderCredentialRefreshStrategy,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tonic::{Response, Status};
 
 fn invalid() -> Status {
     Status::invalid_argument("invalid custom issuer grant configuration")
+}
+
+fn schedule(
+    material: &std::collections::HashMap<String, String>,
+    key: &str,
+    profile: Option<prost_types::Duration>,
+    default: Duration,
+) -> Result<Duration, Status> {
+    let requested = crate::provider_refresh::parse_material_i64(material, key)?;
+    let value = match requested {
+        Some(0) => default,
+        Some(seconds) => Duration::from_secs(u64::try_from(seconds).map_err(|_| invalid())?),
+        None => profile
+            .as_ref()
+            .map(openshell_core::time::duration_to_std)
+            .transpose()
+            .map_err(|_| invalid())?
+            .unwrap_or(default),
+    };
+    if value > Duration::from_hours(12) {
+        return Err(invalid());
+    }
+    Ok(value)
 }
 
 pub(in crate::grpc::provider) async fn configure_custom(
@@ -24,9 +47,8 @@ pub(in crate::grpc::provider) async fn configure_custom(
     mut request: ConfigureProviderRefreshRequest,
     facts: &Facts,
 ) -> Result<Response<ConfigureProviderRefreshResponse>, Status> {
-    // An unknown enum or a conflicting built-in selector never becomes a
-    // custom request merely because the name has the custom prefix.
     if request.strategy != ProviderCredentialRefreshStrategy::Unspecified as i32
+        || !openshell_providers::custom_strategy_name_is_valid(&request.strategy_name)
         || request.expiration_time.is_some()
     {
         return Err(invalid());
@@ -34,21 +56,20 @@ pub(in crate::grpc::provider) async fn configure_custom(
     let source = state.remote_provider_mutations()?.ok_or_else(|| {
         Status::failed_precondition("custom refresh requires a selected credential issuer")
     })?;
-    let descriptor = source
-        .issuer()
-        .list_strategies()
-        .await?
-        .strategies
-        .into_iter()
-        .find(|descriptor| descriptor.name == request.strategy_name)
+    let strategies = source.issuer().list_strategies().await?.strategies;
+    let mut matching = strategies
+        .iter()
+        .filter(|descriptor| descriptor.name == request.strategy_name);
+    let descriptor = matching
+        .next()
         .ok_or_else(|| Status::failed_precondition("issuer grant strategy is unavailable"))?;
-    if descriptor.outputs.len() != 1 {
+    if matching.next().is_some() {
         return Err(Status::failed_precondition(
-            "custom refresh configuration requires a single-output minter",
+            "issuer grant strategy is ambiguous",
         ));
     }
-    // The authenticated issuer descriptor, not caller annotations, determines
-    // which fields are secret material. Explicit contrary annotations fail.
+    // The authenticated issuer descriptor, not caller or profile annotations,
+    // determines secret material. Explicit contrary annotations fail.
     for key in &request.secret_material_keys {
         if !request.material.contains_key(key)
             || !descriptor
@@ -59,17 +80,6 @@ pub(in crate::grpc::provider) async fn configure_custom(
             return Err(invalid());
         }
     }
-    let seconds = |key: &str, default: i64| -> Result<i64, Status> {
-        let value = crate::provider_refresh::parse_material_i64(&request.material, key)?
-            .filter(|value| *value != 0)
-            .unwrap_or(default);
-        if !(0..=43_200).contains(&value) {
-            return Err(invalid());
-        }
-        Ok(value)
-    };
-    // Reserve scheduling controls for the gateway just as the built-in path
-    // does. Refuse ambiguous descriptors rather than swallowing minter inputs.
     for field in descriptor.config.iter().chain(&descriptor.secret_material) {
         if matches!(
             field.name.as_str(),
@@ -80,10 +90,100 @@ pub(in crate::grpc::provider) async fn configure_custom(
             ));
         }
     }
-    let lead = seconds("refresh_before_seconds", 300)?;
-    let lifetime = seconds("max_lifetime_seconds", 3600)?;
+    let _guard = state
+        .compute
+        .mutation_guard(MutationScope::Workspace(workspace))
+        .await
+        .map_err(|error| {
+            crate::grpc::persistence_error_to_status(error, "acquire provider mutation lock")
+        })?;
+    let provider = state
+        .store
+        .get_message_by_name::<Provider>(workspace, request.provider.trim())
+        .await
+        .map_err(|_| Status::internal("fetch provider failed"))?
+        .ok_or_else(|| Status::not_found("provider not found"))?;
+    source.register_provider(&provider)?;
+    let catalog = state
+        .provider_profile_sources
+        .snapshot_catalog(&state.store, workspace)
+        .await?;
+    let key = request.credential_key.trim();
+    let profile = super::super::get_provider_type_profile_for_scope(
+        &catalog,
+        &provider.r#type,
+        &provider.profile_workspace,
+    );
+    let defaults = super::super::provider_refresh_defaults(&catalog, &provider, key);
+    let outputs = if let Some(refresh) = &defaults {
+        if refresh.strategy != ProviderCredentialRefreshStrategy::Unspecified
+            || refresh.strategy_name != request.strategy_name
+        {
+            return Err(Status::failed_precondition(
+                "custom refresh does not match the profile refresh declaration",
+            ));
+        }
+        let profile = profile.as_ref().ok_or_else(invalid)?;
+        let diagnostics = openshell_providers::validate_profile_set_with_strategies(
+            &[(String::new(), profile.clone())],
+            &strategies,
+        );
+        if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error")
+        {
+            return Err(Status::failed_precondition(
+                "profile refresh is incompatible with the selected issuer",
+            ));
+        }
+        openshell_providers::refresh_output_bindings(profile, key, descriptor)
+            .map_err(Status::failed_precondition)?
+    } else {
+        let [output] = descriptor.outputs.as_slice() else {
+            return Err(Status::failed_precondition(
+                "multi-output custom refresh requires an unambiguous profile output mapping",
+            ));
+        };
+        BTreeMap::from([(output.clone(), key.into())])
+    };
+    let lead = schedule(
+        &request.material,
+        "refresh_before_seconds",
+        defaults.as_ref().and_then(|refresh| {
+            refresh
+                .refresh_before_wkt
+                .to_proto(refresh.refresh_before_seconds)
+        }),
+        Duration::from_mins(5),
+    )?;
+    let lifetime = schedule(
+        &request.material,
+        "max_lifetime_seconds",
+        defaults.as_ref().and_then(|refresh| {
+            refresh
+                .max_lifetime_wkt
+                .to_proto(refresh.max_lifetime_seconds)
+        }),
+        Duration::from_hours(1),
+    )?;
     request.material.remove("refresh_before_seconds");
     request.material.remove("max_lifetime_seconds");
+    if let Some(refresh) = &defaults {
+        if !refresh.token_url.is_empty() {
+            if request.material.contains_key("token_url") {
+                return Err(invalid());
+            }
+            request
+                .material
+                .insert("token_url".into(), refresh.token_url.clone());
+        }
+        if !refresh.scopes.is_empty() && !request.material.contains_key("scope") {
+            request
+                .material
+                .insert("scope".into(), refresh.scopes.join(" "));
+        }
+        super::super::validate_refresh_material(&request.material, Some(refresh))?;
+    }
     let mut material = std::collections::HashMap::new();
     for field in &descriptor.secret_material {
         if let Some(value) = request.material.remove(&field.name) {
@@ -110,39 +210,13 @@ pub(in crate::grpc::provider) async fn configure_custom(
     {
         return Err(invalid());
     }
-    let _guard = state
-        .compute
-        .mutation_guard(MutationScope::Workspace(workspace))
-        .await
-        .map_err(|error| {
-            crate::grpc::persistence_error_to_status(error, "acquire provider mutation lock")
-        })?;
-    let provider = state
-        .store
-        .get_message_by_name::<Provider>(workspace, request.provider.trim())
-        .await
-        .map_err(|_| Status::internal("fetch provider failed"))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    source.register_provider(&provider)?;
-    let catalog = state
-        .provider_profile_sources
-        .snapshot_catalog(&state.store, workspace)
-        .await?;
-    let key = request.credential_key.trim();
-    if super::super::provider_refresh_defaults(&catalog, &provider, key).is_some() {
-        return Err(Status::failed_precondition(
-            "custom refresh cannot override a profile refresh declaration",
-        ));
+    // Check every key in the fixed bundle before allocating any issuer state.
+    // The workspace guard excludes concurrent configure/create/attach races.
+    for output_key in outputs.values() {
+        super::super::validate_provider_credential_key_available_for_attached_sandboxes_with_source(
+            &state.store, &catalog, workspace, &provider, output_key, Some(source),
+        ).await?;
     }
-    super::super::validate_provider_credential_key_available_for_attached_sandboxes_with_source(
-        &state.store,
-        &catalog,
-        workspace,
-        &provider,
-        key,
-        Some(source),
-    )
-    .await?;
     super::configuration::publish_grant(
         state,
         source,
@@ -150,9 +224,15 @@ pub(in crate::grpc::provider) async fn configure_custom(
         GrantPlan {
             credential_key: key.into(),
             strategy: request.strategy_name,
-            outputs: BTreeMap::from([(descriptor.outputs[0].clone(), key.into())]),
-            refresh_before_ms: u64::try_from(lead).map_err(|_| invalid())? * 1000,
-            max_lifetime_seconds: u32::try_from(lifetime).map_err(|_| invalid())?,
+            outputs,
+            refresh_before_ms: u64::try_from(lead.as_millis()).map_err(|_| invalid())?,
+            max_lifetime_seconds: u32::try_from(
+                lifetime
+                    .as_secs()
+                    .checked_add(u64::from(lifetime.subsec_nanos() != 0))
+                    .ok_or_else(invalid)?,
+            )
+            .map_err(|_| invalid())?,
         },
         &request.material,
         &material,

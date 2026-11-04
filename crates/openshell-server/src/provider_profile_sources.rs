@@ -19,7 +19,8 @@ use openshell_gateway_interceptors::{
     ProviderProfileSourceSnapshot as InterceptorProfileSnapshot,
 };
 use openshell_providers::{
-    ProfileValidationDiagnostic, ProviderTypeProfile, normalize_profile_id, validate_profile_set,
+    ProfileValidationDiagnostic, ProviderTypeProfile, bind_profile_refresh_strategies,
+    normalize_profile_id, validate_profile_set, validate_profile_set_with_strategies,
 };
 use prost::Message as _;
 use sha2::{Digest, Sha256};
@@ -286,6 +287,14 @@ pub struct ProviderProfileSources {
     /// Sources served from a refreshed snapshot, also present in `sources`.
     cached: Vec<Arc<CachedProviderProfileSource>>,
     refresh_interval: Duration,
+    strategy_source: Option<Arc<dyn crate::credential_source::ProviderCredentialSource>>,
+    strategy_catalog: Arc<tokio::sync::Mutex<Option<StrategyCatalogSnapshot>>>,
+}
+
+#[derive(Debug)]
+struct StrategyCatalogSnapshot {
+    profiles_revision: String,
+    strategies: Vec<openshell_core::proto::credentials::minter::v1::StrategyDescriptor>,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +343,8 @@ impl ProviderProfileSources {
             sources,
             cached: Vec::new(),
             refresh_interval: Duration::ZERO,
+            strategy_source: None,
+            strategy_catalog: Arc::default(),
         }
     }
 
@@ -393,7 +404,21 @@ impl ProviderProfileSources {
             sources,
             cached,
             refresh_interval: refresh_interval.unwrap_or_default(),
+            strategy_source: None,
+            strategy_catalog: Arc::default(),
         })
+    }
+
+    /// Bind profile validation to the same selected issuer used for mutations
+    /// and delivery, in both embedded and remote deployments.
+    #[must_use]
+    pub fn with_strategy_source(
+        mut self,
+        source: Arc<dyn crate::credential_source::ProviderCredentialSource>,
+    ) -> Self {
+        self.strategy_source = Some(source);
+        self.strategy_catalog = Arc::default();
+        self
     }
 
     /// Refresh every cached source. Returns whether any revision changed.
@@ -495,7 +520,59 @@ impl ProviderProfileSources {
         workspace: &str,
     ) -> Result<EffectiveProviderProfileCatalog, Status> {
         let snapshots = self.snapshots(store, workspace).await?;
-        let catalog = build_effective_profiles(snapshots)?;
+        let needs_strategies = snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.profiles)
+            .flat_map(|profile| &profile.profile.credentials)
+            .filter_map(|credential| credential.refresh.as_ref())
+            .any(|refresh| {
+                openshell_providers::custom_strategy_name_is_valid(&refresh.strategy_name)
+                    || openshell_providers::resolve_refresh_strategy(
+                        refresh.strategy,
+                        &refresh.strategy_name,
+                    )
+                    .is_ok_and(openshell_providers::is_gateway_mintable_strategy)
+            });
+        let strategies = match self.strategy_source.as_ref().filter(|_| needs_strategies) {
+            Some(source) => {
+                // Runtime builds reuse catalog evidence for the exact authored
+                // snapshot. They must not depend on a fresh issuer RPC when
+                // versioned credential values are already cached. Public profile
+                // mutations and refresh configuration still validate live.
+                let mut hasher = Sha256::new();
+                hasher.update(b"openshell-profile-strategy-catalog-v1");
+                for snapshot in &snapshots {
+                    hasher.update((snapshot.source_id.len() as u64).to_le_bytes());
+                    hasher.update(snapshot.source_id.as_bytes());
+                    hasher.update((snapshot.revision.len() as u64).to_le_bytes());
+                    hasher.update(snapshot.revision.as_bytes());
+                    for profile in &snapshot.profiles {
+                        let bytes = canonical_provider_profile_bytes(&profile.profile);
+                        hasher.update((bytes.len() as u64).to_le_bytes());
+                        hasher.update(bytes);
+                    }
+                }
+                let revision = format!("sha256:{:x}", hasher.finalize());
+                let mut cached = self.strategy_catalog.lock().await;
+                if let Some(cached) = cached
+                    .as_ref()
+                    .filter(|cached| cached.profiles_revision == revision)
+                {
+                    Some(cached.strategies.clone())
+                } else {
+                    let strategies = source.remote_mutations().ok_or_else(|| {
+                        Status::failed_precondition("selected credential source does not expose an issuer strategy catalog")
+                    })?.issuer().list_strategies().await?.strategies;
+                    *cached = Some(StrategyCatalogSnapshot {
+                        profiles_revision: revision,
+                        strategies: strategies.clone(),
+                    });
+                    Some(strategies)
+                }
+            }
+            None => None,
+        };
+        let catalog = build_effective_profiles_with_strategies(snapshots, strategies.as_deref())?;
         debug!(
             catalog_revision = %catalog.revision(),
             source_fetch_count = catalog.source_count(),
@@ -726,8 +803,16 @@ fn scope_to_string(scope: ProfileScope) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn build_effective_profiles(
     snapshots: Vec<CollectedProviderProfileSnapshot>,
+) -> Result<EffectiveProviderProfileCatalog, Status> {
+    build_effective_profiles_with_strategies(snapshots, None)
+}
+
+fn build_effective_profiles_with_strategies(
+    snapshots: Vec<CollectedProviderProfileSnapshot>,
+    strategies: Option<&[openshell_core::proto::credentials::minter::v1::StrategyDescriptor]>,
 ) -> Result<EffectiveProviderProfileCatalog, Status> {
     let mut source_ids = BTreeSet::new();
     let mut profiles: BTreeMap<String, EffectiveProfileEntry> = BTreeMap::new();
@@ -779,7 +864,7 @@ fn build_effective_profiles(
                 })
                 .collect();
             if !platform.is_empty() {
-                validate_source_profiles(source_id, &platform)?;
+                validate_source_profiles(source_id, &platform, strategies)?;
             }
             let workspace: Vec<_> = snapshot
                 .profiles
@@ -793,7 +878,7 @@ fn build_effective_profiles(
                 })
                 .collect();
             if !workspace.is_empty() {
-                validate_source_profiles(source_id, &workspace)?;
+                validate_source_profiles(source_id, &workspace, strategies)?;
             }
         } else {
             let source_profiles = snapshot
@@ -806,7 +891,7 @@ fn build_effective_profiles(
                     )
                 })
                 .collect::<Vec<_>>();
-            validate_source_profiles(source_id, &source_profiles)?;
+            validate_source_profiles(source_id, &source_profiles, strategies)?;
         }
 
         for scoped_profile in snapshot.profiles {
@@ -820,7 +905,16 @@ fn build_effective_profiles(
             let mut response = scoped_profile.profile;
             response.source = source_id.to_string();
             response.scope = scope_to_string(scoped_profile.scope).to_string();
-            let profile = ProviderTypeProfile::from_proto(&response);
+            let mut bound = [(
+                source_id.to_string(),
+                ProviderTypeProfile::from_proto(&response),
+            )];
+            if let Some(strategies) = strategies {
+                // The complete source was validated above; retain only local,
+                // non-serializable runtime eligibility evidence.
+                let _ = bind_profile_refresh_strategies(&mut bound, strategies);
+            }
+            let [(_, profile)] = bound;
 
             // Conversion and source normalization preserve unsupported and
             // duplicate MCP revisions, so validation above cannot have
@@ -894,8 +988,12 @@ fn build_effective_profiles(
 fn validate_source_profiles(
     source_id: &str,
     profiles: &[(String, ProviderTypeProfile)],
+    strategies: Option<&[openshell_core::proto::credentials::minter::v1::StrategyDescriptor]>,
 ) -> Result<(), Status> {
-    let diagnostics = validate_profile_set(profiles);
+    let diagnostics = strategies.map_or_else(
+        || validate_profile_set(profiles),
+        |strategies| validate_profile_set_with_strategies(profiles, strategies),
+    );
     if let Some(diagnostic) = diagnostics
         .into_iter()
         .find(|diagnostic| diagnostic.severity == "error")
@@ -906,6 +1004,32 @@ fn validate_source_profiles(
         )));
     }
     Ok(())
+}
+
+/// Validate public import/update/lint requests using the selected issuer rather
+/// than accepting a custom-name prefix or assuming built-ins are installed.
+pub async fn validate_profiles_for_selected_issuer(
+    state: &ServerState,
+    profiles: &mut [(String, ProviderTypeProfile)],
+) -> Result<Vec<ProfileValidationDiagnostic>, Status> {
+    let needs_strategies = profiles
+        .iter()
+        .flat_map(|(_, profile)| &profile.credentials)
+        .filter_map(|credential| credential.refresh.as_ref())
+        .any(|refresh| {
+            refresh.is_gateway_mintable()
+                || openshell_providers::custom_strategy_name_is_valid(&refresh.strategy_name)
+        });
+    if !needs_strategies {
+        return Ok(validate_profile_set(profiles));
+    }
+    match state.remote_provider_mutations()? {
+        Some(source) => {
+            let strategies = source.issuer().list_strategies().await?.strategies;
+            Ok(bind_profile_refresh_strategies(profiles, &strategies))
+        }
+        None => Ok(validate_profile_set(profiles)),
+    }
 }
 
 fn format_diagnostic(diagnostic: ProfileValidationDiagnostic) -> String {

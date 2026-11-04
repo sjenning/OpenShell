@@ -49,6 +49,7 @@ jobs:
       fail-on-static-findings: false
       images: |
         ghcr.io/nvidia/openshell/gateway:${{ inputs.source-sha }}
+        ghcr.io/nvidia/openshell/credential-issuer:${{ inputs.source-sha }}
         ghcr.io/nvidia/openshell/sandbox:${{ inputs.source-sha }}
         ghcr.io/nvidia/openshell/supervisor:${{ inputs.source-sha }}
     secrets:

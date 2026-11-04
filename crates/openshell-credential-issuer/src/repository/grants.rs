@@ -78,6 +78,13 @@ pub struct GrantState {
     pub next_refresh_at_ms: i64,
     pub recovery_action: Option<RecoveryAction>,
     pub failure_code: String,
+    /// Additive durable history; old format-version-one records have no history.
+    #[serde(default)]
+    pub last_refresh_time_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error_time_ms: Option<i64>,
+    #[serde(default)]
+    pub provider_error_subtype: String,
     pub attempt: Option<GrantAttempt>,
     pub completed_attempt: Option<String>,
     pub retired: Vec<RetiredBacking>,
@@ -190,6 +197,17 @@ impl GrantState {
             .is_some_and(|expiration| expiration <= 0)
             || self.failure_code.len() > 128
             || self
+                .last_refresh_time_ms
+                .into_iter()
+                .chain(self.last_error_time_ms)
+                .any(|time| time <= 0 || openshell_core::time::timestamp_from_millis(time).is_err())
+            || (!self.provider_error_subtype.is_empty()
+                && crate::observability::recognized_provider_error_subtype(
+                    &self.failure_code,
+                    &self.provider_error_subtype,
+                )
+                .is_none())
+            || self
                 .failure_code
                 .chars()
                 .any(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_')
@@ -279,6 +297,9 @@ impl GrantState {
             && self.next_refresh_at_ms == other.next_refresh_at_ms
             && self.recovery_action == other.recovery_action
             && self.failure_code == other.failure_code
+            && self.last_refresh_time_ms == other.last_refresh_time_ms
+            && self.last_error_time_ms == other.last_error_time_ms
+            && self.provider_error_subtype == other.provider_error_subtype
             && self.completed_attempt == other.completed_attempt
     }
     fn allows(&self, next: GrantPhase) -> bool {

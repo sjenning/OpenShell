@@ -261,6 +261,7 @@ async fn issuer_metadata_ownership_is_checked_before_a_forged_gateway_binding_ca
                 provider_id: id(),
                 credential_key: "TOKEN".into(),
                 provider: "other-provider".into(),
+                ..Default::default()
             }),
             strategy: "custom:rotation".into(),
             outputs: HashMap::from([
@@ -339,7 +340,7 @@ async fn issuer_metadata_ownership_is_checked_before_a_forged_gateway_binding_ca
 }
 #[tokio::test]
 async fn remote_refresh_recipe_uses_a_scalar_allowlist_and_rejects_unclassified_diagnostics() {
-    let (_directory, _state, _issuer, _minter, provider, handoff) = context().await;
+    let (_directory, state, _issuer, _minter, provider, handoff) = context().await;
     let binding = handoff.published_grant(&provider).unwrap();
     let mut status = openshell_core::proto::ProviderCredentialRefreshStatus {
         provider_id: binding.provider_id.clone(),
@@ -355,6 +356,33 @@ async fn remote_refresh_recipe_uses_a_scalar_allowlist_and_rejects_unclassified_
             .unwrap()
             .contains("private-upstream-response")
     );
+    // Old receipts omit history. New ones preserve admitted metadata without
+    // reading current issuer state or storing free-form upstream diagnostics.
+    let legacy: IssuerRefresh =
+        serde_json::from_str(&serde_json::to_string(&recipe).unwrap()).unwrap();
+    assert!(
+        legacy
+            .restore(&state.store)
+            .await
+            .unwrap()
+            .last_refresh_time
+            .is_none()
+    );
+    status.last_refresh_time = Some(openshell_core::time::timestamp_from_millis(1234).unwrap());
+    status.last_error_time = Some(openshell_core::time::timestamp_from_millis(2345).unwrap());
+    status.failure_code = "oauth_invalid_grant".into();
+    status.provider_error_subtype = "invalid_rapt".into();
+    let recipe = IssuerRefresh::capture(binding.clone(), &status).unwrap();
+    let encoded = serde_json::to_string(&recipe).unwrap();
+    assert!(!encoded.contains("private-upstream-response"));
+    let restored = recipe.restore(&state.store).await.unwrap();
+    assert_eq!(restored.last_refresh_time, status.last_refresh_time);
+    assert_eq!(restored.last_error_time, status.last_error_time);
+    assert_eq!(restored.provider_error_subtype, "invalid_rapt");
+    assert_ne!(restored.last_error, status.last_error);
+    status.provider_error_subtype = "unclassified-private-subtype".into();
+    assert!(IssuerRefresh::capture(binding.clone(), &status).is_err());
+    status.provider_error_subtype.clear();
     status.failure_code = "unclassified private diagnostics".into();
     assert!(IssuerRefresh::capture(binding.clone(), &status).is_err());
     status.failure_code.clear();

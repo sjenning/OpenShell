@@ -44,9 +44,10 @@ pub(super) fn requests(request: &store::ResolveSecretsRequest, max: u32) -> Resu
             !id(&item.request_id)
                 || !id(&item.reference)
                 || !ids.insert(&item.request_id)
-                || item.owner.as_ref().is_none_or(|owner| {
-                    !id(&owner.workspace) || !id(&owner.provider_id) || !id(&owner.credential_key)
-                })
+                || item
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| crate::SecretOwner::from_wire(owner).is_err())
         })
     {
         return Err(Status::invalid_argument(
@@ -224,5 +225,27 @@ pub(super) fn status(expected: &str, status: Option<&refresh::GrantStatus>) -> R
         return Err(invalid());
     }
     timestamp(status.expiration_time.as_ref())?;
-    timestamp(status.next_refresh_time.as_ref())
+    timestamp(status.next_refresh_time.as_ref())?;
+    for history in [
+        status.last_refresh_time.as_ref(),
+        status.last_error_time.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        timestamp(Some(history))?;
+        if timestamp_to_millis(history).map_err(|_| invalid())? <= 0 {
+            return Err(invalid());
+        }
+    }
+    if !status.provider_error_subtype.is_empty()
+        && crate::observability::recognized_provider_error_subtype(
+            &status.failure_code,
+            &status.provider_error_subtype,
+        )
+        .is_none()
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }

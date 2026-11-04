@@ -5,6 +5,7 @@ use openshell_credential_issuer::daemon::{Config, Daemon};
 use std::{path::PathBuf, process::ExitCode};
 use tokio::io::AsyncReadExt as _;
 use tonic::Status;
+use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 #[derive(Parser)]
 #[command(
     version,
@@ -46,12 +47,22 @@ async fn run(args: Args) -> Result<(), Status> {
         println!("Credential issuer configuration is valid.");
         return Ok(());
     }
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.target() != "ocsf"
+                }))
+                .with_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                ),
         )
+        // Security audit is independent of the operational log-level filter.
+        .with(openshell_ocsf::tracing_layers::OcsfJsonlLayer::new(
+            std::io::stdout(),
+        ))
         .init();
     let shutdown = shutdown_signal()?;
     let daemon = Box::pin(Daemon::new(config)).await?;

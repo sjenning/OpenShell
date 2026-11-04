@@ -14,6 +14,7 @@ fn checkpoint() -> GrantCheckpoint {
                 workspace: "workspace".to_string(),
                 provider_id: "provider-id".to_string(),
                 credential_key: "ACCESS_TOKEN".to_string(),
+                ..Default::default()
             },
         },
         status: "configured".to_string(),

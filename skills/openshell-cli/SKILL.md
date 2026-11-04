@@ -14,8 +14,8 @@ The OpenShell CLI (`openshell`) is the primary interface for managing sandboxes,
 The experimental `openshell-credential-issuer` service is a separate binary, not
 an `openshell` subcommand. When explicitly operating it, use its own `--help` and
 [service documentation](https://docs.nvidia.com/openshell/latest/extensibility/credential-issuer).
-Starting it does not enable gateway remote mode or relocate gateway-local SSH
-and supervisor launch secrets.
+Starting it does not change the gateway's selected issuer or migrate an existing
+secret store.
 
 **Companion skill**: For creating or modifying sandbox policy YAML content (network rules, L7 inspection, access presets), use the `generate-sandbox-policy` skill. This skill covers the CLI *commands* for the policy lifecycle; `generate-sandbox-policy` covers policy *content authoring*.
 
@@ -231,40 +231,43 @@ openshell provider refresh status my-provider
 openshell provider refresh configure my-provider \
   --credential-key MS_GRAPH_ACCESS_TOKEN \
   --strategy oauth2-refresh-token \
-  --secret-material-env REFRESH_TOKEN=MS_GRAPH_REFRESH_TOKEN \
-  --credential-expires-at 2026-07-16T00:00:00Z
+  --secret-material-env REFRESH_TOKEN=MS_GRAPH_REFRESH_TOKEN
 openshell provider refresh rotate my-provider --credential-key ACCESS_TOKEN
 ```
 
 Prefer `--secret-material-env KEY[=ENVVAR]` for secret refresh material. `--material KEY=VALUE` is for non-secret material; `--secret-material-key` marks supplied material keys as secret.
 
-In embedded mode, the gateway stores secret refresh material through its active
-credential driver. With Vault selected, refresh tokens, client secrets, and private keys live in
-Vault alongside injectable provider credentials; refresh state contains only
-opaque handles. A credential-backend read or write failure makes refresh fail
-closed rather than falling back to inline storage. Before OpenShell 0.1.0, the
-gateway does not migrate legacy inline refresh material or move secrets between
-credential backends. Reconfigure affected grants after upgrading, and remove or
-reconfigure credentials while the original backend remains available before
-changing backends. Do not run mixed gateway versions against the same refresh
-records.
+The selected credential issuer owns refresh configuration, material, scheduling,
+and minting in both embedded and remote modes. Its credential backend stores
+refresh tokens, client secrets, and private keys alongside injectable credentials.
+Gateway records retain grant and output references, not refresh material. A
+backend failure fails closed rather than falling back to inline storage.
+Configuration creates a new epoch with pending references; delivery waits for the
+issuer scheduler or `provider refresh rotate` to publish first values.
 
-With an explicitly configured remote credential issuer, builtin refresh
-configuration sends configuration/material only to issuer-owned encrypted
-storage. It replaces the output epoch with pending references rather than
-copying old values/expirations. Delivery waits for the issuer scheduler or
-`provider refresh rotate` to publish first values. For SDK/API clients, reuse a
-stable request ID for configuration/rotation retries; replay returns metadata without reminting,
-and fails if that epoch was retired or replaced. SDK/API clients may configure
-registered single-output custom minters with `strategy_name` and an unspecified
-legacy enum. The issuer descriptor classifies material; custom profile refresh
-declarations and multi-output custom configuration remain unsupported. Refresh
-deletion preserves the latest published output bundle as static credentials,
-including its original token expiration. Restart processes holding the old
-refresh-managed workload handle after deletion. It fails before changing configuration
-if no first values exist; rotate first, or delete the provider if values are not
-needed. Interrupted transfers resume through gateway recovery. Consult the installed CLI help and published
-gateway configuration reference before selecting this experimental mode.
+For SDK/API clients, reuse a stable request ID for configuration/rotation retries.
+Replay returns metadata without reminting and fails after the epoch is retired
+or replaced. A profile can name a custom strategy through `strategy_name` only
+when that exact name is registered in the selected issuer catalog. Built-in
+minters must also appear in the catalog. Leave the legacy enum unspecified for
+custom strategies; do not invent a CLI `--strategy` value that installed help
+does not support. The issuer descriptor, not caller annotations, classifies
+secret material, and profile material declarations must agree with it.
+
+Bind multi-output custom strategies through profile `additional_outputs`, using
+semantic output IDs and sibling credentials with one environment key each. The
+primary is the sole descriptor output not mapped as an additional output,
+regardless of descriptor order; its credential must also have one environment
+key. Reject ambiguous mappings and collisions across the complete fixed bundle
+before configuring refresh. Exported profiles do not carry cached issuer
+registration evidence, so another gateway validates its own selected catalog.
+
+Refresh deletion preserves the latest published output bundle as static
+credentials with its original expiration. Restart processes holding the old
+refresh-managed workload handle after deletion. If no first values exist, rotate
+first or delete the provider when values are not needed. Interrupted transfers
+resume through gateway recovery. Consult installed CLI help and the published
+gateway configuration reference before selecting an issuer deployment mode.
 
 Gateway-managed refresh credentials use an identity-stable workload handle.
 Routine automatic refresh and `provider refresh rotate` update the access token
@@ -282,7 +285,7 @@ After versioned rotation, expiration-only edits that change or clear the
 issuer-owned expiration fail. Replace a static value in the same update to set
 a new expiration; rotate while refresh owns it. When reconfiguring refresh,
 omit explicit expiration to retain the current issuer-owned expiration; a differing
-expiration fails before changing embedded refresh configuration. With a remote
+expiration fails before changing refresh configuration. With the selected
 issuer, omit `expiration_time` for both built-in and custom refresh configuration:
 any explicit expiration is rejected before creating or replacing a grant, and
 mint results determine the new values' expiration.

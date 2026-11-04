@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tonic::Status;
 
 use crate::credentials::{InternalSecretOwner, InternalSecretStore};
-use crate::persistence::{PersistenceError, Store};
+use crate::persistence::{AtomicWrite, PersistenceError, Store};
 
 const OBJECT_TYPE: &str = "sandbox_ssh_identity_v1";
 const CANDIDATE_TYPE: &str = "sandbox_ssh_identity_candidate_v1";
@@ -33,6 +33,7 @@ pub struct SshIdentityStore {
 
 #[cfg(test)]
 mod tests {
+    mod issuer;
     use super::*;
     use crate::credentials::CredentialRuntime;
     use openshell_core::jwt::{CredentialEpoch, SecretJwt, SessionRotation, SupervisorAuthBundle};
@@ -408,6 +409,7 @@ impl SshIdentityStore {
 
     fn owner<'a>(sandbox: &'a Sandbox, name: &'a str) -> InternalSecretOwner<'a> {
         InternalSecretOwner {
+            kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
             id: sandbox.object_id(),
             name,
             workspace: sandbox.object_workspace(),
@@ -481,19 +483,20 @@ impl SshIdentityStore {
             self.credentials.delete(owner, &handles).await?;
             return Err(Status::unavailable("stage sandbox SSH identity failed"));
         }
-        match self
-            .store
-            .create_scoped(
-                OBJECT_TYPE,
-                &Self::identity_id(sandbox),
-                sandbox.object_id(),
-                sandbox.object_workspace(),
-                sandbox.object_id(),
-                &payload,
-                None,
-            )
-            .await
-        {
+        let mut writes = self
+            .credentials
+            .publication_writes(owner, &candidate_id, &candidate_id, &handles)
+            .await?;
+        // Published identity lookup and deletion use its immutable id; only
+        // candidate rows require the generic sandbox scope for enumeration.
+        writes.push(AtomicWrite::Create {
+            object_type: OBJECT_TYPE.into(),
+            id: Self::identity_id(sandbox),
+            name: sandbox.object_id().into(),
+            workspace: sandbox.object_workspace().into(),
+            payload,
+        });
+        match self.store.write_atomically(&writes).await {
             Ok(_) => {
                 self.store
                     .delete(CANDIDATE_TYPE, &candidate_id)
@@ -502,6 +505,14 @@ impl SshIdentityStore {
                         Status::unavailable("finish sandbox SSH identity staging failed")
                     })?;
                 Ok(identity)
+            }
+            Err(error) if !error.is_expected() => {
+                // A lost native acknowledgement may have published the key
+                // and its intent together. Keep candidate ownership until a
+                // later lookup/recovery establishes the durable outcome.
+                Err(Status::unavailable(
+                    "sandbox SSH identity publication outcome is unknown",
+                ))
             }
             Err(error) => {
                 self.credentials.delete(owner, &handles).await?;
@@ -589,4 +600,94 @@ impl SshIdentityStore {
             .await?;
         Ok(())
     }
+}
+
+/// Adopt existing private keys without reading, regenerating or changing their
+/// public fingerprints. Publication and candidates retain their owning rows.
+pub async fn migrate_issuer(
+    store: &Store,
+    legacy: &crate::credentials::CredentialRuntime,
+    host: &openshell_credential_issuer::service::CredentialStoreService,
+    source: &crate::credential_source::RemoteProviderSource,
+) -> Result<(), Status> {
+    use crate::persistence::{AtomicWrite, ObjectListQuery};
+    let _identity = store
+        .acquire_ssh_identity_mutation_guard()
+        .await
+        .map_err(|_| Status::unavailable("SSH issuer upgrade coordination failed"))?;
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list_object_page(
+                "sandbox",
+                ObjectListQuery::AllWorkspaces,
+                cursor.as_ref(),
+                128,
+            )
+            .await
+            .map_err(|_| Status::unavailable("SSH issuer upgrade inventory failed"))?;
+        for row in page.records {
+            let sandbox = Sandbox::decode(row.payload.as_slice())
+                .map_err(|_| Status::data_loss("invalid sandbox during SSH issuer upgrade"))?;
+            let name = SshIdentityStore::owner_name(&sandbox);
+            let owner = SshIdentityStore::owner(&sandbox, &name);
+            let mut records = Vec::new();
+            if let Some(identity) = store
+                .get(OBJECT_TYPE, &SshIdentityStore::identity_id(&sandbox))
+                .await
+                .map_err(|_| Status::unavailable("SSH issuer upgrade read failed"))?
+            {
+                records.push(identity);
+            }
+            let mut offset = 0;
+            loop {
+                let candidates = store
+                    .list_by_scope(CANDIDATE_TYPE, sandbox.object_id(), 100, offset)
+                    .await
+                    .map_err(|_| Status::unavailable("SSH issuer candidate inventory failed"))?;
+                let count = candidates.len();
+                records.extend(candidates);
+                if count < 100 {
+                    break;
+                }
+                offset += 100;
+            }
+            for row in records {
+                let mut identity: StoredIdentity = serde_json::from_slice(&row.payload)
+                    .map_err(|_| Status::data_loss("invalid SSH identity during issuer upgrade"))?;
+                let handle = CredentialHandle::decode(identity.credential_handle.as_slice())
+                    .map_err(|_| Status::data_loss("invalid SSH handle during issuer upgrade"))?;
+                let imported = crate::credential_source::embedded::migration::internal_handle(
+                    legacy,
+                    host,
+                    source,
+                    owner,
+                    sandbox.object_id(),
+                    CREDENTIAL_KEY,
+                    &handle,
+                )
+                .await?;
+                if imported == handle {
+                    continue;
+                }
+                identity.credential_handle = imported.encode_to_vec();
+                let payload = serde_json::to_vec(&identity)
+                    .map_err(|_| Status::internal("encode SSH issuer upgrade failed"))?;
+                store
+                    .write_atomically(&[AtomicWrite::Update {
+                        object_type: row.object_type,
+                        id: row.id,
+                        payload,
+                        expected_version: row.resource_version,
+                    }])
+                    .await
+                    .map_err(|_| Status::aborted("SSH identity changed during issuer upgrade"))?;
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    Ok(())
 }

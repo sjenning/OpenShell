@@ -34,6 +34,7 @@ async fn context() -> (
                 provider_id: provider.object_id().into(),
                 provider: "provider".into(),
                 credential_key: "TOKEN".into(),
+                ..Default::default()
             }),
             value: "published-token".into(),
             idempotency_key: "initial-collision-token".into(),
@@ -95,6 +96,7 @@ async fn rotate(issuer: &Issuer, provider: &Provider, version: u64, expiration: 
                 provider_id: provider.object_id().into(),
                 provider: "provider".into(),
                 credential_key: "TOKEN".into(),
+                ..Default::default()
             }),
             reference: binding["reference"].as_str().unwrap().into(),
             expected_version: Some(version),

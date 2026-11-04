@@ -111,6 +111,7 @@ fn wire_owner() -> wire::SecretOwner {
         provider_id: "provider-id".to_string(),
         credential_key: "TOKEN".to_string(),
         provider: "display-name".to_string(),
+        ..Default::default()
     }
 }
 fn put() -> wire::PutSecretRequest {

@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- include "issuer.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "issuer.fullname" . }}
+  labels:
+    {{- include "issuer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Never overlap SQLite runtimes, including a one-replica rolling upgrade.
+  strategy:
+    {{- if eq .Values.database.kind "sqlite" }}
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "issuer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "issuer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: credential-issuer
+      annotations:
+        openshell.ai/config-revision: {{ .Values.config.revision | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "issuer.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Validate actual mounted configuration before listening, not just Helm's
+      # database declaration. The daemon validates it again at startup.
+      initContainers:
+        # db-credstore chmods the KEK to 0600. Kubernetes projected Secrets are
+        # root-owned/read-only; never point that loader directly at the source.
+        - name: prepare-key
+          image: {{ .Values.encryption.initImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              test "$(wc -c < /key-source/key | tr -d '[:space:]')" = 32
+              cp /key-source/key /key-runtime/key
+              chmod 0600 /key-runtime/key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: encryption-source
+              mountPath: /key-source
+              readOnly: true
+            - name: encryption
+              mountPath: /key-runtime
+        - name: check-config
+          image: {{ include "issuer.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/openshell-issuer/config/issuer.toml", "--check-config"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openshell-issuer/config
+              readOnly: true
+      containers:
+        - name: credential-issuer
+          image: {{ include "issuer.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/openshell-issuer/config/issuer.toml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: issuer-mtls
+              containerPort: 8443
+              protocol: TCP
+          # These TCP probes check listener availability only. They do not bypass
+          # mTLS or claim application-level CredentialStore readiness.
+          startupProbe:
+            tcpSocket:
+              port: issuer-mtls
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: issuer-mtls
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openshell-issuer/config
+              readOnly: true
+            - name: tls
+              mountPath: /etc/openshell-issuer/tls
+              readOnly: true
+            - name: encryption
+              mountPath: /etc/openshell-issuer/encryption
+              # The runtime chmods this UID-owned memory-backed copy to 0600.
+              # Only prepare-key sees the read-only projected source Secret.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.database.existingClaim }}
+            - name: data
+              mountPath: /var/lib/openshell-issuer
+            {{- end }}
+            {{- range .Values.registrationSecrets }}
+            - name: registration-{{ .name }}
+              mountPath: /etc/openshell-issuer/registrations/{{ .name }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ .Values.config.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.config.key | quote }}
+                path: issuer.toml
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: client-ca.pem
+                path: client-ca.pem
+        - name: encryption
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: encryption-source
+          secret:
+            secretName: {{ .Values.encryption.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.encryption.key | quote }}
+                path: key
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        {{- if .Values.database.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.existingClaim | quote }}
+        {{- end }}
+        {{- range .Values.registrationSecrets }}
+        - name: registration-{{ .name }}
+          secret:
+            secretName: {{ .secretName | quote }}
+            defaultMode: 0440
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

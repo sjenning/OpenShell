@@ -76,6 +76,7 @@ async fn authenticated_issuer_revocation_pushes_static_invalidation_and_recovery
         provider_id: "provider".into(),
         credential_key: "GITHUB_TOKEN".into(),
         provider: "provider".into(),
+        ..Default::default()
     };
     let first = issuer
         .raw
@@ -335,6 +336,7 @@ async fn unknown_metadata_recovery_at_equal_versions_resolves_again() {
         provider_id: "provider".into(),
         credential_key: "GITHUB_TOKEN".into(),
         provider: "provider".into(),
+        ..Default::default()
     };
     let first = issuer
         .raw

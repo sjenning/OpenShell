@@ -15,6 +15,7 @@ async fn postgres_typed_references_publish_with_receipts_and_ignore_cleanup_only
         workspace: "default".to_string(),
         provider_id: "provider-id".to_string(),
         credential_key: key.to_string(),
+        ..Default::default()
     };
     for key in ["a", "b"] {
         refs.registry()

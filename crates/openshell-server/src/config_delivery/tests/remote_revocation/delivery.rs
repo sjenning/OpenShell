@@ -33,6 +33,7 @@ async fn fixture(mode: ConfigDeliveryMode) -> Fixture {
         provider_id: "provider".into(),
         credential_key: "GITHUB_TOKEN".into(),
         provider: "provider".into(),
+        ..Default::default()
     };
     let secret = issuer
         .raw

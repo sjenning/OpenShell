@@ -165,6 +165,9 @@ impl GrantRuntime {
             next_refresh_at_ms: i64::MAX,
             recovery_action: None,
             failure_code: String::new(),
+            last_refresh_time_ms: None,
+            last_error_time_ms: None,
+            provider_error_subtype: String::new(),
             attempt: None,
             completed_attempt: None,
             retired: Vec::new(),
@@ -226,6 +229,9 @@ impl GrantRuntime {
             payload: encode(&receipt)?,
         });
         store.commit(&mutations, &events).await?;
+        if events.iter().any(|event| event.kind == "grant") {
+            crate::observability::grant_transition(&scope, &state);
+        }
         Ok(reserved.response())
     }
     pub(super) async fn initialize(
@@ -371,6 +377,7 @@ impl GrantRuntime {
         store
             .commit(&mutations, &event.into_iter().collect::<Vec<_>>())
             .await?;
+        crate::observability::grant_transition(&scope, &state);
         Ok(response)
     }
 }

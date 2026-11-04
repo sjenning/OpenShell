@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::transport::WatchStream;
 use super::{ORDINARY, RemoteIssuer, failure, invalid, refresh, store, validation};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
-use tonic::{Request, Status, Streaming};
+use tonic::{Request, Status};
 
 /// Bounded, value-free stream. A reset/checkpoint does not perform caller-side
 /// reconciliation; consumers must keep their caches unavailable until it ends.
 pub struct RemoteWatch<T> {
-    stream: Streaming<T>,
+    stream: WatchStream<T>,
     _permit: OwnedSemaphorePermit,
     cursor: u64,
     terminated: bool,
@@ -144,3 +145,6 @@ impl RemoteIssuer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -36,6 +36,7 @@ fn owner() -> SecretOwner {
         workspace: "default".to_string(),
         provider_id: "provider-id".to_string(),
         credential_key: "ACCESS_TOKEN".to_string(),
+        ..Default::default()
     }
 }
 

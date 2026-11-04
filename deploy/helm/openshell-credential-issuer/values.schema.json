@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "imagePullSecrets": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}}}},
+    "config": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"existingSecret": {"type": "string"}, "key": {"type": "string", "minLength": 1}, "revision": {"type": "string"}}
+    },
+    "database": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"kind": {"enum": ["postgresql", "sqlite"]}, "existingClaim": {"type": "string"}}
+    },
+    "tls": {"type": "object", "additionalProperties": false, "properties": {"existingSecret": {"type": "string"}}},
+    "encryption": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"existingSecret": {"type": "string"}, "key": {"type": "string", "minLength": 1}, "initImage": {"type": "string", "minLength": 1}}
+    },
+    "registrationSecrets": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false, "required": ["name", "secretName"],
+        "properties": {"name": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"}, "secretName": {"type": "string", "minLength": 1}}
+      }
+    },
+    "serviceAccount": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"create": {"type": "boolean"}, "name": {"type": "string"}, "automountServiceAccountToken": {"type": "boolean"}, "annotations": {"type": "object", "additionalProperties": {"type": "string"}}}
+    },
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 2},
+    "resources": {"type": "object"},
+    "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"},
+    "networkPolicy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}, "ingressFrom": {"type": "array", "items": {"type": "object"}}}
+    },
+    "global": {"type": "object"}
+  }
+}

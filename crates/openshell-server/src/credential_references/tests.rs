@@ -249,6 +249,7 @@ async fn legacy_migration_is_idempotent_and_does_not_rewrite_providers() {
         .internal_secrets()
         .store(
             InternalSecretOwner {
+                kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
                 name: "provider",
                 workspace: "workspace",
                 id: "provider-id",

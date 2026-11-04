@@ -53,6 +53,7 @@ async fn native() -> (
         provider_id: provider_id.clone(),
         credential_key: key.into(),
         provider: "provider".into(),
+        ..Default::default()
     };
     let grant = issuer
         .raw
@@ -197,6 +198,7 @@ async fn whole_batch_immutable_owner_validation_precedes_freshness_and_value_rea
                 provider_id: "foreign-provider".into(),
                 credential_key: "STATIC_KEY".into(),
                 provider: String::new(),
+                ..Default::default()
             }),
             value: "must-not-export".into(),
             idempotency_key: "foreign".into(),

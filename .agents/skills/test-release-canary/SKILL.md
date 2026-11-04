@@ -48,6 +48,25 @@ validation lives in the `TypeScript SDK` branch check, including a publish
 dry-run. The tagged release workflow publishes the package to GitHub Packages;
 verify that job directly when diagnosing SDK publication failures.
 
+## Separate credential issuer coverage
+
+Release inventory also includes the Linux amd64/arm64
+`openshell-credential-issuer` binary archives, the
+`ghcr.io/nvidia/openshell/credential-issuer` image, and the separate
+`oci://ghcr.io/nvidia/openshell/openshell-credential-issuer` chart. The existing
+build lanes smoke both native binary archives and the exact candidate OCI
+archive; the Helm publishing action packages this chart alongside the gateway
+and workspace charts, including floating and SHA-pinned dev versions.
+
+The default Release Canary does **not** deploy the standalone issuer, configure
+a remote issuer, or exercise its custom-minter mTLS boundary. A green canary is
+not cross-cluster issuer evidence. Use the independent
+`mise run e2e:credential-issuer:kind` lane with matching candidate images and CLI
+for that coverage, and repeat with `OPENSHELL_ISSUER_E2E_DELIVERY_MODE=poll` for
+polling delivery. Follow `tests/suites/features/credential-issuer/README.md` for
+build prerequisites, selected-cluster exclusion guards, and run evidence. Do not
+reuse the user's selected cluster or infer deployment success from image smoke.
+
 ## Trigger paths
 
 The workflow has two triggers:

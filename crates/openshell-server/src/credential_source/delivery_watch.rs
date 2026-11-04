@@ -149,6 +149,7 @@ mod tests {
             provider_id: "provider".into(),
             credential_key: "TOKEN".into(),
             provider: "display".into(),
+            ..Default::default()
         };
         let first = issuer
             .watched

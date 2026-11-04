@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the generated resource name.
+fullnameOverride: ""
+# -- Issuer replicas; values above one require database.kind=postgresql.
+replicaCount: 1
+image:
+  # -- Issuer image repository, not the gateway image.
+  repository: ghcr.io/nvidia/openshell/credential-issuer
+  # -- Image tag; defaults to the chart appVersion.
+  tag: ""
+  # -- Optional immutable image digest (takes precedence over tag).
+  digest: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+# -- Existing image-pull Secret references.
+imagePullSecrets: []
+config:
+  # -- Required existing Secret holding the complete issuer.toml, including SQL credentials. Never put its contents in chart values.
+  existingSecret: ""
+  # -- Key within the config Secret.
+  key: issuer.toml
+  # -- Non-secret rollout revision; change after config/KEK changes. Do not use a secret value.
+  revision: ""
+database:
+  # -- Declared storage engine: postgresql or sqlite. The runtime independently validates the actual URL in the config Secret.
+  kind: postgresql
+  # -- Existing PVC mounted at /var/lib/openshell-issuer; required for SQLite. The chart never creates or deletes database storage.
+  existingClaim: ""
+tls:
+  # -- Required existing Secret containing tls.crt, tls.key, and client-ca.pem. Server certificate must match the private Service DNS name.
+  existingSecret: ""
+encryption:
+  # -- Required existing Secret containing a provisioned shared 32-byte encryption key.
+  existingSecret: ""
+  # -- Key within the encryption Secret; copied to /etc/openshell-issuer/encryption/key on a memory-backed volume at Pod startup.
+  key: key
+  # -- Pinned multi-arch BusyBox image for staging the read-only Secret as a UID-owned 0600 file required by the encrypted-store loader.
+  initImage: busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+# -- Existing Secrets mounted read-only below `/etc/openshell-issuer/registrations/<name>`. Use for minter CA/client identities and backend credentials.
+registrationSecrets: []
+# Example (names only, never secret contents):
+# - name: company-minter-identity
+#   secretName: issuer-minter-tls
+serviceAccount:
+  # -- Create a dedicated issuer ServiceAccount. No RBAC is granted by default.
+  create: true
+  # -- Existing name, or generated name when create=true.
+  name: ""
+  # -- Project an API token only when the configured Kubernetes Secrets/Vault backend requires one. Grant backend-specific RBAC separately.
+  automountServiceAccountToken: false
+  # -- ServiceAccount annotations.
+  annotations: {}
+# -- Shutdown grace must exceed shutdown_timeout_seconds in issuer.toml.
+terminationGracePeriodSeconds: 210
+# -- Resources for the issuer.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+# -- Pod annotations (never include secret values).
+podAnnotations: {}
+# -- Node selection.
+nodeSelector: {}
+# -- Scheduling tolerations.
+tolerations: []
+# -- Scheduling affinity.
+affinity: {}
+networkPolicy:
+  # -- Restrict ingress to explicitly selected private peers. An empty list denies all ingress. Egress remains operator-managed for SQL, minters, and identity providers.
+  enabled: true
+  # -- Kubernetes NetworkPolicyPeer entries for authorized gateway namespaces/pods or routed private CIDRs. mTLS and workspace authorization still apply.
+  ingressFrom: []

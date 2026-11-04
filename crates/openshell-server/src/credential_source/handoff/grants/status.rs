@@ -126,6 +126,17 @@ impl PublishedGrant {
         {
             return Err(invalid());
         }
+        for timestamp in [
+            status.last_refresh_time.as_ref(),
+            status.last_error_time.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if openshell_core::time::timestamp_to_millis(timestamp).map_err(|_| invalid())? <= 0 {
+                return Err(invalid());
+            }
+        }
         let strategy = if self.strategy_name.starts_with("custom:") {
             ProviderCredentialRefreshStrategy::Unspecified
         } else {
@@ -145,9 +156,23 @@ impl PublishedGrant {
             },
             expiration_time: status.expiration_time,
             next_refresh_time: status.next_refresh_time,
+            last_refresh_time: status.last_refresh_time,
+            last_error_time: status.last_error_time,
+            last_error: openshell_credential_issuer::observability::safe_error_message(
+                &status.failure_code,
+            )
+            .into(),
+            provider_error_subtype:
+                openshell_credential_issuer::observability::recognized_provider_error_subtype(
+                    &status.failure_code,
+                    &status.provider_error_subtype,
+                )
+                .unwrap_or_default()
+                .into(),
             recovery_action: recovery(status.recovery_action)?,
             failure_code: status.failure_code,
-            ..Default::default()
         })
     }
 }
+#[cfg(test)]
+mod tests;

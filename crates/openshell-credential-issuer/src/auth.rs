@@ -16,14 +16,37 @@ use tonic::{
 #[derive(Debug, Clone)]
 pub struct GatewayPolicy {
     bindings: BTreeMap<String, BTreeSet<String>>,
+    local: Option<GatewayScope>,
 }
 
-/// Authorized caller derived from TLS, not a user-supplied owner or header.
+/// Authorized caller derived from TLS or the private typed local transport,
+/// never a user-supplied owner or header.
 #[derive(Debug, Clone)]
 pub struct GatewayScope {
     identity: String,
     namespace: String,
     workspaces: BTreeSet<String>,
+    local: bool,
+}
+
+const LOCAL_GATEWAY_IDENTITY: &str = "spiffe://openshell.local/gateway/embedded";
+
+// This type and its constructor are not public API. HTTP metadata cannot
+// manufacture a typed request extension; only the embedded transport adds it.
+#[derive(Clone)]
+pub(crate) struct LocalGateway(());
+
+pub(crate) fn local_request<T>(mut request: Request<T>) -> Request<T> {
+    request.extensions_mut().insert(LocalGateway(()));
+    request
+}
+
+fn valid_workspace(workspace: &str) -> bool {
+    !workspace.is_empty()
+        && workspace.len() <= 128
+        && workspace.trim() == workspace
+        && !workspace.contains('*')
+        && !workspace.chars().any(char::is_control)
 }
 
 impl GatewayPolicy {
@@ -40,13 +63,9 @@ impl GatewayPolicy {
             })?;
             if parsed.to_string() != identity
                 || workspaces.is_empty()
-                || workspaces.iter().any(|workspace| {
-                    workspace.is_empty()
-                        || workspace.len() > 128
-                        || workspace.trim() != workspace
-                        || workspace.contains('*')
-                        || workspace.chars().any(char::is_control)
-                })
+                || workspaces
+                    .iter()
+                    .any(|workspace| !valid_workspace(workspace))
             {
                 return Err(Status::invalid_argument(
                     "issuer gateway bindings require canonical identities and explicit workspaces",
@@ -56,12 +75,33 @@ impl GatewayPolicy {
         }
         Ok(Self {
             bindings: validated,
+            local: None,
         })
     }
 
-    /// Only TLS connection info is authoritative. Forged identity headers and
-    /// owner metadata cannot select a different gateway namespace.
+    /// Local hosting uses a fixed identity and validates workspace names on
+    /// every operation. It never enables wildcard certificate bindings.
+    pub(crate) fn embedded() -> Result<Self, Status> {
+        Ok(Self {
+            bindings: BTreeMap::new(),
+            local: Some(GatewayScope {
+                identity: LOCAL_GATEWAY_IDENTITY.to_string(),
+                namespace: identity_namespace(LOCAL_GATEWAY_IDENTITY)?,
+                workspaces: BTreeSet::new(),
+                local: true,
+            }),
+        })
+    }
+
+    /// Remote callers require verified TLS connection info. Only embedded
+    /// policies recognize the private typed local marker. Forged identity
+    /// headers and owner metadata cannot select a different gateway namespace.
     pub fn authenticate<T>(&self, request: &Request<T>) -> Result<GatewayScope, Status> {
+        if request.extensions().get::<LocalGateway>().is_some() {
+            return self.local.clone().ok_or_else(|| {
+                Status::permission_denied("embedded issuer identity is not enabled")
+            });
+        }
         self.scope_for_identity(verified_identity(request)?)
     }
 
@@ -73,6 +113,9 @@ impl GatewayPolicy {
     // Trusted background enumeration only; request handlers must authenticate
     // the TLS peer rather than selecting identity from supplied metadata.
     pub(crate) fn configured_scopes(&self) -> Result<Vec<GatewayScope>, Status> {
+        if let Some(scope) = &self.local {
+            return Ok(vec![scope.clone()]);
+        }
         self.bindings
             .keys()
             .cloned()
@@ -89,6 +132,7 @@ impl GatewayPolicy {
             identity,
             namespace,
             workspaces: workspaces.clone(),
+            local: false,
         })
     }
 }
@@ -171,6 +215,13 @@ impl GatewayScope {
     }
 
     pub fn authorize_workspace(&self, workspace: &str) -> Result<(), Status> {
+        if self.local {
+            return if valid_workspace(workspace) {
+                Ok(())
+            } else {
+                Err(Status::invalid_argument("invalid issuer workspace"))
+            };
+        }
         if !self.workspaces.contains(workspace) {
             return Err(Status::permission_denied(
                 "gateway is not authorized for issuer workspace",
@@ -226,6 +277,7 @@ pub(crate) fn test_scope(identity: &str) -> GatewayScope {
         identity: identity.to_string(),
         namespace: identity_namespace(identity).unwrap(),
         workspaces: BTreeSet::from(["default".to_string()]),
+        local: false,
     }
 }
 

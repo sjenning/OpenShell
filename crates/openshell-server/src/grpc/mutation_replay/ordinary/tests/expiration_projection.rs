@@ -207,6 +207,7 @@ async fn remote_provider_replay_keeps_expiration_snapshot_without_resolving_valu
                     provider_id: initial.object_id().into(),
                     credential_key: KEY.into(),
                     provider: "expiration-replay".into(),
+                    ..Default::default()
                 }),
                 reference: binding["reference"].as_str().unwrap().into(),
                 expected_version: Some(index as u64 + 2),

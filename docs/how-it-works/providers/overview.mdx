@@ -281,14 +281,21 @@ not change them, so set labels during creation.
 
 ## Credential Refresh
 
-Provider refresh stores non-injectable refresh material separately from the
-provider's current credential values. The gateway can mint OAuth2 refresh-token
-tokens, OAuth2 client credentials tokens, Google service account JWT tokens, and
-AWS STS temporary credentials for sandbox injection. With an explicitly selected
-[remote credential issuer](/how-it-works/gateways/configuration#remote-credential-issuer),
-the issuer owns that material and minting instead. Remote configuration creates
-pending output references; rotate to request first values without waiting for
-its scheduler.
+Provider refresh keeps non-injectable refresh material separate from current
+credential values. The selected credential issuer owns storage and minting in
+both embedded and [remote modes](/how-it-works/gateways/configuration#remote-credential-issuer).
+Built-in minters support OAuth2 refresh tokens, OAuth2 client credentials, Google
+service account JWTs, and AWS STS credentials. Configuration creates pending
+output references; rotate to request first values without waiting for the
+issuer scheduler.
+
+Profiles can also name strategies registered in the selected issuer catalog.
+SDK/API clients configure custom strategies through `strategy_name`, leaving
+the legacy enum unspecified. The issuer descriptor classifies secret material;
+profiles bind multi-output credentials through semantic `additional_outputs`.
+See [refresh metadata](/how-it-works/providers/profiles#refresh-metadata) and
+[additional outputs](/how-it-works/providers/profiles#additional-outputs) for
+registration checks and unambiguous primary-output mapping.
 
 For credential-driver-backed outputs, refresh advances established reference
 versions without changing the provider's resource version or sandbox placeholder
@@ -305,8 +312,7 @@ openshell provider refresh configure my-graph \
   --strategy oauth2-client-credentials \
   --material tenant_id="$TENANT_ID" \
   --material client_id="$CLIENT_ID" \
-  --secret-material-env client_secret=CLIENT_SECRET \
-  --credential-expires-at 1767225600000
+  --secret-material-env client_secret=CLIENT_SECRET
 ```
 
 Pass secret material with `--secret-material-env KEY[=ENVVAR]` (`ENVVAR`
@@ -337,11 +343,11 @@ openshell provider refresh rotate my-graph --credential-key MS_GRAPH_ACCESS_TOKE
 
 ### AWS STS
 
-The gateway calls `sts:AssumeRole` and publishes three short-lived credentials
+The selected issuer calls `sts:AssumeRole` and publishes three short-lived credentials
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) atomically.
 The `aws` and `aws-s3` profiles declare `AWS_SECRET_ACCESS_KEY` and
 `AWS_SESSION_TOKEN` as `additional_outputs` of the `AWS_ACCESS_KEY_ID` refresh,
-so all three credentials are gateway-minted. Create the provider with
+so all three credentials are issuer-minted. Create the provider with
 `--runtime-credentials` — no placeholder credential is needed.
 
 ```shell
@@ -356,9 +362,10 @@ openshell provider refresh configure my-aws \
 openshell provider refresh rotate my-aws --credential-key AWS_ACCESS_KEY_ID
 ```
 
-The gateway resolves its own AWS credentials using the default credential chain
-(instance role, IRSA, ECS task role, environment variables). For gateways not
-running on AWS, provide explicit IAM keys via refresh material:
+The issuer resolves its own AWS credentials using the default credential chain
+(instance role, IRSA, ECS task role, environment variables). A remote issuer uses
+its identity, not the gateway's identity. If the issuer has no suitable ambient
+credentials, provide explicit IAM keys via refresh material:
 
 ```shell
 openshell provider refresh configure my-aws \
@@ -383,10 +390,10 @@ via sandbox network policy. Use `aws-s3` for S3-specific endpoint rules.
 The proxy re-signs requests using SigV4 before forwarding to AWS. Both curl and
 Python boto3 are supported.
 
-External refresh systems should continue to push new current credentials through
-`openshell provider update`. The `--credential-expires-at` option works for
-static credentials, externally refreshed credentials, and gateway-managed
-refresh strategies.
+External refresh systems should push current credentials through
+`openshell provider update` and use `--credential-expires-at` to describe their
+expiry. For issuer-managed refresh, omit expiration from configure requests;
+the mint result determines the output credentials' expiration.
 
 Delete a provider:
 

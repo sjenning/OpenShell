@@ -9,7 +9,8 @@ use super::{
 /// Resolve compatible enum and exact-name strategy selectors.
 ///
 /// Contradictory selectors fail closed. Names are registry identities, not YAML
-/// aliases. Custom strategies fail closed until issuer registration is wired.
+/// aliases. This legacy enum resolver deliberately cannot approve custom names;
+/// use catalog-aware profile validation for registered custom strategies.
 pub fn resolve_refresh_strategy(
     strategy: i32,
     strategy_name: &str,
@@ -29,6 +30,16 @@ pub fn resolve_refresh_strategy(
     Ok(named)
 }
 
+mod catalog;
+mod offline;
+pub use catalog::{
+    bind_profile_refresh_strategies, custom_strategy_name_is_valid, refresh_output_bindings,
+    validate_profile_set_with_strategies,
+};
+pub use offline::validate_profile_set_structure;
+
+#[cfg(test)]
+mod catalog_tests;
 #[cfg(test)]
 mod profile_tests;
 

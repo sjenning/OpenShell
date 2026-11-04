@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+mod history;
 mod publication;
 mod reservations;
 use crate::{ReferenceState, ReferenceStateStore, auth::test_scope, minter::MaterialDescriptor};
@@ -17,6 +18,7 @@ fn state() -> GrantState {
                     workspace: "default".into(),
                     provider_id: "provider".into(),
                     credential_key: "TOKEN".into(),
+                    ..Default::default()
                 },
             },
             descriptor: StrategyDescriptor {
@@ -47,6 +49,9 @@ fn state() -> GrantState {
         next_refresh_at_ms: 0,
         recovery_action: None,
         failure_code: String::new(),
+        last_refresh_time_ms: None,
+        last_error_time_ms: None,
+        provider_error_subtype: String::new(),
         attempt: None,
         completed_attempt: None,
         retired: vec![],

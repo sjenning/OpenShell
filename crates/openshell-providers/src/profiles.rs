@@ -255,6 +255,10 @@ pub struct CredentialRefreshProfile {
     pub strategy: ProviderCredentialRefreshStrategy,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub strategy_name: String,
+    // Only issuer-catalog validation can authorize a custom strategy at runtime.
+    // Never accept this evidence from YAML, JSON, or protobuf.
+    #[serde(skip)]
+    registered_strategy_name: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token_url: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1152,6 +1156,8 @@ impl CredentialRefreshProfile {
     pub fn is_gateway_mintable(&self) -> bool {
         self.effective_strategy()
             .is_ok_and(is_gateway_mintable_strategy)
+            || (self.strategy == ProviderCredentialRefreshStrategy::Unspecified
+                && self.registered_strategy_name.as_deref() == Some(self.strategy_name.as_str()))
     }
 
     /// Resolve the legacy enum and exact registered-name selectors.
@@ -1416,7 +1422,10 @@ pub fn provider_profile_category_to_yaml(category: ProviderProfileCategory) -> &
 }
 
 mod strategy;
-pub use strategy::resolve_refresh_strategy;
+pub use strategy::{
+    bind_profile_refresh_strategies, custom_strategy_name_is_valid, refresh_output_bindings,
+    resolve_refresh_strategy, validate_profile_set_structure, validate_profile_set_with_strategies,
+};
 
 #[must_use]
 pub fn provider_refresh_strategy_from_yaml(raw: &str) -> Option<ProviderCredentialRefreshStrategy> {
@@ -1482,6 +1491,7 @@ fn credential_refresh_from_proto(refresh: &ProviderCredentialRefresh) -> Credent
         } else {
             String::new()
         },
+        registered_strategy_name: None,
         token_url: refresh.token_url.clone(),
         scopes: refresh.scopes.clone(),
         refresh_before_seconds: 0,
@@ -2169,6 +2179,13 @@ fn is_valid_profile_id(id: &str) -> bool {
 pub fn validate_profile_set(
     profiles: &[(String, ProviderTypeProfile)],
 ) -> Vec<ProfileValidationDiagnostic> {
+    validate_profile_set_inner(profiles, false)
+}
+
+fn validate_profile_set_inner(
+    profiles: &[(String, ProviderTypeProfile)],
+    allow_custom_structure: bool,
+) -> Vec<ProfileValidationDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut ids = HashSet::new();
     for (source, profile) in profiles {
@@ -2452,7 +2469,11 @@ pub fn validate_profile_set(
             }
 
             if let Some(refresh) = credential.refresh.as_ref() {
+                let custom = allow_custom_structure
+                    && refresh.strategy == ProviderCredentialRefreshStrategy::Unspecified
+                    && custom_strategy_name_is_valid(&refresh.strategy_name);
                 let strategy = match refresh.effective_strategy() {
+                    Err(_) if custom => ProviderCredentialRefreshStrategy::Unspecified,
                     Ok(strategy) => strategy,
                     Err(error) => {
                         diagnostics.push(ProfileValidationDiagnostic::error(
@@ -2464,7 +2485,7 @@ pub fn validate_profile_set(
                         ProviderCredentialRefreshStrategy::Unspecified
                     }
                 };
-                if strategy == ProviderCredentialRefreshStrategy::Unspecified {
+                if strategy == ProviderCredentialRefreshStrategy::Unspecified && !custom {
                     diagnostics.push(ProfileValidationDiagnostic::error(
                         source,
                         profile_id,
@@ -2572,7 +2593,7 @@ pub fn validate_profile_set(
                     .copied()
                     .collect();
 
-                if known_outputs.is_empty() && !refresh.additional_outputs.is_empty() {
+                if known_outputs.is_empty() && !custom && !refresh.additional_outputs.is_empty() {
                     diagnostics.push(ProfileValidationDiagnostic::error(
                         source,
                         profile_id,

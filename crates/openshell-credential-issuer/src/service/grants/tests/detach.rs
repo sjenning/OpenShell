@@ -323,6 +323,7 @@ async fn detach_rejects_a_revoked_sibling_without_releasing_other_output_binding
                 workspace: "default".into(),
                 provider_id: owner().provider_id,
                 credential_key: "TOKEN_TWO".into(),
+                ..Default::default()
             },
         )
         .await

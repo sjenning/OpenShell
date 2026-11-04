@@ -43,6 +43,9 @@ required_prebuilt_binaries() {
 		gateway)
 			echo "openshell-gateway"
 			;;
+		credential-issuer)
+			echo "openshell-credential-issuer"
+			;;
 		sandbox)
 			echo "openshell-sandbox"
 			;;
@@ -95,7 +98,7 @@ ensure_prebuilt_binaries() {
 	fi
 }
 
-TARGET=${1:?"Usage: docker-build-image.sh <gateway|sandbox|supervisor|supervisor-output> [extra-args...]"}
+TARGET=${1:?"Usage: docker-build-image.sh <gateway|credential-issuer|sandbox|supervisor|supervisor-output> [extra-args...]"}
 shift
 
 IS_FINAL_IMAGE=0
@@ -108,6 +111,12 @@ case "${TARGET}" in
     IMAGE_NAME="openshell/gateway"
     DOCKER_TARGET="gateway"
     DOCKERFILE="deploy/docker/Dockerfile.gateway"
+    ;;
+  credential-issuer)
+    IS_FINAL_IMAGE=1
+    IMAGE_NAME="openshell/credential-issuer"
+    DOCKER_TARGET="credential-issuer"
+    DOCKERFILE="deploy/docker/Dockerfile.credential-issuer"
     ;;
   sandbox)
     IS_FINAL_IMAGE=1

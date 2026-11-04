@@ -656,7 +656,7 @@ fn material_owner(payload: &AssignmentPayload) -> (String, &str, &str) {
     (
         format!("sandbox-instance-{}", payload.sandbox_id),
         payload.workspace.as_str(),
-        payload.sandbox_id.as_str(),
+        payload.route.as_str(),
     )
 }
 
@@ -1361,11 +1361,12 @@ impl SupervisorPool {
             .credentials
             .store(
                 InternalSecretOwner {
+                    kind: openshell_credential_issuer::SecretOwnerKind::SupervisorInstance,
                     name: &name,
                     workspace,
                     id: owner_id,
                 },
-                &Uuid::new_v4().to_string(),
+                &payload.writer,
                 &HashMap::from([(LAUNCH_MATERIAL_KEY.to_string(), value.to_string())]),
             )
             .await
@@ -1389,6 +1390,7 @@ impl SupervisorPool {
             .credentials
             .resolve(
                 InternalSecretOwner {
+                    kind: openshell_credential_issuer::SecretOwnerKind::SupervisorInstance,
                     name: &name,
                     workspace,
                     id: owner_id,
@@ -1417,6 +1419,7 @@ impl SupervisorPool {
         self.credentials
             .delete(
                 InternalSecretOwner {
+                    kind: openshell_credential_issuer::SecretOwnerKind::SupervisorInstance,
                     name: &name,
                     workspace,
                     id: owner_id,
@@ -1588,18 +1591,49 @@ impl SupervisorPool {
             }
         }
         payload.phase = phase;
+        let (name, workspace, owner_id) = material_owner(&payload);
+        let mut writes = match self
+            .credentials
+            .publication_writes(
+                InternalSecretOwner {
+                    kind: openshell_credential_issuer::SecretOwnerKind::SupervisorInstance,
+                    name: &name,
+                    workspace,
+                    id: owner_id,
+                },
+                &payload.writer,
+                &candidate,
+                &HashMap::from([(LAUNCH_MATERIAL_KEY.into(), handle.clone())]),
+            )
+            .await
+        {
+            Ok(writes) => writes,
+            Err(error) => {
+                payload.phase = RecordPhase::Reserved;
+                self.discard_candidate(&candidate, &payload).await;
+                unreserve(reservation).await;
+                return Err(format!(
+                    "publish supervisor material ownership: {}",
+                    error.code()
+                ));
+            }
+        };
+        writes.push(AtomicWrite::Update {
+            object_type: ASSIGNMENT_OBJECT_TYPE.into(),
+            id: id.clone(),
+            payload: encode(&payload)?,
+            expected_version: reservation,
+        });
         let published = self
             .store
-            .put_if(
-                ASSIGNMENT_OBJECT_TYPE,
-                &id,
-                &payload.route,
-                "",
-                &encode(&payload)?,
-                None,
-                WriteCondition::MatchResourceVersion(reservation),
-            )
-            .await;
+            .write_atomically(&writes)
+            .await
+            .map(|mut results| {
+                results
+                    .pop()
+                    .flatten()
+                    .expect("assignment update returns a receipt")
+            });
         match published {
             Ok(written) => {
                 let record = AssignmentRecord {
@@ -1626,9 +1660,14 @@ impl SupervisorPool {
                     candidate: None,
                 })
             }
+            Err(error) if !error.is_expected() => {
+                // Native publication and intent acknowledgment may already
+                // have committed. A later assignment read or durable recovery
+                // owns reconciliation; never destroy possibly live material.
+                Err("supervisor material publication outcome is unknown".into())
+            }
             Err(error) => {
-                // The reservation was fenced or withdrawn, so this handle can
-                // never be published.
+                // A definitive conditional failure fenced this reservation.
                 payload.phase = RecordPhase::Reserved;
                 self.discard_candidate(&candidate, &payload).await;
                 Err(match error {
@@ -2910,8 +2949,82 @@ impl InstancePlacement for PoolPlacement {
     }
 }
 
+/// Metadata-only adoption of published and staged launch material. The original
+/// physical sandbox owner remains only inside issuer-owned legacy backing data.
+pub async fn migrate_issuer(
+    store: &Store,
+    legacy: &CredentialRuntime,
+    host: &openshell_credential_issuer::service::CredentialStoreService,
+    source: &crate::credential_source::RemoteProviderSource,
+) -> Result<(), tonic::Status> {
+    use crate::persistence::{AtomicWrite, ObjectListQuery};
+    for kind in [ASSIGNMENT_OBJECT_TYPE, MATERIAL_CANDIDATE_OBJECT_TYPE] {
+        let mut cursor = None;
+        loop {
+            let page = store
+                .list_object_page(kind, ObjectListQuery::AllWorkspaces, cursor.as_ref(), 128)
+                .await
+                .map_err(|_| {
+                    tonic::Status::unavailable("launch material issuer upgrade inventory failed")
+                })?;
+            for row in page.records {
+                let mut payload: AssignmentPayload =
+                    serde_json::from_slice(&row.payload).map_err(|_| {
+                        tonic::Status::data_loss("invalid launch material during issuer upgrade")
+                    })?;
+                if payload.material_handle.is_empty() {
+                    continue;
+                }
+                let handle =
+                    CredentialHandle::decode(payload.material_handle.as_slice()).map_err(|_| {
+                        tonic::Status::data_loss("invalid launch handle during issuer upgrade")
+                    })?;
+                let (name, workspace, id) = material_owner(&payload);
+                let imported = crate::credential_source::embedded::migration::internal_handle(
+                    legacy,
+                    host,
+                    source,
+                    InternalSecretOwner {
+                        kind: openshell_credential_issuer::SecretOwnerKind::SupervisorInstance,
+                        name: &name,
+                        workspace,
+                        id,
+                    },
+                    &payload.sandbox_id,
+                    LAUNCH_MATERIAL_KEY,
+                    &handle,
+                )
+                .await?;
+                if imported == handle {
+                    continue;
+                }
+                payload.material_handle = imported.encode_to_vec();
+                store
+                    .write_atomically(&[AtomicWrite::Update {
+                        object_type: kind.into(),
+                        id: row.id,
+                        payload: serde_json::to_vec(&payload).map_err(|_| {
+                            tonic::Status::internal("encode launch issuer upgrade failed")
+                        })?,
+                        expected_version: row.resource_version,
+                    }])
+                    .await
+                    .map_err(|_| {
+                        tonic::Status::aborted("launch material changed during issuer upgrade")
+                    })?;
+            }
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    mod issuer;
     use super::*;
     use crate::auth::sandbox_session::PersistedSandboxIdentity;
     use crate::persistence::test_postgres::TestSchema;
@@ -4439,16 +4552,21 @@ mod tests {
 
     #[tokio::test]
     async fn the_last_slot_of_a_member_is_admitted_once_across_replicas() {
-        the_last_slot_of_a_member_is_admitted_once_across_replicas_on(&Fixture::new().await).await;
+        Box::pin(
+            the_last_slot_of_a_member_is_admitted_once_across_replicas_on(&Fixture::new().await),
+        )
+        .await;
     }
 
     #[tokio::test]
     #[ignore = "requires a disposable PostgreSQL database in OPENSHELL_TEST_POSTGRES_URL; run mise run test:rust:postgres"]
     async fn postgres_the_last_slot_of_a_member_is_admitted_once_across_replicas() {
         let schema = TestSchema::create("supervisor_pool").await;
-        the_last_slot_of_a_member_is_admitted_once_across_replicas_on(&Fixture::with_store(
-            schema.connect_store().await,
-        ))
+        Box::pin(
+            the_last_slot_of_a_member_is_admitted_once_across_replicas_on(&Fixture::with_store(
+                schema.connect_store().await,
+            )),
+        )
         .await;
         schema.drop_schema().await;
     }
@@ -4485,15 +4603,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_takeover_and_a_launch_compete_for_the_last_slot() {
-        a_takeover_and_a_launch_compete_for_the_last_slot_on(&Fixture::new().await).await;
+        Box::pin(a_takeover_and_a_launch_compete_for_the_last_slot_on(
+            &Fixture::new().await,
+        ))
+        .await;
     }
 
     #[tokio::test]
     #[ignore = "requires a disposable PostgreSQL database in OPENSHELL_TEST_POSTGRES_URL; run mise run test:rust:postgres"]
     async fn postgres_a_takeover_and_a_launch_compete_for_the_last_slot() {
         let schema = TestSchema::create("supervisor_pool").await;
-        a_takeover_and_a_launch_compete_for_the_last_slot_on(&Fixture::with_store(
-            schema.connect_store().await,
+        Box::pin(a_takeover_and_a_launch_compete_for_the_last_slot_on(
+            &Fixture::with_store(schema.connect_store().await),
         ))
         .await;
         schema.drop_schema().await;

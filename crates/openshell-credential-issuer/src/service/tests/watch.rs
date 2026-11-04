@@ -25,6 +25,7 @@ async fn shutdown_releases_backpressured_watch_without_waiting_for_its_reader() 
         workspace: "default".into(),
         provider_id: "provider".into(),
         credential_key: "TOKEN".into(),
+        ..Default::default()
     };
     for index in 0..80 {
         registry

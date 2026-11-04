@@ -32,6 +32,7 @@ use std::{
 };
 
 mod detach;
+mod history;
 mod mtls;
 mod postgres;
 mod recovery;
@@ -82,6 +83,7 @@ struct Minter {
     block: AtomicBool,
     uncertain: AtomicBool,
     oauth_uncertain: AtomicBool,
+    recognized_subtype: AtomicBool,
     fail_backend: AtomicBool,
     backend: Arc<AtomicBool>,
     started: tokio::sync::Notify,
@@ -113,6 +115,15 @@ impl TokenMinter for Minter {
         if self.block.swap(false, Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;
+        }
+        if self.recognized_subtype.load(Ordering::SeqCst) {
+            return Err(MintFailure {
+                status: Status::failed_precondition("private-upstream-body"),
+                recovery_action: RecoveryAction::Reauthorize,
+                failure_code: "oauth_invalid_grant",
+                provider_error_subtype: Some("invalid_rapt"),
+                retry_schedule: RetrySchedule::Parked,
+            });
         }
         if self.uncertain.load(Ordering::SeqCst) {
             return Err(MintFailure {
@@ -216,6 +227,7 @@ fn owner() -> store_wire::SecretOwner {
         provider_id: "provider".into(),
         credential_key: "TOKEN_ONE".into(),
         provider: "display".into(),
+        ..Default::default()
     }
 }
 fn request() -> wire::CreateGrantRequest {

@@ -715,34 +715,60 @@ pub(crate) async fn run_server(
         )
         .await?,
     );
-    let credentials = credentials::CredentialRuntime::from_config_file_with_store(
-        &config,
-        config_file.as_ref(),
-        Arc::clone(&store),
-    )
-    .await?;
-
     let remote_issuer_config = config_file
         .as_ref()
         .and_then(|file| file.openshell.gateway.credential_issuer.clone());
-    let remote_source = if let Some(issuer) = &remote_issuer_config {
-        Some(Box::pin(issuer.connect(&store)).await.map_err(|error| {
-            Error::config(format!(
-                "credential issuer startup failed: {}",
-                error.code()
-            ))
-        })?)
-    } else {
-        credentials
-            .migrate_provider_references(&store)
+    // Remote mode must not initialize a local value backend or load a KEK.
+    // Both modes select the same client and execute identical issuer handlers.
+    let custom_minters = config_file
+        .as_ref()
+        .map(|file| file.openshell.gateway.credential_minters.clone())
+        .unwrap_or_default();
+    if remote_issuer_config.is_some() && !custom_minters.is_empty() {
+        return Err(Error::config(
+            "remote credential issuers own their minter registrations; remove gateway credential_minters",
+        ));
+    }
+    let mut embedded_issuer = None;
+    let (credentials, remote_source) = if let Some(issuer) = &remote_issuer_config {
+        let source = Box::pin(issuer.connect(&store))
             .await
             .map_err(|error| {
                 Error::config(format!(
-                    "credential reference migration failed: {}",
+                    "credential issuer startup failed: {}",
                     error.code()
                 ))
-            })?;
-        None
+            })?
+            .with_gateway_store(store.clone());
+        let credentials = credentials::CredentialRuntime::from_issuer(&config, source.clone())?;
+        (credentials, Some(source))
+    } else {
+        let mut credentials = credentials::CredentialRuntime::from_config_file_with_store(
+            &config,
+            config_file.as_ref(),
+            Arc::clone(&store),
+        )
+        .await?;
+        let empty = toml::Table::new();
+        let crypto = config_file
+            .as_ref()
+            .and_then(|file| file.openshell.gateway.credential_storage.as_ref())
+            .unwrap_or(&empty);
+        let issuer = Box::pin(credential_source::embedded::EmbeddedIssuer::new(
+            database_url,
+            &store,
+            &credentials,
+            crypto,
+            &custom_minters,
+        ))
+        .await
+        .map_err(|error| {
+            Error::config(format!("embedded issuer startup failed: {}", error.code()))
+        })?;
+        let source = issuer.source.clone();
+        credentials.use_issuer(source.clone());
+        embedded_issuer = Some(issuer);
+        (credentials, Some(source))
     };
 
     let oidc_cache = if let Some(ref oidc) = config.oidc {
@@ -840,6 +866,11 @@ pub(crate) async fn run_server(
         sources = ?provider_profile_sources.source_ids(),
         "provider profile sources configured"
     );
+    let provider_profile_sources = if let Some(source) = &remote_source {
+        provider_profile_sources.with_strategy_source(Arc::new(source.clone()))
+    } else {
+        provider_profile_sources
+    };
     // Builds read cached interceptor snapshots, so fetch them before serving.
     provider_profile_sources.refresh_cached(&store).await;
     let mut state = ServerState::new_with_credentials(
@@ -1007,16 +1038,24 @@ pub(crate) async fn run_server(
     let state = Arc::new(state);
     let issuer_workers = remote_source
         .as_ref()
-        .zip(remote_issuer_config.as_ref())
-        .map(|(source, config)| {
+        .map(|source| {
             let delivery = credential_source::delivery_watch::spawn(&state, source);
             let cleanup = credential_source::handoff::StaticHandoff::spawn_reconciler(
                 store.clone(),
                 source.clone(),
-                Duration::from_secs(u64::from(config.cleanup_idle_seconds)),
+                Duration::from_secs(u64::from(
+                    remote_issuer_config
+                        .as_ref()
+                        .map_or(300, |config| config.cleanup_idle_seconds),
+                )),
                 Arc::downgrade(&state),
             )?;
-            Ok::<_, tonic::Status>((delivery, cleanup))
+            let internal = source.spawn_internal_reconciler(Duration::from_secs(u64::from(
+                remote_issuer_config
+                    .as_ref()
+                    .map_or(300, |config| config.cleanup_idle_seconds),
+            )))?;
+            Ok::<_, tonic::Status>((delivery, cleanup, internal))
         })
         .transpose()
         .map_err(|error| {
@@ -1218,6 +1257,9 @@ pub(crate) async fn run_server(
     state.supervisor_sessions.close_admission();
     let _ = shutdown_tx.send(true);
     drop(issuer_workers);
+    if let Some(issuer) = embedded_issuer.take() {
+        issuer.drain().await;
+    }
 
     if let Err(err) = listener_task.await {
         warn!(error = %err, "Gateway listener task failed during shutdown");

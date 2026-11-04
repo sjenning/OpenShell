@@ -160,6 +160,7 @@ async fn remote_reader_projects_versions_without_rewriting_provider_or_touching_
             .unwrap();
     let internal = local.internal_secrets();
     let identity = InternalSecretOwner {
+        kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
         name: "gateway-internal",
         workspace: "default",
         id: "internal-id",

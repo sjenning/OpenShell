@@ -12,7 +12,7 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/build-env.sh"
 
 usage() {
-  echo "Usage: stage-prebuilt-binaries.sh <gateway|sandbox|supervisor|supervisor-output|all>" >&2
+  echo "Usage: stage-prebuilt-binaries.sh <gateway|credential-issuer|sandbox|supervisor|supervisor-output|all>" >&2
 }
 
 normalize_arch() {
@@ -84,8 +84,8 @@ detect_arches() {
 
 components_for_target() {
   case "$1" in
-    gateway)
-      echo "gateway"
+    gateway|credential-issuer)
+      echo "$1"
       ;;
     sandbox)
       echo "sandbox"
@@ -94,7 +94,7 @@ components_for_target() {
       echo "supervisor"
       ;;
     all)
-      echo "gateway sandbox supervisor"
+      echo "gateway credential-issuer sandbox supervisor"
       ;;
     *)
       usage
@@ -108,6 +108,11 @@ resolve_component() {
     gateway)
       crate=openshell-gateway
       binary=openshell-gateway
+      target_libc=gnu
+      ;;
+    credential-issuer)
+      crate=openshell-credential-issuer
+      binary=openshell-credential-issuer
       target_libc=gnu
       ;;
     sandbox)

@@ -30,7 +30,12 @@ impl GrantRuntime {
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
-                if let Err(error) = runtime.tick().await {
+                if let Err(error) = crate::observability::observe(
+                    crate::observability::Operation::Scheduler,
+                    Box::pin(runtime.tick()),
+                )
+                .await
+                {
                     tracing::warn!(code=?error.code(),"issuer grant sweep failed");
                 }
             }
@@ -38,6 +43,7 @@ impl GrantRuntime {
     }
     pub(super) async fn tick(self: &Arc<Self>) -> Result<(), Status> {
         self.store.maintenance().await?;
+        let mut counts = [0_u64; 10];
         for scope in self.store.policy.configured_scopes()? {
             let grants = self.store.repository.grants(&scope);
             let mut cursor = None;
@@ -45,8 +51,15 @@ impl GrantRuntime {
                 let page = grants.list(cursor.as_deref(), 64).await?;
                 for grant in page.grants {
                     let id = grant.state.definition.identity.id.clone();
-                    if let Err(error) = self.housekeep(&scope, &id).await {
+                    if let Err(error) = crate::observability::observe(
+                        crate::observability::Operation::Cleanup,
+                        self.housekeep(&scope, &id),
+                    )
+                    .await
+                    {
                         tracing::warn!(grant=%id,code=?error.code(),"issuer grant maintenance deferred");
+                        let current = self.load(&scope, &id).await?;
+                        count_phase(&mut counts, current.state.phase);
                         continue;
                     }
                     let loaded = self.load(&scope, &id).await?;
@@ -81,11 +94,14 @@ impl GrantRuntime {
                     {
                         tracing::warn!(grant=%id,code=?error.code(),"issuer grant refresh deferred");
                     }
+                    let current = self.load(&scope, &id).await?;
+                    count_phase(&mut counts, current.state.phase);
                 }
                 let Some(after) = page.after else { break };
                 cursor = Some(after);
             }
         }
+        crate::observability::scheduler_snapshot(&counts, now_ms()?);
         Ok(())
     }
     async fn housekeep(&self, scope: &GatewayScope, id: &str) -> Result<(), Status> {
@@ -106,6 +122,8 @@ impl GrantRuntime {
             state.phase = GrantPhase::Parked;
             state.recovery_action = Some(RecoveryAction::Investigate);
             state.failure_code = "mint_outcome_unknown".into();
+            state.last_error_time_ms = Some(now_ms()?);
+            state.provider_error_subtype.clear();
             state.next_refresh_at_ms = i64::MAX;
             state.version = state
                 .version
@@ -122,6 +140,7 @@ impl GrantRuntime {
                 .delete(scope, &retired.owner, &retired.purpose, &retired.backing)
                 .await
             {
+                crate::observability::cleanup_deferred(error.code());
                 tracing::warn!(grant=%id,code=?error.code(),"issuer retired grant material cleanup deferred");
                 // Keep the tombstone for retry, but do not make physical
                 // deletion a prerequisite for live refresh or known-result
@@ -162,9 +181,18 @@ impl GrantRuntime {
             state.next_refresh_at_ms = i64::MAX;
             state.recovery_action = None;
             state.failure_code.clear();
+            state.provider_error_subtype.clear();
             self.save(scope, current.revision, &state, Vec::new())
                 .await?;
         }
         Ok(())
+    }
+}
+fn count_phase(counts: &mut [u64; 10], phase: GrantPhase) {
+    if let Some(index) = crate::observability::PHASES
+        .iter()
+        .position(|item| *item == phase)
+    {
+        counts[index] = counts[index].saturating_add(1);
     }
 }

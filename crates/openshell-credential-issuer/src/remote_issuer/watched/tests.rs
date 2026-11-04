@@ -6,8 +6,8 @@ use tonic::{Code, transport::Channel};
 fn client() -> RemoteIssuer {
     let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
     RemoteIssuer {
-        store: store::credential_store_client::CredentialStoreClient::new(channel.clone()),
-        refresh: refresh::credential_refresh_client::CredentialRefreshClient::new(channel),
+        store: super::super::transport::Store::remote(channel.clone()),
+        refresh: super::super::transport::Refresh::remote(channel),
         calls: Arc::new(Semaphore::new(16)),
         watches: Arc::new(Semaphore::new(2)),
         capabilities: store::GetCapabilitiesResponse {
@@ -43,6 +43,7 @@ fn request(reference: &str) -> store::ResolveSecretsRequest {
                 provider_id: "provider".into(),
                 credential_key: "TOKEN".into(),
                 provider: String::new(),
+                ..Default::default()
             }),
             reference: reference.into(),
             expected_version: Some(1),
@@ -68,6 +69,55 @@ mod lifecycle;
 mod mutations;
 mod reconciliation;
 mod recovery;
+#[tokio::test]
+async fn typed_owner_bindings_normalize_providers_but_never_alias_other_kinds() {
+    use store::secret_owner::Kind;
+    let inner = inner();
+    let legacy = request("ref").secrets.remove(0).owner.unwrap();
+    let provider = store::SecretOwner {
+        provider_id: String::new(),
+        kind: Some(Kind::ProviderOwner(store::ProviderSecretOwner {
+            provider_id: legacy.provider_id.clone(),
+        })),
+        ..legacy.clone()
+    };
+    assert!(same_owner(&legacy, &provider));
+    assert_eq!(tracking::owner(provider).unwrap(), legacy);
+    inner.track_secret(legacy.clone(), "ref".into()).unwrap();
+    let sandbox = store::SecretOwner {
+        provider_id: String::new(),
+        kind: Some(Kind::Sandbox(store::SandboxSecretOwner {
+            sandbox_id: legacy.provider_id.clone(),
+        })),
+        ..legacy.clone()
+    };
+    let supervisor = store::SecretOwner {
+        kind: Some(Kind::SupervisorInstance(
+            store::SupervisorInstanceSecretOwner {
+                instance_id: legacy.provider_id.clone(),
+            },
+        )),
+        ..sandbox.clone()
+    };
+    assert!(!same_owner(&legacy, &sandbox));
+    assert!(!same_owner(&sandbox, &supervisor));
+    assert_eq!(
+        inner
+            .track_secret(sandbox.clone(), "ref".into())
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    inner
+        .track_secret(sandbox.clone(), "sandbox-ref".into())
+        .unwrap();
+    let mut typed_request = request("sandbox-ref");
+    typed_request.secrets[0].owner = Some(sandbox);
+    validation::requests(&typed_request, 64).unwrap();
+    let mut ambiguous = legacy;
+    ambiguous.kind = supervisor.kind;
+    assert!(tracking::owner(ambiguous).is_err());
+}
 #[tokio::test]
 async fn disconnects_resets_and_late_rpc_candidates_never_restore_stale_cached_values() {
     let inner = inner();

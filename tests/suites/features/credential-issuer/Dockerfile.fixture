@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.4
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Build context is the directory containing the zigbuild-produced binary, not
+# the checkout. Match the standalone issuer's pinned glibc runtime.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
+COPY credential-issuer-e2e-fixture /usr/local/bin/credential-issuer-e2e-fixture
+USER 1000:1000
+EXPOSE 8443 8080
+ENTRYPOINT ["/usr/local/bin/credential-issuer-e2e-fixture"]

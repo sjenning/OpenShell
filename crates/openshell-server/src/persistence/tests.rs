@@ -3318,3 +3318,70 @@ async fn postgres_atomic_write_groups_run_on_a_one_connection_pool() {
     drop(store);
     schema.drop_schema().await;
 }
+
+/// Migration holds every legacy grant before taking the workspace lock. The
+/// batch must consume one data connection, independently of its output count.
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database in OPENSHELL_TEST_POSTGRES_URL; run mise run test:rust:postgres"]
+async fn postgres_refresh_migration_batch_uses_one_connection_and_excludes_legacy_peer() {
+    use std::time::Duration;
+    let schema = super::test_postgres::TestSchema::create("refresh_migration").await;
+    let backend = super::postgres::PostgresStore::connect(schema.url(), Some(2), None)
+        .await
+        .unwrap();
+    backend.migrate().await.unwrap();
+    let store = Store::Postgres(backend);
+    let peer = schema.connect_store().await;
+    let keys = (0..64)
+        .map(|index| format!("TOKEN_{index}"))
+        .collect::<Vec<_>>();
+    let borrowed = keys.iter().map(String::as_str).collect::<Vec<_>>();
+    let guard = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.acquire_refresh_guards("provider", &borrowed),
+    )
+    .await
+    .expect("more grants than pool connections must not deadlock")
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        store.put("migration-probe", "probe", "probe", "default", b"{}", None),
+    )
+    .await
+    .expect("the second connection remains free for gateway publication")
+    .unwrap();
+    let (acquired, mut observed) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        let guard = peer
+            .acquire_refresh_guard("provider", "TOKEN_63")
+            .await
+            .unwrap();
+        let _ = acquired.send(());
+        drop(guard);
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut observed)
+            .await
+            .is_err(),
+        "legacy peer must remain excluded while migration owns the full set"
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), observed)
+        .await
+        .expect("drop releases every held grant lock")
+        .unwrap();
+    waiter.await.unwrap();
+    // Reverse caller order exercises the same canonical key sorting.
+    let mut reversed = borrowed.clone();
+    reversed.reverse();
+    let retry = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.acquire_refresh_guards("provider", &reversed),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(retry);
+    drop(store);
+    schema.drop_schema().await;
+}

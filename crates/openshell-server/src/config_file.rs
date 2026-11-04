@@ -140,9 +140,13 @@ pub struct GatewayFileSection {
     pub default_credential_driver: Option<String>,
     #[serde(default)]
     pub credential_storage: Option<toml::Table>,
-    /// Presence explicitly selects a remote issuer for provider credentials only.
+    /// Presence selects a remote issuer for provider and internal secret values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_issuer: Option<crate::credential_source::startup::RemoteConfig>,
+    /// Custom minters hosted by the embedded issuer. Remote issuers own their
+    /// own registrations; configuring this alongside remote selection is invalid.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_minters: BTreeMap<String, openshell_credential_issuer::daemon::MinterConfig>,
 
     // ── Sandbox / SSH ────────────────────────────────────────────────────
     #[serde(default)]

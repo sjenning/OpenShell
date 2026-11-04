@@ -24,7 +24,7 @@ Provider profiles keep those pieces together:
 | Provider-aware policy | Attached providers contribute `_provider_*` network policy entries to the effective sandbox policy. |
 | Custom provider definitions | You can export, edit, lint, import, list, and delete custom profiles. |
 | Runtime provider lifecycle | You can list, attach, and detach providers on existing sandboxes. |
-| Credential rotation | Provider refresh metadata lets the gateway refresh short-lived access tokens and update provider records. |
+| Credential rotation | Provider refresh metadata lets the selected issuer refresh short-lived tokens behind versioned output references. |
 | Credential transport | Credential delivery uses environment placeholders and proxy rewrite. Static placeholders resolve only at profile endpoints or explicitly bound sandbox policy endpoints for endpointless profiles. |
 
 ## Available Features
@@ -382,7 +382,9 @@ credentials:
     refresh:
       # Accepted values:
       # static, external, oauth2_refresh_token,
-      # oauth2_client_credentials, google_service_account_jwt.
+      # oauth2_client_credentials, google_service_account_jwt,
+      # aws_sts_assume_role.
+      # Use strategy_name for an exact registered custom name instead.
       strategy: oauth2_client_credentials
       token_url: https://login.example.com/oauth2/token
       scopes: [api.read, api.write]
@@ -506,7 +508,7 @@ workload calls the profile-authorized native endpoint.
 
 ### Refresh Metadata
 
-Credential refresh metadata belongs to one credential declaration. The profile defines allowed defaults, such as token URL, scopes, refresh lead time, maximum lifetime, and required material keys. The provider instance stores the actual refresh material.
+Credential refresh metadata belongs to one credential declaration. The profile defines defaults, such as token URL, scopes, refresh lead time, maximum lifetime, and required material keys. The selected credential issuer stores the actual refresh material and mints the output credentials. The gateway uses the same profile validation and refresh handlers in embedded and remote issuer modes.
 
 Profile YAML can declare these refresh strategies:
 
@@ -514,12 +516,31 @@ Profile YAML can declare these refresh strategies:
 |---|---|
 | `static` | Current credentials are updated through `openshell provider update`. The gateway does not mint a token. |
 | `external` | An external process updates current credentials through `openshell provider update`. The gateway does not mint a token. |
-| `oauth2_refresh_token` | The gateway exchanges a refresh token for a short-lived access token. |
-| `oauth2_client_credentials` | The gateway mints a short-lived access token with OAuth2 client credentials. |
-| `google_service_account_jwt` | The gateway signs a Google service account JWT and exchanges it for an access token. |
-| `aws_sts_assume_role` | The gateway calls `sts:AssumeRole` and mints `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in one operation. |
+| `oauth2_refresh_token` | The issuer exchanges a refresh token for a short-lived access token. |
+| `oauth2_client_credentials` | The issuer mints a short-lived access token with OAuth2 client credentials. |
+| `google_service_account_jwt` | The issuer signs a Google service account JWT and exchanges it for an access token. |
+| `aws_sts_assume_role` | The issuer calls `sts:AssumeRole` and mints `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in one operation. |
 
-You can use `refresh.strategy_name` instead of `refresh.strategy` with an exact name from the table, such as `oauth2_refresh_token`. If you supply both, they must select the same strategy. The `ConfigureProviderRefresh` API supports the same `strategy_name` field, and refresh status returns the canonical name even for existing enum-configured grants. Profile declarations reject custom names. With an explicitly selected remote issuer, SDK/API clients can configure a registered single-output `custom:<name>` minter; see [custom refresh configuration](/extensibility/credential-issuer#configure-a-custom-refresh). The CLI status table displays its registered strategy name.
+Use `refresh.strategy_name` instead of `refresh.strategy` for an exact built-in
+name, such as `oauth2_refresh_token`, or a registered `custom:<name>` strategy.
+If you supply both selectors for a built-in, they must agree. For custom
+strategies, omit `strategy`; API clients leave the legacy enum unspecified.
+Profile import, update, and lint check the selected issuer catalog. A `custom:`
+prefix does not establish registration, and built-in minters must also appear
+in that catalog. Offline structural checks cannot approve an unavailable strategy.
+
+The issuer descriptor determines which material fields are secret. Profile
+`material.secret` declarations must agree with it; caller annotations cannot
+turn configuration fields into secret-material fields or expose secret fields
+as configuration. Exported YAML, JSON, and protobuf profiles do not carry cached
+registration evidence. A receiving gateway validates its own selected issuer
+catalog.
+
+The `ConfigureProviderRefresh` API accepts `strategy_name` and can resolve a
+custom strategy from its profile when both request selectors are omitted.
+Refresh status displays the registered name. See
+[custom refresh configuration](/extensibility/credential-issuer#configure-a-custom-refresh)
+for the SDK/API workflow.
 
 `openshell provider refresh configure` accepts only gateway-mintable strategies: `oauth2-refresh-token`, `oauth2-client-credentials`, `google-service-account-jwt`, and `aws-sts-assume-role`. Use `openshell provider update` for `static` and `external` refresh patterns.
 
@@ -530,9 +551,9 @@ Gateway-managed refresh strategies use these material keys:
 | `oauth2_refresh_token` | `client_id`, `refresh_token`, optional `client_secret`. |
 | `oauth2_client_credentials` | `client_id`, `client_secret`, optional `tenant_id` for Microsoft Entra token URLs. |
 | `google_service_account_jwt` | `client_email`, `private_key`, optional `subject` or `sub`. |
-| `aws_sts_assume_role` | `role_arn`, optional `session_name`, `external_id`, `aws_region`, and optional long-lived `aws_access_key_id` / `aws_secret_access_key` for gateways without ambient AWS credentials. |
+| `aws_sts_assume_role` | `role_arn`, optional `session_name`, `external_id`, `aws_region`, and optional long-lived `aws_access_key_id` / `aws_secret_access_key` for issuers without ambient AWS credentials. |
 
-OpenShell keeps token endpoints profile-owned. Refresh material cannot override `token_url` or `token_uri` during refresh configuration.
+Built-in refresh token endpoints remain profile-owned. Refresh material cannot override `token_url` or `token_uri` for those strategies. A custom profile can supply token URL and scope defaults only when its issuer descriptor declares the corresponding configuration fields.
 
 ### Additional Outputs
 
@@ -559,6 +580,36 @@ credentials:
 ```
 
 The refresh attaches to the primary credential (`access_key_id`). Each referenced sibling must exist, declare exactly one env var, and not carry its own refresh. Because a refresh's outputs are runtime-resolvable, a profile whose only credentials are STS-minted can be created with `--runtime-credentials`. The resolved output-to-env-key mapping is pinned when refresh is configured, so later profile edits do not silently redirect where minted values are written.
+
+Registered custom strategies use the same mapping. For example, if the issuer
+advertises outputs `company_token` and `auxiliary`, map `auxiliary` to its sibling
+credential and attach refresh to the primary credential:
+
+```yaml
+credentials:
+  - name: token
+    env_vars: [COMPANY_TOKEN]
+    required: true
+    refresh:
+      strategy_name: custom:company-sts
+      additional_outputs:
+        - output: auxiliary
+          credential: auxiliary
+  - name: auxiliary
+    env_vars: [COMPANY_AUXILIARY]
+    required: true
+```
+
+For a custom strategy, the primary credential must also declare exactly one env
+var. The primary output is the sole descriptor output not mapped in
+`additional_outputs`, regardless of descriptor order. Map every other output;
+OpenShell rejects zero or multiple remaining outputs, unknown output IDs,
+duplicate credential keys, and credentials claimed by multiple refresh grants.
+A single-output custom strategy needs no additional mapping.
+
+The gateway checks the complete output bundle for attached-sandbox environment
+collisions before allocating a grant. Refresh publishes the fixed bundle
+together, and explicit reconfiguration retires the old authorization epoch.
 
 ### Dynamic Token Grants
 
@@ -809,7 +860,7 @@ The opaque placeholder is tied to the sandbox, provider instance, credential key
 
 ## Configure Credential Refresh
 
-Refresh configuration is stored separately from the current injectable credential value. Non-secret refresh configuration remains in the refresh-state record. Secret material is resolved from the active credential driver only while the gateway mints a new short-lived token. The gateway writes the token back through credential storage and updates credential expiry metadata. If an OAuth issuer rotates its refresh token, the gateway stages the replacement through credential storage before committing the refresh generation and removes the previous handle afterward.
+Refresh configuration is stored separately from current injectable credential values. The selected issuer owns configuration, secret material, scheduling, and minting in both embedded and remote modes. The gateway keeps grant and output references, not refresh material. Configuration creates pending output references; the issuer scheduler or `provider refresh rotate` publishes the first values. Rotated OAuth refresh material stays in issuer-owned storage.
 
 For OAuth token endpoint failures, the gateway parses the bounded standard OAuth
 error response and reports a structured recovery action through `provider
@@ -888,8 +939,7 @@ openshell provider refresh configure my-graph \
   --material tenant_id="$MS_TENANT_ID" \
   --material client_id="$MS_CLIENT_ID" \
   --material client_secret="$MS_CLIENT_SECRET" \
-  --secret-material-key client_secret \
-  --credential-expires-at 2026-01-01T00:00:00Z
+  --secret-material-key client_secret
 ```
 
 Configure OAuth2 refresh-token refresh:
@@ -924,10 +974,10 @@ openshell provider refresh configure drive-work \
 This example assumes you imported a custom profile with `id: google-drive`.
 
 <Note>
-`--secret-material-key` takes the name of a `--material` key, not the secret value. For example, use `--material client_secret="$MS_CLIENT_SECRET"` with `--secret-material-key client_secret`. Prefer `--secret-material-env` so the value does not appear in shell history. The gateway combines caller markings with authoritative profile metadata and strategy-defined secret fields, then stores those values through the active credential driver. Only the `--credential-key` value, such as `MS_GRAPH_ACCESS_TOKEN`, becomes injectable. If an OAuth response rotates a refresh token, OpenShell stores the replacement through the credential driver automatically.
+`--secret-material-key` takes the name of a `--material` key, not the secret value. For example, use `--material client_secret="$MS_CLIENT_SECRET"` with `--secret-material-key client_secret`. Prefer `--secret-material-env` so the value does not appear in shell history. The issuer descriptor classifies material before issuer-owned storage. For custom strategies, contradictory caller or profile secret annotations fail validation. Only configured output keys, including the primary key and declared additional outputs, become injectable. OAuth refresh tokens, client secrets, and rotated refresh material remain issuer-owned.
 </Note>
 
-Use `--credential-expires-at` when the current provider credential already has a known expiry timestamp. For refresh-managed keys, the value can be Unix epoch milliseconds or an ISO/RFC3339 timestamp such as `2026-01-01T00:00:00Z` or `2026-01-01T01:00:00+01:00`. OpenShell stores that value as epoch milliseconds in both refresh state and provider credential metadata. An explicit Unix epoch value remains distinct from an omitted expiry and is already expired. Later gateway-managed refreshes replace it with the minted token expiry.
+Omit `expiration_time` from issuer-managed refresh configuration requests, including custom strategies. The issuer derives expiration from mint results and rejects explicit expiration before creating or replacing a grant. Use `provider update --credential-expires-at` when managing static or externally refreshed credential values instead.
 
 Force a refresh immediately:
 
@@ -974,11 +1024,10 @@ openshell provider refresh delete my-graph \
   --credential-key MS_GRAPH_ACCESS_TOKEN
 ```
 
-For inline credentials and legacy references that have not advanced through versioned rotation, embedded refresh deletion clears the provider credential expiry only when that expiry came from the deleted refresh state, including an explicit Unix epoch expiry. Independently authored expirations remain unchanged. Versioned credentials retain their issuer-owned expiration after refresh deletion; stopping refresh does not make an expiring token permanent.
-
-With a remote credential issuer, deletion preserves the latest published outputs
-as static credentials with their original expiration. See
-[remote refresh deletion](/extensibility/credential-issuer#delete-refresh-without-deleting-credentials)
+In both issuer modes, deletion preserves the latest published output bundle as
+static credentials with its original expiration. Stopping refresh does not make
+an expiring token permanent. See
+[refresh deletion](/extensibility/credential-issuer#delete-refresh-without-deleting-credentials)
 for first-mint requirements and interrupted-call recovery.
 
 ### Refresh Logs
@@ -993,7 +1042,7 @@ The gateway emits secret-safe refresh logs during each worker sweep. Use these l
 The sweep line summarizes how many credential refresh records the worker inspected. The watch line shows the provider, credential key, strategy, refresh status, expiry time, next refresh time, and whether refresh is due or manually requested. It does not include access-token values or refresh material.
 
 <Note>
-Refresh updates the provider record. Sandboxes receive the updated credential through the same placeholder environment and proxy rewrite path as other provider credentials.
+Refresh advances output-reference versions without changing the provider resource version. Sandboxes receive the updated credentials through the same placeholder environment and proxy rewrite path as other provider credentials.
 </Note>
 
 ## Launch Sandboxes with Providers

@@ -180,6 +180,7 @@ fn resolution() -> store::ResolveSecretsRequest {
                 provider_id: "provider-id".into(),
                 credential_key: "TOKEN".into(),
                 provider: String::new(),
+                ..Default::default()
             }),
             expected_version: Some(2),
         }],

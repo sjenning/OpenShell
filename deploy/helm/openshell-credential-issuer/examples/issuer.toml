@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Non-secret shape example only. Provision actual SQL credentials in a protected
+# file and upload that complete file to config.existingSecret, never Helm values.
+[openshell.credential_issuer]
+listen = "0.0.0.0:8443"
+database_url = "postgresql://issuer-db.security.svc/issuer"
+replicas = 1
+key_encryption_key_path = "/etc/openshell-issuer/encryption/key"
+tls_cert_path = "/etc/openshell-issuer/tls/tls.crt"
+tls_key_path = "/etc/openshell-issuer/tls/tls.key"
+tls_client_ca_path = "/etc/openshell-issuer/tls/client-ca.pem"
+storage_driver = "openshell-driver-db-credstore"
+cache_ttl_seconds = 60
+refresh_interval_seconds = 10
+shutdown_timeout_seconds = 180
+
+[openshell.credential_issuer.gateway_identities]
+"spiffe://example.org/gateway/production" = ["default"]
+
+# Optional remote minter: add its existing Secret to registrationSecrets with
+# name=company-minter. Pin server trust and the issuer's separate client identity.
+# [openshell.credential_issuer.minters.company-sts]
+# endpoint = "https://company-minter.security.svc:8443"
+# tls_ca_cert_path = "/etc/openshell-issuer/registrations/company-minter/ca.pem"
+# tls_client_cert_path = "/etc/openshell-issuer/registrations/company-minter/tls.crt"
+# tls_client_key_path = "/etc/openshell-issuer/registrations/company-minter/tls.key"
+
+# Optional Vault storage: select storage_driver="vault" above, and mount an
+# existing Secret with name=vault. Keep the shared KEK for issuer recovery state.
+# [openshell.credential_drivers.vault]
+# address = "https://vault.security.svc:8200"
+# ca_bundle = "/etc/openshell-issuer/registrations/vault/ca.pem"
+# auth_method = "token_file"
+# token_path = "/etc/openshell-issuer/registrations/vault/token"
+
+# Alternatively select storage_driver="kubernetes-secrets", enable the dedicated
+# ServiceAccount token, and grant namespace-scoped backend RBAC outside the chart.
+# [openshell.credential_drivers.kubernetes-secrets]
+# namespace = "issuer-storage"

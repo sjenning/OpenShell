@@ -195,6 +195,7 @@ impl GrantRuntime {
                     .clone_from(&sealed);
                 state.recovery_action = None;
                 state.failure_code.clear();
+                state.provider_error_subtype.clear();
                 next_version(&mut state)?;
                 let loaded = self
                     .save(&snapshot.scope, current.revision, &state, Vec::new())
@@ -388,6 +389,7 @@ impl GrantRuntime {
             let (mut mutations, mut events) = refs.prepare_many(&writes).await?;
             mutations.extend(self.binding_fences(&snapshot.scope, &state).await?);
             state.phase = GrantPhase::Refreshed;
+            state.last_refresh_time_ms = Some(now_ms()?);
             state.expiration_time_ms = Some(response.expiration_time_ms);
             state.next_refresh_at_ms = scheduler::next_refresh_at_ms(
                 response.expiration_time_ms,
@@ -399,6 +401,7 @@ impl GrantRuntime {
             state.completed_attempt = Some(attempt.id.clone());
             state.recovery_action = None;
             state.failure_code.clear();
+            state.provider_error_subtype.clear();
             next_version(&mut state)?;
             if let Some(receipt) = self
                 .rotate_receipt(&snapshot.scope, &state, Code::Ok)
@@ -436,6 +439,7 @@ impl GrantRuntime {
                 .await
             {
                 Ok(_) => {
+                    crate::observability::grant_transition(&snapshot.scope, &state);
                     return Ok(Snapshot {
                         loaded: StoredGrant {
                             state,

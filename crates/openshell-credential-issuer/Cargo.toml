@@ -22,6 +22,9 @@ toml = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-sts = { workspace = true }
 jsonwebtoken = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+openshell-ocsf = { path = "../openshell-ocsf" }
 openshell-crypto = { workspace = true }
 openshell-core = { path = "../openshell-core" }
 openshell-driver-db-credstore = { path = "../openshell-driver-db-credstore" }

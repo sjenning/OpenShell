@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tonic::Status;
 mod grants;
+mod migration;
 mod partial;
 pub use grants::GrantPlan;
 pub(crate) use grants::publication::PublishedGrant;
@@ -244,6 +245,7 @@ impl StaticHandoff {
             provider_id: self.state.provider_id.clone(),
             credential_key: key.into(),
             provider: self.state.provider_name.clone(),
+            ..Default::default()
         }
     }
     async fn check(&self, store: &Store) -> Result<(), Status> {

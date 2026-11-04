@@ -12,7 +12,7 @@ use crate::{
     service::{CredentialRefreshService, CredentialStoreService},
     storage::CredentialStorage,
 };
-pub use config::Config;
+pub use config::{Config, Minter as MinterConfig};
 use futures::StreamExt as _;
 use openshell_driver_db_credstore::{
     DbCredstoreCredentialDriver, EncryptedGatewayCredentialStoreCrypto,
@@ -75,6 +75,7 @@ pub struct Daemon {
     refresh: CredentialRefreshService,
     tls: Arc<TlsFiles>,
     listen: std::net::SocketAddr,
+    metrics_bind_address: Option<std::net::SocketAddr>,
     interval: Duration,
     shutdown_timeout: Duration,
 }
@@ -137,13 +138,7 @@ impl Daemon {
             Duration::from_secs(options.cache_ttl_seconds),
         )?;
         let mut registry = builtins::registry();
-        for (name, minter) in &options.minters {
-            let channel = ExtensionChannelConfig::new(&minter.endpoint)
-                .with_custom_ca_pem(read(&minter.tls_ca_cert_path).await?)
-                .with_client_identity(minter.identity()?);
-            let remote = RemoteMinter::connect(&channel, name).await?;
-            registry.register_custom(Arc::new(remote))?;
-        }
+        register_minters(&mut registry, &options.minters).await?;
         let spool = MintResultSpool::new(
             EncryptedGatewayCredentialStoreCrypto::from_config(&crypto_config)
                 .map_err(|_| Status::unavailable("issuer mint spool initialization failed"))?,
@@ -154,6 +149,7 @@ impl Daemon {
             refresh,
             tls,
             listen: options.listen,
+            metrics_bind_address: options.metrics_bind_address,
             interval: Duration::from_secs(options.refresh_interval_seconds),
             shutdown_timeout: Duration::from_secs(options.shutdown_timeout_seconds),
         })
@@ -172,6 +168,10 @@ impl Daemon {
         let address = listener
             .local_addr()
             .map_err(|_| Status::unavailable("issuer listener unavailable"))?;
+        let _metrics = self
+            .metrics_bind_address
+            .map(crate::observability::start_exporter)
+            .transpose()?;
         let tls = self.tls.clone();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener)
             .map(move |socket| {
@@ -185,7 +185,11 @@ impl Daemon {
                         acceptor.accept(socket).await.ok()
                     })
                     .await;
-                    Ok::<_, std::io::Error>(handshake.ok().flatten())
+                    let stream = handshake.ok().flatten();
+                    if stream.is_none() {
+                        crate::observability::authentication_denied();
+                    }
+                    Ok::<_, std::io::Error>(stream)
                 }
             })
             .buffer_unordered(32)
@@ -242,3 +246,29 @@ impl std::fmt::Debug for Daemon {
 }
 #[cfg(test)]
 mod tests;
+
+/// Share operator-registered custom minters across in-process and standalone
+/// hosting. Registrations never bypass the private-CA/client-identity boundary.
+pub async fn register_minters(
+    registry: &mut crate::minter::MinterRegistry,
+    minters: &BTreeMap<String, MinterConfig>,
+) -> Result<(), Status> {
+    if minters.len() > 60 {
+        return Err(Status::invalid_argument(
+            "issuer minter registration limit exceeded",
+        ));
+    }
+    for (name, minter) in minters {
+        if !crate::minter::valid_id(name) || !minter.tls_ca_cert_path.is_absolute() {
+            return Err(Status::invalid_argument(
+                "invalid issuer minter registration",
+            ));
+        }
+        let channel = ExtensionChannelConfig::new(&minter.endpoint)
+            .with_custom_ca_pem(read(&minter.tls_ca_cert_path).await?)
+            .with_client_identity(minter.identity()?);
+        let remote = RemoteMinter::connect(&channel, name).await?;
+        registry.register_custom(Arc::new(remote))?;
+    }
+    Ok(())
+}

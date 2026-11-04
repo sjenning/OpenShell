@@ -52,6 +52,7 @@ fn grant_checkpoint(
                 workspace: state.object_workspace().to_string(),
                 provider_id: state.provider_id.clone(),
                 credential_key: state.credential_key.clone(),
+                ..Default::default()
             },
         },
         status: state.status.clone(),

@@ -37,6 +37,7 @@ async fn remote_source_versions_drive_both_configuration_builders_and_stale_capt
         provider_id: provider.object_id().into(),
         credential_key: "GITHUB_TOKEN".into(),
         provider: "versioned".into(),
+        ..Default::default()
     };
     let stored = issuer
         .raw

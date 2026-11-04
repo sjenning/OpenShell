@@ -5,9 +5,11 @@ stateless minter contracts, authenticated store/refresh/minter library hosts,
 and an autonomous refresh/recovery worker. Credential drivers store values;
 reference metadata contains ownership, opaque handles, versions, expiration,
 revocation, and pending deletions. Known mint results use encrypted native spools.
-The experimental standalone binary hosts both private services. Container/Helm
-packaging, issuer audit/metrics integration, and gateway remote-source wiring
-remain incomplete. See [standalone configuration](../../docs/extensibility/credential-issuer.mdx).
+Embedded and experimental standalone hosting execute the same private service
+handlers, authorization, scheduling, watches, and bounded value cache. The
+standalone service has separate container/Helm packaging, OCSF audit, and an
+optional private Prometheus listener. See
+[standalone configuration](../../docs/extensibility/credential-issuer.mdx).
 
 ## Reference lifecycle
 
@@ -35,24 +37,37 @@ grant receipt, and provider-owner checks in one native transaction. Gateway
 persistence provides non-mutating `AtomicWrite::Check` preconditions: PostgreSQL
 locks the checked row until commit; SQLite uses an immediate write transaction.
 Neither check advances the owner's version or changes its timestamps.
-Established handle-backed refresh grants now use this transaction to publish all
-output versions and the completed-mint receipt together. First mint and legacy
-inline outputs still establish their references through the provider-record path.
-Reconfiguration clears prior mint receipts; the new authorization epoch's first
-mint allocates fresh references rather than rotating the old epoch's set.
+Selected issuer grants use native transactions to publish every output version
+and the completed-mint receipt together, including the first mint into already
+reserved references. Reconfiguration allocates a new authorization epoch and
+fresh references rather than rotating the old epoch's set. The gateway's legacy
+publication adapter remains for compatibility and adoption, not active scheduling.
 
 `ReferenceStateStore` implements durable create-only and compare-and-swap writes.
-The gateway adapter stores these records in its object database. PostgreSQL and
-SQLite use the same reference contract; credential concurrency does not depend
-on a process-local mutex.
+The selected issuer stores these records in its repository; the gateway adapter
+also reads legacy reference metadata during adoption. PostgreSQL and SQLite use
+the same reference contract; credential concurrency does not depend on a
+process-local mutex.
 
 ## Gateway integration
 
-The gateway preserves existing driver handles as public-record reference
-identities and uses a hashed index to find their issuer-owned state. Startup
-adopts provider handles without changing provider records or reading secret
-values. Refresh material is adopted when resolved. Internal SSH keys and launch
-material bypass issuer references and retain their local driver path.
+The gateway selects one issuer source for provider values, refresh grants,
+sandbox SSH host private keys, and stored supervisor launch material. Typed
+`SecretOwnerKind::{Provider, Sandbox, SupervisorInstance}` ownership separates
+these resources by workspace, immutable ID, and logical key. Internal secrets do
+not become synthetic providers. Gateway TLS and launch-signing key files remain
+separate bootstrap configuration.
+
+Embedded startup performs restartable adoption before serving requests. Existing
+handle-backed references retain identities, versions, revocation, physical
+backend ownership, and pending cleanup without reading output values. Inline
+values move into issuer-owned storage. Refresh adoption preserves grant IDs,
+authorization epochs, output bindings, expiration, schedules, attempt/completion
+fences, and recovery state. Revision-fenced gateway publication precedes issuer
+activation, and startup resumes prepared activations without reauthorizing or
+minting. Unknown outcomes remain parked. Remote selection does not perform this
+local upgrade, initialize a value driver, or load a gateway credential KEK;
+changing hosting mode requires an explicit migration.
 
 Configuration inputs capture reference versions without resolving values. Both
 snapshot revision hashes include those versions. Embedded version and revocation
@@ -74,11 +89,12 @@ backend allocation and reference publication.
 
 `backend::CredentialDriver` owns the low-level driver contract and adapters for
 encrypted database, Kubernetes Secrets, and Vault storage. The gateway reexports
-the trait for compatibility and still composes its local registry, subprocess
-lifetimes, and object-store adapter. Sharing the contract does not send SSH host
-keys or launch material to an issuer: `InternalSecretStore` remains local and
-retains its own backend ownership. The issuer can compose these same first-party
-drivers without depending on `openshell-server`.
+the trait for compatibility and composes the embedded issuer's registry,
+subprocess lifetimes, and object-store adapter. `InternalSecretStore` routes
+production internal-secret operations through the selected issuer with typed
+owners. Its legacy local path remains available to the startup adoption adapter
+and compatibility tests, not as a fallback for remote source failures. The issuer
+can compose the same first-party drivers without depending on `openshell-server`.
 
 These are raw legacy driver requests, not an authorization boundary. In
 particular, the database driver binds its legacy `provider` and credential-key
@@ -154,10 +170,13 @@ recover an encrypted known result through an independent pool, and prove failed
 fences roll back outputs, grant state, receipts, and events together.
 
 `service::CredentialRefreshService` composes this adapter with the shared engine
-and autonomous recovery/sweep. Gateway source selection is explicit; public
-builtin and single-output custom grant configuration and rotation use the selected
-issuer with value-free gateway journals and metadata-only replay. Custom profile
-declarations and multi-output custom configuration remain pending. `DetachGrant`
+and autonomous recovery/sweep. Public built-in and registered custom grant
+configuration, including profile-driven multi-output bundles, uses the selected
+issuer with value-free gateway journals and metadata-only replay. Profiles
+validate against that issuer's descriptor catalog. The primary custom output is
+the sole descriptor output not mapped through `additional_outputs`; ambiguous
+bundles fail before allocation. Registration evidence stays in memory and is
+never serialized into profiles. `DetachGrant`
 serializes with minting and deletion under the grant lock and distributed lease.
 It atomically stops refresh, releases output-binding guards to static ownership,
 and retires configuration/material without changing output references, values,
@@ -170,8 +189,8 @@ be detached.
 `RefreshCoordinator` owns process-local grant locks, bounded admission, executor
 limits, and detached execution. Queue waits can time out; an executing mint
 cannot be cancelled by that timer or by the caller disconnecting. Maintenance
-uses the same grant lock. The gateway acquires its distributed lease inside
-that local exclusion and reloads durable state before invoking issuer admission
+uses the same grant lock. The host acquires its distributed lease inside that
+local exclusion and reloads durable state before invoking issuer admission
 policy.
 
 `TokenMinter` receives non-secret configuration, resolved secret material, a
@@ -195,10 +214,9 @@ Production STS endpoints come from the region, not request material. The explici
 `test-support` registry permits only HTTP loopback STS overrides; enabling that
 feature does not change the production registry.
 
-The gateway maps durable grants to requests and semantic outputs to pinned
-profile environment keys. It records the issuer-allocated attempt UUID together
-with its pre-mint uncertainty marker and reuses it as the completed-mint receipt after
-publication. This does not provide upstream exactly-once delivery: built-in
+The gateway maps semantic outputs to pinned profile environment keys. The issuer
+records its attempt UUID with the pre-mint uncertainty marker and reuses it as the
+completed-mint receipt after publication. This does not provide upstream exactly-once delivery: built-in
 protocols do not yet send the ID to upstream providers.
 
 `RefreshEngine` now owns the attempt lifecycle behind `TokenMinter`,
@@ -219,7 +237,7 @@ Explicit rotation bypasses backoff, never an uncertain mint. The checkpoint
 contains no material, handles, profiles, or upstream error bodies. It is a policy
 projection, not a new durable serialization format or substitute for a lease.
 
-The gateway store adapter retains serialization, owner liveness checks,
+The legacy gateway store adapter retains serialization, owner liveness checks,
 epoch/revision-fenced writes, and rotated-token staging. It captures output
 versions before minting, then stages fresh backings and atomically publishes the whole output set with
 its completed-mint receipt and a provider-version precondition. A changed owner,
@@ -236,16 +254,16 @@ errors. A non-secret `GrantSchedule` is only a scheduling projection: the store
 adapter must reload and recheck it under the distributed lease. Tombstones and
 pending cleanup remain eligible for maintenance even when a mint is parked.
 
-Durable grant serialization, grant enumeration/maintenance, and provider-record
-publication still live in gateway adapters. Public profile and configure
-`strategy_name` fields now support named built-ins with enum/name conflict checks;
-status projects canonical names for legacy grants. New grants persist known names
-using the existing durable enum; existing grants need no migration. Unregistered custom names
-fail closed. Moving durable adapters into the issuer, exposing registered custom
-minters through configuration, durable reconnectable change streams,
-and issuer-service transport remain separate implementation work. The private
-store, refresh, and minter RPC contracts live under `proto/`; they are not served
-by the gateway listener.
+The issuer owns active grant serialization, enumeration, maintenance, and output
+publication; gateway adapters retain DTO projection and legacy adoption.
+`strategy_name` selects named built-ins or exact registered custom minters, with
+enum/name conflict checks and canonical status projection. Custom requests leave
+the legacy enum unspecified. Both hosting modes pin registered descriptors,
+classify secret material from those descriptors, and use durable reconnectable
+change streams. Embedded custom minters use gateway `credential_minters` tables;
+standalone minters use issuer-owned registration tables. The private store,
+refresh, and minter RPC contracts live under `proto/`; they are not served by the
+gateway listener.
 
 ## Encrypted mint-result spools
 
@@ -278,9 +296,9 @@ malformed, or unknown failure details park the attempt for investigation; networ
 errors and deadlines may follow an upstream side effect. Arbitrary remote status
 messages, failure codes, and subtypes are discarded in favor of static local
 diagnostics. Configured minter services remain responsible for authenticating
-and authorizing issuer identities. The gateway configures registered single-output
-custom strategies through its selected issuer. Custom profile declarations and
-multi-output configuration remain future work.
+and authorizing issuer identities. The gateway configures registered custom
+strategies through its selected issuer, using profile semantic output mappings
+for multi-output bundles and checking every output key before allocation.
 
 ## CredentialStore RPC host
 
@@ -326,9 +344,9 @@ The standalone daemon composes this host with CredentialRefreshService and
 shared storage/coordination. The gateway has selected-source delivery, static
 mutation journaling, and operator-export adapters. Gateway TOML source selection
 also starts delivery invalidation and cleanup reconciliation. Public grant
-configuration for builtin and single-output custom strategies and rotation use
-that source. Refresh deletion preserves published outputs as static credentials;
-custom profile declarations and multi-output custom configuration remain pending.
+configuration for built-in and registered custom strategies, profile-driven
+multi-output bundles, and rotation use that source. Refresh deletion preserves
+published outputs as static credentials.
 
 ### Value-free static reservations
 
@@ -351,7 +369,7 @@ remains.
 
 ## CredentialRefresh RPC host
 
-`service::CredentialRefreshService` hosts all nine refresh RPCs alongside a
+`service::CredentialRefreshService` hosts all ten refresh RPCs alongside a
 CredentialStoreService. Supply a pinned minter registry and MintResultSpool
 using a shared encryption key across replicas. The host never reads gateway
 profiles. Creation encrypts configuration/material, allocates fixed pending
@@ -413,7 +431,9 @@ actual generated clients for both services. PostgreSQL tests use independent
 service pools to coalesce mints, replay intents, recover known results and
 complete cleanup. The standalone daemon supplies validated TOML composition,
 mandatory mTLS, storage, and registered minters. Gateway remote mode requires
-explicit gateway configuration; container/Helm issuer packaging remains pending.
+explicit gateway configuration; embedded hosting invokes the same handlers
+without a transport listener. Container and Helm packaging are documented in the
+[standalone deployment reference](../../docs/extensibility/credential-issuer.mdx).
 
 ### Graceful host shutdown
 
@@ -446,8 +466,9 @@ and clamps them to expiration. Errors contain static diagnostics without remote
 messages or details. Watch connections resume from durable namespace cursors;
 reset/checkpoint frames do not reconcile caller state. Broken, malformed, or
 stalled streams terminate and require a new watch. This is the transport adapter;
-WatchedIssuer supplies the cache/reconciliation layer used by explicit gateway
-remote-source selection and provider/config-delivery integration.
+WatchedIssuer supplies the shared cache/reconciliation layer for provider and
+internal-secret delivery in both hosting modes. `RemoteIssuer::embedded` calls
+the same handlers with an embedded scope instead of opening a TLS transport.
 
 ## Watched remote values
 
@@ -547,10 +568,34 @@ by that namespace, and check the bound owner before reading values or mutating
 state. CredentialStoreService and CredentialRefreshService apply these checks
 to every hosted operation. Neither host enables gateway remote mode by itself.
 
+## Audit and metrics
+
+`observability` instruments embedded and standalone operations with closed
+operation, outcome, gRPC-code, and phase labels. Metrics cover operation outcomes,
+in-flight work and duration, denials, committed grant transitions, deferred
+cleanup, and the last complete scheduler snapshot. Values, references, IDs,
+hashes, endpoint URLs, and upstream diagnostics never become metric labels.
+
+OCSF audit covers service mutations, committed reference/grant transitions, and
+access denials. Authorized resolution logs carry the authenticated gateway,
+explicit resolution purpose, and batch count, never values. OCSF records may
+carry validated workspace and issuer-generated logical reference/grant IDs, not
+physical backing handles or secret-dependent fingerprints. The standalone
+subscriber writes native OCSF JSONL independently of its operational log filter.
+Embedded handlers use the gateway subscriber and metrics recorder.
+
+Standalone `metrics_bind_address` optionally opens a separate unauthenticated
+plaintext `/metrics` listener. Omission disables it. Bind to loopback or an
+isolated monitoring network; a bind failure rejects startup. Embedded hosting
+opens no additional listener. These observations are not durable receipts or
+proof of upstream exactly-once execution.
+
 ## Verification
 
 ```shell
 cargo test -p openshell-credential-issuer
+# Disposable PostgreSQL container; includes gateway and issuer replica tests:
+mise run test:rust:postgres:issuer
 # Against a disposable PostgreSQL database (creates issuer-owned tables):
 OPENSHELL_TEST_ISSUER_POSTGRES_URL=postgres://localhost/issuer_test \
   cargo test -p openshell-credential-issuer postgres -- --ignored

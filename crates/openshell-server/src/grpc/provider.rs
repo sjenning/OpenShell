@@ -2879,7 +2879,6 @@ use openshell_core::spiffe::{
 use openshell_providers::{
     CredentialRefreshProfile, ProfileValidationDiagnostic, ProviderTypeProfile,
     normalize_profile_id, strategy_output_env_key, strategy_output_spec, strategy_primary_env_key,
-    validate_profile_set,
 };
 use std::sync::{Arc, LazyLock, RwLock};
 use tonic::{Request, Response};
@@ -3302,7 +3301,7 @@ pub(super) async fn handle_import_provider_profiles(
     )
     .await?
     .ensure_active()?;
-    let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
+    let (mut profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let _mutation_guard = state
         .compute
@@ -3316,7 +3315,13 @@ pub(super) async fn handle_import_provider_profiles(
     diagnostics.extend(
         profile_conflict_diagnostics(state.store.as_ref(), &catalog, &workspace, &profiles).await?,
     );
-    diagnostics.extend(validate_profile_set(&profiles));
+    diagnostics.extend(
+        crate::provider_profile_sources::validate_profiles_for_selected_issuer(
+            state,
+            &mut profiles,
+        )
+        .await?,
+    );
     if !has_errors(&diagnostics) {
         diagnostics.extend(
             profile_attached_sandbox_diagnostics(
@@ -3398,7 +3403,7 @@ pub(super) async fn handle_update_provider_profiles(
     .await?
     .ensure_active()?;
     let items = request.profile.into_iter().collect::<Vec<_>>();
-    let (profiles, mut diagnostics) = profiles_from_import_items(&items);
+    let (mut profiles, mut diagnostics) = profiles_from_import_items(&items);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let target_id = normalize_profile_id_request(&request.id)?;
     let _mutation_guard = state
@@ -3420,7 +3425,13 @@ pub(super) async fn handle_update_provider_profiles(
         )
         .await?,
     );
-    diagnostics.extend(validate_profile_set(&profiles));
+    diagnostics.extend(
+        crate::provider_profile_sources::validate_profiles_for_selected_issuer(
+            state,
+            &mut profiles,
+        )
+        .await?,
+    );
     let expected_resource_version = if request.expected_resource_version != 0 {
         Some(request.expected_resource_version)
     } else {
@@ -3532,16 +3543,28 @@ pub(super) async fn handle_lint_provider_profiles(
     )
     .await?
     .name;
-    let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
+    let (mut profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
-    let catalog = state
-        .provider_profile_sources
-        .snapshot_catalog(state.store.as_ref(), &workspace)
-        .await?;
+    // Diagnose the supplied definition against the live selected issuer first.
+    // An unrelated stored profile whose minter disappeared must not prevent
+    // lint from explaining why this proposed definition is invalid.
     diagnostics.extend(
-        profile_conflict_diagnostics(state.store.as_ref(), &catalog, &workspace, &profiles).await?,
+        crate::provider_profile_sources::validate_profiles_for_selected_issuer(
+            state,
+            &mut profiles,
+        )
+        .await?,
     );
-    diagnostics.extend(validate_profile_set(&profiles));
+    if !has_errors(&diagnostics) {
+        let catalog = state
+            .provider_profile_sources
+            .snapshot_catalog(state.store.as_ref(), &workspace)
+            .await?;
+        diagnostics.extend(
+            profile_conflict_diagnostics(state.store.as_ref(), &catalog, &workspace, &profiles)
+                .await?,
+        );
+    }
     let valid = !has_errors(&diagnostics);
 
     Ok(Response::new(LintProviderProfilesResponse {
@@ -5224,7 +5247,7 @@ pub(super) async fn handle_configure_provider_refresh(
 ) -> Result<Response<ConfigureProviderRefreshResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
-    let request = request.into_inner();
+    let mut request = request.into_inner();
     let authz = authorize_workspace(
         &state.store,
         &state.admin_role,
@@ -5281,6 +5304,28 @@ pub(super) async fn handle_configure_provider_refresh(
                 "secret_material_keys entry exceeds maximum length ({} > {MAX_MAP_KEY_LEN})",
                 key.len()
             )));
+        }
+    }
+    // A custom profile can supply its registered strategy when both public
+    // selectors are omitted. Re-read and validate under the mutation guard in
+    // configure_custom; this preliminary lookup grants no write authority.
+    if request.strategy == ProviderCredentialRefreshStrategy::Unspecified as i32
+        && request.strategy_name.is_empty()
+    {
+        let provider = state
+            .store
+            .get_message_by_name::<Provider>(&workspace, provider_name)
+            .await
+            .map_err(|_| Status::internal("fetch provider failed"))?
+            .ok_or_else(|| Status::not_found("provider not found"))?;
+        let catalog = state
+            .provider_profile_sources
+            .snapshot_catalog(&state.store, &workspace)
+            .await?;
+        if let Some(refresh) = provider_refresh_defaults(&catalog, &provider, credential_key)
+            && openshell_providers::custom_strategy_name_is_valid(&refresh.strategy_name)
+        {
+            request.strategy_name = refresh.strategy_name;
         }
     }
     if request.strategy_name.starts_with("custom:") {
@@ -5411,6 +5456,13 @@ pub(super) async fn handle_configure_provider_refresh(
         .await?;
     }
     let refresh_defaults = provider_refresh_defaults(&catalog, &provider, credential_key);
+    if refresh_defaults.as_ref().is_some_and(|refresh| {
+        openshell_providers::custom_strategy_name_is_valid(&refresh.strategy_name)
+    }) {
+        return Err(Status::failed_precondition(
+            "refresh strategy does not match the profile custom refresh declaration",
+        ));
+    }
     validate_strategy_profile_binding(
         strategy,
         credential_key,

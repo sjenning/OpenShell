@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Authenticated private issuer client. No mutation is automatically replayed.
+//! Shared embedded/private issuer client. No mutation is automatically replayed.
 
 use openshell_core::proto::credentials::{refresh::v1 as refresh, store::v1 as store};
 use openshell_extension_core::{ExtensionChannelConfig, connect_channel};
@@ -10,6 +10,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status, transport::Channel};
 
+mod transport;
 mod validation;
 mod watch;
 mod watched;
@@ -21,8 +22,8 @@ const REFRESH: Duration = Duration::from_mins(3);
 
 #[derive(Clone)]
 pub struct RemoteIssuer {
-    store: store::credential_store_client::CredentialStoreClient<Channel>,
-    refresh: refresh::credential_refresh_client::CredentialRefreshClient<Channel>,
+    store: transport::Store,
+    refresh: transport::Refresh,
     calls: Arc<Semaphore>,
     watches: Arc<Semaphore>,
     capabilities: store::GetCapabilitiesResponse,
@@ -57,13 +58,37 @@ impl RemoteIssuer {
         Self::discover(channel).await
     }
     async fn discover(channel: Channel) -> Result<Self, Status> {
+        Self::discover_transports(
+            transport::Store::remote(channel.clone()),
+            transport::Refresh::remote(channel),
+        )
+        .await
+    }
+    /// Use the hosted handlers directly, with the fixed local identity and the
+    /// same validation, admission limits, and watched-cache API as remote mode.
+    /// Construct `store` with `CredentialStoreService::embedded` and construct
+    /// `refresh` from that store. This never starts or connects to a listener.
+    pub async fn embedded(
+        store: crate::service::CredentialStoreService,
+        refresh: crate::service::CredentialRefreshService,
+    ) -> Result<Self, Status> {
+        let this = Self::discover_transports(
+            transport::Store::Embedded(store),
+            transport::Refresh::Embedded(refresh),
+        )
+        .await?;
+        // Verify both supplied services admit the local identity before handing
+        // the client to watch controllers or gateway callers.
+        this.list_strategies().await?;
+        Ok(this)
+    }
+    async fn discover_transports(
+        store: transport::Store,
+        refresh: transport::Refresh,
+    ) -> Result<Self, Status> {
         let mut this = Self {
-            store: store::credential_store_client::CredentialStoreClient::new(channel.clone())
-                .max_decoding_message_size(LIMIT)
-                .max_encoding_message_size(LIMIT),
-            refresh: refresh::credential_refresh_client::CredentialRefreshClient::new(channel)
-                .max_decoding_message_size(LIMIT)
-                .max_encoding_message_size(LIMIT),
+            store,
+            refresh,
             calls: Arc::new(Semaphore::new(16)),
             watches: Arc::new(Semaphore::new(2)),
             capabilities: store::GetCapabilitiesResponse::default(),
@@ -339,5 +364,7 @@ impl RemoteIssuer {
         Ok(result)
     }
 }
+#[cfg(test)]
+mod embedded_tests;
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Explicit, fail-closed remote provider selection; internal secrets stay local.
+//! Explicit, fail-closed remote selection for provider and internal secrets.
 use super::RemoteProviderSource;
 use crate::persistence::{ObjectListQuery, Store};
 use openshell_core::{ObjectId as _, ObjectName as _, ObjectWorkspace as _, proto::Provider};
@@ -186,7 +186,7 @@ pub async fn register_existing(store: &Store, source: &RemoteProviderSource) -> 
             source.register_provider(&provider)?;
         }
         let Some(next) = page.next_cursor else {
-            return Ok(());
+            return super::internal::register_existing(store, source).await;
         };
         cursor = Some(next);
     }

@@ -87,15 +87,18 @@ impl GrantRuntime {
                 "issuer grant is awaiting initialization",
             ));
         }
-        RefreshEngine::new(
-            Arc::new(NativeStore {
-                runtime: self.clone(),
-            }),
-            self.minters.clone(),
-            Arc::new(Sink),
-            self.store.coordinator.clone(),
+        crate::observability::observe(
+            crate::observability::Operation::Refresh,
+            RefreshEngine::new(
+                Arc::new(NativeStore {
+                    runtime: self.clone(),
+                }),
+                self.minters.clone(),
+                Arc::new(Sink),
+                self.store.coordinator.clone(),
+            )
+            .refresh(snapshot, trigger),
         )
-        .refresh(snapshot, trigger)
         .await
         .map_err(|error| {
             Status::new(
@@ -208,11 +211,15 @@ impl GrantRuntime {
             .prepare(Some(expected), state)
             .await?;
         mutations.push(mutation);
+        let changed_status = event.is_some();
         self.store
             .repository
             .for_gateway(scope)
             .commit(&mutations, &event.into_iter().collect::<Vec<_>>())
             .await?;
+        if changed_status {
+            crate::observability::grant_transition(scope, state);
+        }
         Ok(StoredGrant {
             state: state.clone(),
             revision: expected + 1,
@@ -434,6 +441,8 @@ impl RefreshStateStore for NativeStore {
                 state.phase = GrantPhase::Failed;
                 state.recovery_action = Some(RecoveryAction::FixConfiguration);
                 state.failure_code = "strategy_descriptor_changed".into();
+                state.last_error_time_ms = Some(now);
+                state.provider_error_subtype.clear();
                 state.next_refresh_at_ms =
                     scheduler::retry_at_ms(now, RetrySchedule::Configuration);
                 next_version(&mut state)?;
@@ -503,6 +512,7 @@ impl RefreshStateStore for NativeStore {
         next_version(&mut state)?;
         state.recovery_action = None;
         state.failure_code.clear();
+        state.provider_error_subtype.clear();
         state.attempt = Some(GrantAttempt {
             id: attempt_id.into(),
             encrypted_result: None,
@@ -594,7 +604,15 @@ impl RefreshStateStore for NativeStore {
         };
         state.recovery_action = Some(failure.recovery_action);
         state.failure_code = failure.failure_code.into();
-        state.next_refresh_at_ms = scheduler::retry_at_ms(now_ms()?, failure.retry_schedule);
+        let now = now_ms()?;
+        state.last_error_time_ms = Some(now);
+        state.provider_error_subtype = crate::observability::recognized_provider_error_subtype(
+            failure.failure_code,
+            failure.provider_error_subtype.unwrap_or_default(),
+        )
+        .unwrap_or_default()
+        .into();
+        state.next_refresh_at_ms = scheduler::retry_at_ms(now, failure.retry_schedule);
         next_version(&mut state)?;
         let receipt = self
             .runtime

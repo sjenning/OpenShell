@@ -240,6 +240,12 @@ impl Runtime {
         store
             .commit(&mutations, &event.into_iter().collect::<Vec<_>>())
             .await?;
+        crate::observability::audit_store_mutation(
+            crate::observability::Operation::PutSecret,
+            &scope,
+            &state.owner,
+            &reference,
+        );
         tracing::info!(
             gateway = scope.identity(),
             operation = "put",
@@ -326,7 +332,7 @@ impl Runtime {
         let receipt = Receipt {
             operation: "delete".to_string(),
             owner: supplied,
-            reference: request.reference,
+            reference: request.reference.clone(),
             version: state.version,
             fingerprint: backing,
             created_at_ms: now_ms()?,
@@ -346,6 +352,12 @@ impl Runtime {
             expected: 1,
         });
         store.commit(&mutations, &events).await?;
+        crate::observability::audit_store_mutation(
+            crate::observability::Operation::DeleteSecret,
+            &scope,
+            &state.owner,
+            &request.reference,
+        );
         tracing::info!(
             gateway = scope.identity(),
             operation = "delete",

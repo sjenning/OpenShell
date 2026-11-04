@@ -19,6 +19,7 @@ async fn fixture() -> (
             workspace: "workspace".to_string(),
             provider_id: "provider-id".to_string(),
             credential_key: format!("OUTPUT_{index}"),
+            ..Default::default()
         };
         registry
             .adopt(&reference, &owner, vec![index])

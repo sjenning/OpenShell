@@ -4,10 +4,11 @@
 # Helm chart tasks
 
 ["helm:docs"]
-description = "Generate the OpenShell gateway and workspace Helm chart READMEs"
+description = "Generate the OpenShell gateway, workspace, and issuer Helm chart READMEs"
 run = """
   helm-docs --chart-search-root deploy/helm/openshell
   helm-docs --chart-search-root deploy/helm/openshell-workspace
+  helm-docs --chart-search-root deploy/helm/openshell-credential-issuer
 """
 
 ["helm:docs:check"]
@@ -16,7 +17,8 @@ run = """
   set -e
   gateway_tmp="$(mktemp)"
   workspace_tmp="$(mktemp)"
-  trap 'rm -f "$gateway_tmp" "$workspace_tmp"' EXIT
+  issuer_tmp="$(mktemp)"
+  trap 'rm -f "$gateway_tmp" "$workspace_tmp" "$issuer_tmp"' EXIT
 
   helm-docs --chart-search-root deploy/helm/openshell --dry-run > "$gateway_tmp"
   if ! diff -u deploy/helm/openshell/README.md "$gateway_tmp"; then
@@ -28,12 +30,17 @@ run = """
     echo "Workspace Helm chart README is out of sync. Run: mise run helm:docs" >&2
     exit 1
   fi
+  helm-docs --chart-search-root deploy/helm/openshell-credential-issuer --dry-run > "$issuer_tmp"
+  if ! diff -u deploy/helm/openshell-credential-issuer/README.md "$issuer_tmp"; then
+    echo "Issuer Helm chart README is out of sync. Run: mise run helm:docs" >&2
+    exit 1
+  fi
 """
 run_windows = "echo Skipping helm:docs:check: Helm validation is not part of the native Windows lane."
 hide = true
 
 ["helm:lint"]
-description = "Lint the OpenShell gateway and workspace Helm charts"
+description = "Lint the OpenShell gateway, workspace, and issuer Helm charts"
 run = """
   set -e
   helm dependency build deploy/helm/openshell
@@ -50,12 +57,14 @@ run = """
   done
   echo "--- helm lint: workspace defaults ---"
   helm lint deploy/helm/openshell-workspace
+  helm lint deploy/helm/openshell-credential-issuer -f deploy/helm/openshell-credential-issuer/ci/values-test.yaml
+  helm template issuer deploy/helm/openshell-credential-issuer -f deploy/helm/openshell-credential-issuer/ci/values-test.yaml >/dev/null
   echo "All variants passed."
 """
 run_windows = "echo Skipping helm:lint: Helm validation is not part of the native Windows lane."
 
 ["helm:test"]
-description = "Run gateway and workspace Helm chart unit tests"
+description = "Run gateway, workspace, and issuer Helm chart tests"
 run = """
   set -e
   if ! helm plugin list | grep -q unittest; then
@@ -68,8 +77,14 @@ run = """
   deploy/helm/test-gateway-config-parser.sh
   deploy/helm/test-gateway-resource-coherence.sh
   deploy/helm/test-supervisor-pool-scaling.sh
+  deploy/helm/test-credential-issuer.sh
+  tasks/scripts/test-credential-issuer-release.sh
 """
 run_windows = "echo Skipping helm:test: Helm validation is not part of the native Windows lane."
+
+["helm:test:credential-issuer"]
+description = "Run issuer chart render, package, Secret boundary, and strict config checks"
+run = "deploy/helm/test-credential-issuer.sh"
 
 ["helm:skaffold:dev"]
 description = "Run skaffold dev for deploy/helm/openshell (iterative deploy)"

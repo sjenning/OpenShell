@@ -177,6 +177,19 @@ git worktree remove --force "$wt"
    gh release view "$VERSION" --json isPrerelease,publishedAt,assets --jq '{isPrerelease, publishedAt, assets: (.assets | length)}'
    ```
 
+   Include the separate credential issuer in the publication inventory:
+   Linux amd64/arm64 `openshell-credential-issuer` archives and their checksum
+   file, `ghcr.io/nvidia/openshell/credential-issuer:<version>`, and
+   `oci://ghcr.io/nvidia/openshell/openshell-credential-issuer:<version>`.
+   Existing native binary/image smoke jobs and Helm publication must pass;
+   gateway artifact presence alone does not establish issuer publication.
+   The default Release Canary does not deploy the standalone issuer. For changes
+   affecting remote issuer deployment or behavior, review the independent
+   two-cluster `e2e:credential-issuer:kind` evidence for matching candidate images
+   and CLI (push and poll), following
+   `tests/suites/features/credential-issuer/README.md`. Do not substitute the
+   default gateway canary or configuration-only checks for that deployment lane.
+
 5. **Close the loop.** Draft a short reply to the coordination thread. Point
    to the release notes rather than repeating them:
 

@@ -84,6 +84,9 @@ fi
 # The mutation-replay test predates OPENSHELL_TEST_POSTGRES_URL. Always use
 # the selected database, even if a legacy URL is inherited from the caller.
 export OPENSHELL_REPLAY_TEST_DATABASE_URL="${OPENSHELL_TEST_POSTGRES_URL}"
+# Additional issuer package selections use this same disposable database,
+# never an inherited issuer database URL.
+export OPENSHELL_TEST_ISSUER_POSTGRES_URL="${OPENSHELL_TEST_POSTGRES_URL}"
 export OPENSHELL_TELEMETRY_ENABLED=false
 
 # Advisory locks are database-wide, so run the tests one at a time.

@@ -279,6 +279,7 @@ async fn remote_config_only_update_projects_expiry_without_value_reads() {
                 provider_id: before.object_id().into(),
                 credential_key: "OPENAI_API_KEY".into(),
                 provider: "provider".into(),
+                ..Default::default()
             }),
             reference: binding["reference"].as_str().unwrap().into(),
             expected_version: Some(2),

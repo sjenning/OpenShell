@@ -176,19 +176,24 @@ operations. Internal consumers do not construct provider records or call provide
 delivery APIs. New writes always stage a fresh candidate before the owning
 controller publishes its handle with CAS.
 
-Both interfaces share the configured embedded credential drivers and their
-process lifetimes. Existing SSH and launch-material handles remain readable and
-deletable without migration. Internal secrets bypass issuer reference state.
-When remote provider credentials are added, internal secrets must retain a local
-backend rather than following the remote provider source.
+Both interfaces use the selected
+[`openshell-credential-issuer`](../openshell-credential-issuer/README.md) in embedded
+and remote modes. Typed provider, sandbox, and supervisor-instance owners keep
+internal secrets separate from provider records. Remote startup initializes no
+local value drivers or credential KEK. Embedded startup adopts legacy physical
+handles without copying their values, moves inline values into issuer storage,
+and atomically publishes value-free ownership journals with the rewritten owner
+records. Refresh imports remain dormant until that gateway publication commits;
+restart recovery verifies the complete provider/journal/output/epoch bundle
+before activation. Replacing an unpublished import generation transfers only its
+native copies into durable cleanup, never legacy-owned outputs or material.
 
-Provider credentials use the embedded
-[`openshell-credential-issuer`](../openshell-credential-issuer/README.md) reference
-registry. Startup adopts legacy handles at version 1 without rewriting provider
-records. Value replacements use fresh backing handles and a version CAS, while
-operator reconfiguration continues to allocate a new authorization epoch.
-Revocation tombstones fence stale references even when backend deletion fails.
-Retired handles remain durably owned until cleanup succeeds.
+Value replacements use fresh backing handles and a version CAS. Operator
+reconfiguration allocates a new authorization epoch. Revocation tombstones fence
+stale references even when backend deletion fails. Retired handles remain
+durably owned until cleanup succeeds. Internal allocation intents are fenced in
+the same transaction as SSH identity or supervisor assignment publication;
+cleanup can cancel an abandoned intent without racing a late publisher.
 
 Both configuration snapshots hash captured credential versions; provider delivery
 captures each version and its expiration from the same metadata observation and
@@ -202,20 +207,19 @@ the issuer also owns all four stateless built-in protocol implementations.
 The issuer owns periodic sweep execution, scheduling and retry policy. Its
 non-secret grant checkpoint also owns admission: owner/ID/epoch checks, deletion,
 completed-mint coalescing, uncertain-outcome rejection, and live backoff. The
-adapter reloads under the distributed lease and checks provider liveness before
-preparing an issuer-allocated attempt ID; the engine rejects mismatched request
-IDs before invoking a minter.
-Gateway adapters still own durable grant serialization, enumeration/maintenance,
-and publication adapters. Established
-handle-backed grants publish fresh reference versions and their completed-mint
-receipt in one transaction without modifying provider records. The transaction
-checks the provider's resource version and every captured output version. First
-mint and legacy inline outputs still use provider-record publication to establish
-references. Reconfiguration clears old mint receipts so its first mint allocates
-new references for the new authorization epoch. The issuer supplies native
-store/refresh library hosts, an authenticated standalone service, and a bounded
-mTLS remote client. Moving the remaining embedded adapters and standalone
-deployment packaging remain future work.
+issuer reloads its immutable grant and output ownership under the distributed
+lease before preparing an attempt ID; the engine rejects mismatched request IDs
+before invoking a minter.
+The issuer owns active grant serialization, enumeration, maintenance, scheduling,
+and atomic output publication. Both hosting modes invoke the same private
+service handlers through the validated watched client; embedded mode opens no
+transport listener. Gateway adapters retain legacy DTO projection for startup
+adoption and compatibility tests, not production scheduling. New configurations
+reserve fixed pending references before initialization and publish a value-free
+gateway handoff. Refresh deletion detaches the grant while preserving output
+values, versions, and expiration as static credentials. Standalone container,
+Helm, release packaging, audit, and optional private metrics are documented in the
+[issuer deployment reference](../../docs/extensibility/credential-issuer.mdx).
 
 Intermediate subject-token exchange checks its versioned intermediate-token cache
 before resolving stored subject values. Cache hits still require live attachment,

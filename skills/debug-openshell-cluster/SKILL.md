@@ -95,6 +95,32 @@ Use gateway metadata, deployment values, or the user's setup notes to identify t
 
 Before debugging the compute platform, inspect gateway logs for failures in dependencies initialized before the listener becomes ready.
 
+For a separately deployed credential issuer, inspect its own Helm release and
+`credential-issuer` Deployment, not the gateway workload. The issuer chart has
+only a private ClusterIP port 8443, mandatory private-CA mTLS, and default-deny
+ingress until `networkPolicy.ingressFrom` selects gateway peers. It has no public
+gateway listener or TLS-disable setting. Check private routing and the issuer
+certificate's Service DNS SAN rather than exposing it through the gateway API.
+Inspect Secret names/key presence and file permissions without printing values:
+the complete `issuer.toml` (including SQL credentials), `tls.crt`, `tls.key`,
+`client-ca.pem`, shared KEK, and optional minter/backend registration Secrets are
+read-only source mounts. The `prepare-key` init container checks the shared KEK
+is 32 bytes and copies it to a UID-owned `0600` memory-backed file because the
+encrypted-store loader chmods the key; a projected Secret cannot be used directly.
+A failing `check-config` init container indicates invalid TOML
+or identity/workspace declarations; runtime startup additionally validates keys,
+backend connectivity, and minter discovery. Keep TOML `replicas` equal to Helm
+`replicaCount`; multiple replicas require PostgreSQL and the same provisioned
+KEK. SQLite requires one replica, an existing PVC, and `Recreate` upgrades.
+A declaration in values does not override an incompatible URL inside the config
+Secret. Config/registration changes require a restart via a new non-secret
+`config.revision`; never replace a KEK as a restart-only repair. TLS projections
+reload on new connections. TCP readiness checks confirm listener availability,
+not authenticated secret resolution. Backend RBAC and API token mounting are
+explicit operator choices, not default gateway permissions. See the published
+[credential issuer deployment reference](https://docs.nvidia.com/openshell/latest/extensibility/credential-issuer#package-and-deploy).
+Do not dump issuer TOML or Secrets into diagnostics or support bundles.
+
 The gateway container uses a Distroless Debian runtime. For OS-library
 vulnerability findings, check the deployed image digest and package version;
 deploy a rebuilt gateway image with the patched base. Updating the gateway
@@ -156,17 +182,33 @@ authenticate gateway RPCs with sandbox bearer tokens.
 
 Custom names use `[openshell.drivers.<name>].socket_path`. A launch-time `--compute-driver-socket` override may also use `docker`, `podman`, `kubernetes`, or `vm`; the endpoint then takes precedence over built-in construction. First-party standalone drivers require the socket parent directory to be owned by the driver's effective UID, force its mode to `0700`, create the socket with mode `0600`, and accept only peers with that same UID. Check the parent and socket separately with `stat`; a gateway running under a different UID cannot connect even when filesystem permissions or group membership would otherwise allow it. Operator-supplied drivers must provide equivalent access control appropriate to their implementation. Check gateway logs for connection errors, `GetCapabilities` failures, missing peer metadata, protocol-major mismatch, unmet required capabilities, or an unexpected advertised driver name. `openshell gateway info` reports successful startup negotiations. The advertised name is diagnostic metadata; negotiated features control optional behavior. The gateway does not create or supervise operator-supplied driver processes or sockets.
 
+Without `[openshell.gateway.credential_issuer]`, the gateway hosts the same
+CredentialStore and CredentialRefresh handlers in process, without a listener.
+Embedded startup adopts supported existing provider, SSH identity, launch-material,
+and refresh records rather than minting replacement values; it still uses the
+configured local backing store and encryption key. Do not delete legacy handles
+or migration journals to force adoption.
+
 If `[openshell.gateway.credential_issuer]` is present, the gateway explicitly
-selects the remote issuer for provider credentials. Check its HTTPS reachability,
+selects the remote issuer for provider credentials, sandbox SSH private keys,
+and supervisor-instance launch material. Internal records use typed sandbox or
+supervisor-instance owners; they are not synthetic providers. Remote mode does
+not initialize a gateway-local credential backend or load its KEK. The issuer
+owns that encryption boundary; gateway TLS and launch-signing key files remain
+separate bootstrap configuration. Check its HTTPS reachability,
 `server_ca_path`, endpoint hostname, and the complete PEM client pair or exact
 local SPIFFE Workload API identity. The issuer must authorize that gateway SPIFFE
 identity for every selected workspace. Startup waits for capability discovery and
 metadata reconciliation within `startup_timeout_seconds` (default 30, range
 1–300), without reading values. Existing inline credentials, local driver handles,
 and embedded refresh grants require explicit migration; never remove the table
-or disable TLS verification to bypass that failure. Internal SSH/launch secrets
-still need the local credential store. Builtin refresh configuration publishes a
-new pending epoch without copying old values/expirations; delivery waits for the
+or disable TLS verification to bypass that failure. Existing local internal
+handles also require explicit migration before remote startup. SSH/launch
+resolution fails closed when issuer metadata/watch state is unavailable or a
+reference is revoked; restore issuer health instead of creating a local KEK,
+falling back to a local store, or replacing identity material. Builtin refresh
+configuration publishes a new pending epoch without copying old values/expirations;
+delivery waits for the
 issuer's first mint. Rotate explicitly rather than changing source selection to
 force readiness. Registered single-output custom configuration is supported;
 custom profile refresh declarations and multi-output custom configuration are not.

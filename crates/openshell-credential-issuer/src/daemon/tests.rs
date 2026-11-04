@@ -5,6 +5,7 @@ use crate::remote_issuer::RemoteIssuer;
 use openshell_core::proto::credentials::store::v1 as wire;
 use openshell_extension_core::ExtensionClientIdentity;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, SanType};
+mod metrics;
 mod minter;
 mod postgres;
 struct Fixture {
@@ -124,6 +125,7 @@ fn owner() -> wire::SecretOwner {
         provider_id: "provider-id".into(),
         credential_key: "TOKEN".into(),
         provider: "display".into(),
+        ..Default::default()
     }
 }
 #[tokio::test]

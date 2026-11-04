@@ -7,6 +7,7 @@
 description = "Build all Docker images"
 depends = [
   "build:docker:gateway",
+  "build:docker:credential-issuer",
   "build:docker:sandbox",
   "build:docker:supervisor",
 ]
@@ -26,6 +27,24 @@ hide = true
 description = "Build the gateway Docker image"
 run = "tasks/scripts/docker-build-image.sh gateway"
 hide = true
+
+["build:docker:credential-issuer"]
+description = "Build the standalone credential issuer image"
+run = "tasks/scripts/docker-build-image.sh credential-issuer"
+hide = true
+
+["docker:build:credential-issuer"]
+description = "Alias for build:docker:credential-issuer"
+depends = ["build:docker:credential-issuer"]
+hide = true
+
+["docker:smoke:credential-issuer"]
+description = "Smoke the issuer image version, rendered configuration, and security boundary"
+run = "tasks/scripts/smoke-credential-issuer-image.sh"
+
+["e2e:credential-issuer:images"]
+description = "Serially build matching gateway, issuer, runtime, and custom-minter fixture images for two-cluster E2E"
+run = "tasks/scripts/build-credential-issuer-e2e-images.sh"
 
 ["build:docker:sandbox"]
 description = "Build the sandbox runtime image"
@@ -53,7 +72,7 @@ depends = ["build:docker:supervisor"]
 hide = true
 
 ["build:docker:multiarch"]
-description = "Build multi-arch gateway, sandbox, and supervisor images and push to a registry"
+description = "Build multi-arch gateway, issuer, sandbox, and supervisor images and push to a registry"
 run = "tasks/scripts/docker-publish-multiarch.sh"
 hide = true
 

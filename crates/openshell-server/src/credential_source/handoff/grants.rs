@@ -49,12 +49,12 @@ impl GrantPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GrantSlot {
-    plan: GrantPlan,
-    id: Option<String>,
+    pub(super) plan: GrantPlan,
+    pub(super) id: Option<String>,
     #[serde(default)]
-    pending_publication: bool,
+    pub(super) pending_publication: bool,
     #[serde(default)]
-    detaching: bool,
+    pub(super) detaching: bool,
 }
 impl GrantSlot {
     pub(super) fn valid(&self, state: &State) -> bool {

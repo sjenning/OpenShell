@@ -168,7 +168,9 @@ impl ProviderCredentialSource for CredentialRuntime {
 }
 
 pub mod delivery_watch;
+pub mod embedded;
 pub mod handoff;
+mod internal;
 pub mod startup;
 
 #[cfg(test)]
@@ -182,6 +184,8 @@ struct IssuerReferenceBinding {
     source: String,
     reference: String,
     grant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorization_epoch: Option<String>,
 }
 /// One explicitly configured issuer registration, not a storage driver. Handles
 /// cannot be silently resolved by another registration or an embedded driver.
@@ -190,6 +194,7 @@ pub struct RemoteProviderSource {
     name: Arc<str>,
     client: WatchedIssuer,
     max_batch: usize,
+    gateway: Option<Arc<Store>>,
 }
 impl std::fmt::Debug for RemoteProviderSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -217,6 +222,7 @@ fn owner(provider: &Provider, key: &str) -> Result<wire::SecretOwner, Status> {
         provider_id: metadata.id.clone(),
         credential_key: key.into(),
         provider: metadata.name.clone(),
+        ..Default::default()
     })
 }
 fn valid_registration(name: &str) -> bool {
@@ -239,7 +245,12 @@ impl RemoteProviderSource {
             name: Arc::from(name),
             client,
             max_batch,
+            gateway: None,
         })
+    }
+    pub(crate) fn with_gateway_store(mut self, store: Arc<Store>) -> Self {
+        self.gateway = Some(store);
+        self
     }
     pub fn reference_handle(
         &self,
@@ -254,6 +265,7 @@ impl RemoteProviderSource {
             source: self.name.to_string(),
             reference: reference.into(),
             grant: grant.map(str::to_owned),
+            authorization_epoch: None,
         })
         .map_err(|_| invalid())?;
         Ok(CredentialHandle {
@@ -415,7 +427,13 @@ impl ProviderCredentialSource for RemoteProviderSource {
             // their output references, and snapshot resolution authenticates
             // every reference owner and version before returning any binding.
             if let Some(grant) = self.decode(handle)?.grant {
-                epochs.insert(key.clone(), format!("issuer:{}:{grant}", self.name));
+                let binding = self.decode(handle)?;
+                epochs.insert(
+                    key.clone(),
+                    binding
+                        .authorization_epoch
+                        .unwrap_or_else(|| format!("issuer:{}:{grant}", self.name)),
+                );
             }
         }
         Ok(epochs)

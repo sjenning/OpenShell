@@ -13,6 +13,7 @@ depends = [
   "test:install-sh",
   "test:build-env",
   "test:postgres-runner",
+  "test:credential-issuer-e2e-runner",
   "test:gateway-pull-policy",
   "test:e2e-image-overrides",
   "test:gateway-config",
@@ -141,6 +142,11 @@ description = "Run the load-sensitive bench_postgres_* capacity checks that test
 env = { OPENSHELL_TEST_POSTGRES_PREFIX = "bench_postgres_" }
 run = "tasks/scripts/run-postgres-tests.sh"
 run_windows = "echo Skipping test:rust:postgres:bench: PostgreSQL integration tests need a Linux or macOS container engine."
+
+["test:rust:postgres:issuer"]
+description = "Run gateway and issuer PostgreSQL replica tests on one disposable database"
+run = "tasks/scripts/run-postgres-tests.sh -p openshell-credential-issuer"
+run_windows = "echo Skipping test:rust:postgres:issuer: PostgreSQL integration tests need a Linux or macOS container engine."
 
 ["test:postgres-runner"]
 description = "Test PostgreSQL test runner database and prefix selection without a database or container engine"
@@ -367,3 +373,20 @@ description = "Test generated local gateway TOML without starting a runtime"
 run = "bash tasks/scripts/test-gateway-config.sh"
 run_windows = "echo Skipping test:gateway-config: Unix gateway scripts do not apply on Windows."
 hide = true
+
+["e2e:credential-issuer"]
+description = "Run remote issuer + mTLS minter E2E in fresh namespaces on two explicit non-selected Kubernetes clusters"
+run = "bash tasks/scripts/test-credential-issuer-e2e.sh --external"
+
+["e2e:credential-issuer:kind"]
+description = "Create two isolated disposable kind clusters and run remote issuer deployment E2E (never uses selected cluster)"
+run = "bash tasks/scripts/test-credential-issuer-e2e.sh --kind"
+
+["e2e:credential-issuer:preflight"]
+description = "Read-only issuer E2E topology, candidate and selected-cluster safety checks"
+run = "bash tasks/scripts/test-credential-issuer-e2e.sh --preflight"
+
+["test:credential-issuer-e2e-runner"]
+description = "Check issuer E2E context/namespace safety with fake kubectl; no containers or cluster access"
+run = "bash tests/suites/features/credential-issuer/test-runner.sh"
+run_windows = "echo Skipping test:credential-issuer-e2e-runner: the Unix cross-cluster runner does not apply on Windows."

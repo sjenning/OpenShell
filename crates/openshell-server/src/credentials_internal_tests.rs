@@ -50,6 +50,7 @@ fn resolved(key: &str) -> ResolvedCredential {
 #[tokio::test]
 async fn internal_resolution_validates_batched_responses_and_forwards_ownership() {
     let owner = InternalSecretOwner {
+        kind: openshell_credential_issuer::SecretOwnerKind::Sandbox,
         name: "internal-owner",
         workspace: "test-workspace",
         id: "test-owner-id",
@@ -77,6 +78,7 @@ async fn internal_resolution_validates_batched_responses_and_forwards_ownership(
     for (responses, valid) in cases {
         let resolver: Arc<dyn CredentialDriver> = Arc::new(ScriptedResolver(responses));
         let internal = InternalSecretStore {
+            issuer: None,
             registry: CredentialDriverRegistry::from_config(
                 &Config::new(None).with_credential_drivers(["test-static"]),
             )

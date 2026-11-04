@@ -15,6 +15,8 @@ use tonic::{Request, Response, Status};
 mod detach;
 mod kernel;
 mod maintenance;
+#[path = "migration_grants.rs"]
+pub(super) mod migration;
 mod operations;
 mod reservations;
 mod watch;
@@ -123,6 +125,9 @@ fn grant_status(state: &GrantState) -> Result<wire::GrantStatus, Status> {
             None
         },
         failure_code: state.failure_code.clone(),
+        last_refresh_time: state.last_refresh_time_ms.map(stamp).transpose()?,
+        last_error_time: state.last_error_time_ms.map(stamp).transpose()?,
+        provider_error_subtype: state.provider_error_subtype.clone(),
         recovery_action: action as i32,
         version: state.version,
     })
@@ -154,184 +159,212 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
         &self,
         request: Request<wire::ListStrategiesRequest>,
     ) -> Result<Response<wire::ListStrategiesResponse>, Status> {
-        self.runtime.store.policy.authenticate(&request)?;
-        let strategies = self
-            .runtime
-            .minters
-            .describe()
-            .map(|descriptor| {
-                let field =
-                    |field: &crate::minter::MaterialDescriptor| minter_wire::MaterialDescriptor {
-                        name: field.name.clone(),
-                        required: field.required,
+        crate::observability::observe(crate::observability::Operation::ListStrategies, async {
+            self.runtime.store.policy.authenticate(&request)?;
+            let strategies = self
+                .runtime
+                .minters
+                .describe()
+                .map(|descriptor| {
+                    let field = |field: &crate::minter::MaterialDescriptor| {
+                        minter_wire::MaterialDescriptor {
+                            name: field.name.clone(),
+                            required: field.required,
+                        }
                     };
-                minter_wire::StrategyDescriptor {
-                    name: descriptor.name.clone(),
-                    config: descriptor.config.iter().map(field).collect(),
-                    secret_material: descriptor.secret_material.iter().map(field).collect(),
-                    outputs: descriptor.outputs.clone(),
-                    rotated_secret_material: descriptor.rotated_secret_material.clone(),
-                }
-            })
-            .collect();
-        let result = wire::ListStrategiesResponse {
-            strategies,
-            supports_pending_reservations: true,
-            supports_grant_detach: true,
-        };
-        check_size(&result)?;
-        Ok(Response::new(result))
+                    minter_wire::StrategyDescriptor {
+                        name: descriptor.name.clone(),
+                        config: descriptor.config.iter().map(field).collect(),
+                        secret_material: descriptor.secret_material.iter().map(field).collect(),
+                        outputs: descriptor.outputs.clone(),
+                        rotated_secret_material: descriptor.rotated_secret_material.clone(),
+                    }
+                })
+                .collect();
+            let result = wire::ListStrategiesResponse {
+                strategies,
+                supports_pending_reservations: true,
+                supports_grant_detach: true,
+            };
+            check_size(&result)?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn create_grant(
         &self,
         request: Request<wire::CreateGrantRequest>,
     ) -> Result<Response<wire::CreateGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let runtime = self.runtime.clone();
-        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
-        let result = self
-            .runtime
-            .store
-            .coordinator
-            .run(
-                &coordination,
-                Box::pin(async move { runtime.create(scope, request, key).await }),
-            )
-            .await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::CreateGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let runtime = self.runtime.clone();
+            let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+            let result = self
+                .runtime
+                .store
+                .coordinator
+                .run(
+                    &coordination,
+                    Box::pin(async move { runtime.create(scope, request, key).await }),
+                )
+                .await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn reserve_grant(
         &self,
         request: Request<wire::ReserveGrantRequest>,
     ) -> Result<Response<wire::ReserveGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let runtime = self.runtime.clone();
-        let coordination = format!("{}:secret-operation:{key}", scope.namespace());
-        let result = self
-            .runtime
-            .store
-            .coordinator
-            .run(
-                &coordination,
-                Box::pin(async move { runtime.reserve(scope, request, key).await }),
-            )
-            .await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::ReserveGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let runtime = self.runtime.clone();
+            let coordination = format!("{}:secret-operation:{key}", scope.namespace());
+            let result = self
+                .runtime
+                .store
+                .coordinator
+                .run(
+                    &coordination,
+                    Box::pin(async move { runtime.reserve(scope, request, key).await }),
+                )
+                .await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn initialize_grant(
         &self,
         request: Request<wire::InitializeGrantRequest>,
     ) -> Result<Response<wire::InitializeGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        valid_reference(&request.grant)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let runtime = self.runtime.clone();
-        let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
-        let result = self
-            .runtime
-            .store
-            .coordinator
-            .run(
-                &coordination,
-                Box::pin(async move { runtime.initialize(scope, request, key).await }),
-            )
-            .await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::InitializeGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            valid_reference(&request.grant)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let runtime = self.runtime.clone();
+            let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
+            let result = self
+                .runtime
+                .store
+                .coordinator
+                .run(
+                    &coordination,
+                    Box::pin(async move { runtime.initialize(scope, request, key).await }),
+                )
+                .await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn get_grant(
         &self,
         request: Request<wire::GetGrantRequest>,
     ) -> Result<Response<wire::GetGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        let grant = self.runtime.load(&scope, &request.grant).await?;
-        Ok(Response::new(wire::GetGrantResponse {
-            status: Some(grant_status(&grant.state)?),
-        }))
+        crate::observability::observe(crate::observability::Operation::GetGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            let grant = self.runtime.load(&scope, &request.grant).await?;
+            Ok(Response::new(wire::GetGrantResponse {
+                status: Some(grant_status(&grant.state)?),
+            }))
+        })
+        .await
     }
     async fn delete_grant(
         &self,
         request: Request<wire::DeleteGrantRequest>,
     ) -> Result<Response<wire::DeleteGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        valid_reference(&request.grant)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
-        let runtime = self.runtime.clone();
-        let result = self
-            .runtime
-            .store
-            .coordinator
-            .run(
-                &coordination,
-                Box::pin(async move { runtime.delete(scope, request.grant, key).await }),
-            )
-            .await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::DeleteGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            valid_reference(&request.grant)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
+            let runtime = self.runtime.clone();
+            let result = self
+                .runtime
+                .store
+                .coordinator
+                .run(
+                    &coordination,
+                    Box::pin(async move { runtime.delete(scope, request.grant, key).await }),
+                )
+                .await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn detach_grant(
         &self,
         request: Request<wire::DetachGrantRequest>,
     ) -> Result<Response<wire::DetachGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        valid_reference(&request.grant)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
-        let runtime = self.runtime.clone();
-        let result = self
-            .runtime
-            .store
-            .coordinator
-            .run(
-                &coordination,
-                Box::pin(async move { runtime.detach(scope, request.grant, key).await }),
-            )
-            .await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::DetachGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            valid_reference(&request.grant)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let coordination = GrantRuntime::coordination_key(&scope, &request.grant);
+            let runtime = self.runtime.clone();
+            let result = self
+                .runtime
+                .store
+                .coordinator
+                .run(
+                    &coordination,
+                    Box::pin(async move { runtime.detach(scope, request.grant, key).await }),
+                )
+                .await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn rotate_grant(
         &self,
         request: Request<wire::RotateGrantRequest>,
     ) -> Result<Response<wire::RotateGrantResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        let key = idempotency(&request.idempotency_key)?;
-        let result = self.runtime.rotate(scope, request.grant, key).await?;
-        Ok(Response::new(result))
+        crate::observability::observe(crate::observability::Operation::RotateGrant, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            let key = idempotency(&request.idempotency_key)?;
+            let result = self.runtime.rotate(scope, request.grant, key).await?;
+            Ok(Response::new(result))
+        })
+        .await
     }
     async fn ensure_fresh(
         &self,
         request: Request<wire::EnsureFreshRequest>,
     ) -> Result<Response<wire::EnsureFreshResponse>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        let remaining = request
-            .min_remaining
-            .as_ref()
-            .map(openshell_core::time::duration_to_std)
-            .transpose()
-            .map_err(|_| Status::invalid_argument("invalid minimum remaining duration"))?
-            .unwrap_or_default();
-        let remaining = duration_ms(remaining)?;
-        let status = self.runtime.ensure(scope, request.grant, remaining).await?;
-        Ok(Response::new(wire::EnsureFreshResponse {
-            status: Some(status),
-        }))
+        crate::observability::observe(crate::observability::Operation::EnsureFresh, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            let remaining = request
+                .min_remaining
+                .as_ref()
+                .map(openshell_core::time::duration_to_std)
+                .transpose()
+                .map_err(|_| Status::invalid_argument("invalid minimum remaining duration"))?
+                .unwrap_or_default();
+            let remaining = duration_ms(remaining)?;
+            let status = self.runtime.ensure(scope, request.grant, remaining).await?;
+            Ok(Response::new(wire::EnsureFreshResponse {
+                status: Some(status),
+            }))
+        })
+        .await
     }
     type WatchGrantsStream =
         tokio_stream::wrappers::ReceiverStream<Result<wire::WatchGrantsResponse, Status>>;
@@ -339,15 +372,18 @@ impl wire::credential_refresh_server::CredentialRefresh for CredentialRefreshSer
         &self,
         request: Request<wire::WatchGrantsRequest>,
     ) -> Result<Response<Self::WatchGrantsStream>, Status> {
-        let scope = self.runtime.store.policy.authenticate(&request)?;
-        let request = request.into_inner();
-        check_size(&request)?;
-        Ok(Response::new(
-            self.runtime
-                .clone()
-                .watch_grants(scope, request.after_sequence)
-                .await?,
-        ))
+        crate::observability::observe(crate::observability::Operation::WatchGrants, async {
+            let scope = self.runtime.store.policy.authenticate(&request)?;
+            let request = request.into_inner();
+            check_size(&request)?;
+            Ok(Response::new(
+                self.runtime
+                    .clone()
+                    .watch_grants(scope, request.after_sequence)
+                    .await?,
+            ))
+        })
+        .await
     }
 }
 

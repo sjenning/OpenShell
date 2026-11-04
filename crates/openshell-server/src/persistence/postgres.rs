@@ -489,6 +489,15 @@ impl PostgresStore {
         &self,
         key: i64,
     ) -> PersistenceResult<PostgresDataPoolLockGuard> {
+        self.acquire_data_pool_locks(&[key]).await
+    }
+
+    /// Bounded migration exclusion uses one data connection, not one pooled
+    /// connection per grant. Sorted keys prevent competing upgrades deadlocking.
+    pub(super) async fn acquire_data_pool_locks(
+        &self,
+        keys: &[i64],
+    ) -> PersistenceResult<PostgresDataPoolLockGuard> {
         let mut connection = self.pool.acquire().await.map_err(|e| map_db_error(&e))?;
         connection.close_on_drop();
         sqlx::query("SELECT set_config('lock_timeout', $1, false)")
@@ -496,11 +505,17 @@ impl PostgresStore {
             .execute(&mut *connection)
             .await
             .map_err(|e| map_db_error(&e))?;
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(key)
-            .execute(&mut *connection)
-            .await
-            .map_err(|e| map_db_error(&e))?;
+        let keys = keys
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in keys {
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(key)
+                .execute(&mut *connection)
+                .await
+                .map_err(|e| map_db_error(&e))?;
+        }
         Ok(PostgresDataPoolLockGuard {
             _connection: connection,
         })

@@ -109,7 +109,7 @@ pub fn new_registry(store: Arc<Store>) -> Arc<ReferenceRegistry> {
     Arc::new(ReferenceRegistry::new(Arc::new(DatabaseReferences(store))))
 }
 
-fn reference_key(handle: &CredentialHandle) -> Result<String, Status> {
+pub fn reference_key(handle: &CredentialHandle) -> Result<String, Status> {
     let driver = handle.driver.trim();
     let identity = format!("{}:{driver}{}", driver.len(), handle.handle);
     let digest = openshell_crypto::sha256(identity.as_bytes())
@@ -122,6 +122,7 @@ fn owner(scope: RefreshMaterialScope<'_>) -> SecretOwner {
         workspace: scope.workspace.to_string(),
         provider_id: scope.provider_id.to_string(),
         credential_key: scope.credential_key.to_string(),
+        ..Default::default()
     }
 }
 

@@ -123,6 +123,7 @@ async fn remote_startup_registers_existing_bindings_without_values_or_provider_r
         provider_id: "provider".into(),
         credential_key: "TOKEN".into(),
         provider: "display".into(),
+        ..Default::default()
     };
     let reserved = issuer
         .raw

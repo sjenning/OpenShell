@@ -217,10 +217,8 @@ impl Server {
             .await
             .unwrap();
         let mut inner = inner();
-        inner.client.store =
-            store::credential_store_client::CredentialStoreClient::new(channel.clone());
-        inner.client.refresh =
-            refresh::credential_refresh_client::CredentialRefreshClient::new(channel);
+        inner.client.store = super::super::super::transport::Store::remote(channel.clone());
+        inner.client.refresh = super::super::super::transport::Refresh::remote(channel);
         inner.client.capabilities.supports_pending_reservations = true;
         let source = WatchedIssuer {
             inner: Arc::new(inner),
